@@ -1,0 +1,47 @@
+name: i6X firmware
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    container: archlinux:base
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install C++26 ARM toolchain and build tools
+        run: |
+          pacman -Syu --noconfirm --needed \
+            arm-none-eabi-gcc arm-none-eabi-newlib cmake git ninja python
+          arm-none-eabi-g++ --version
+          cmake --version
+
+      - name: Check out sources
+        uses: actions/checkout@v7
+
+      - name: Configure i6X
+        run: cmake --preset i6x
+
+      - name: Build German and English firmware
+        run: cmake --build --preset i6x --parallel 2
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: coretx-i6x-de-en
+          path: |
+            build-i6x/coretx-i6x-*.bin
+            build-i6x/coretx-i6x-*.hex
+          if-no-files-found: error

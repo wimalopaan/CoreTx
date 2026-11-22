@@ -30,6 +30,10 @@ Jeder Board-Build erzeugt beide Sprachen:
 * i6X: `build-i6x/coretx-i6x-de.bin` und `build-i6x/coretx-i6x-en.bin`.
 * i6S: `build-i6s/coretx-i6s-de.bin` und `build-i6s/coretx-i6s-en.bin`.
 
+GitHub Actions baut i6X bei Pushes, Pull Requests und manuellem Start.
+Unter https://github.com/wimalopaan/CoreTx/actions/workflows/i6x.yml[Actions]
+enthält das Artefakt `coretx-i6x-de-en` die deutschen und englischen `.bin`- und `.hex`-Dateien.
+
 Die zugehörigen `.elf`- und `.hex`-Dateien liegen im selben Verzeichnis.
 Das Image beginnt bei `0x08000000`; diese Befehle flashen *nicht*.
 Alternativ: https://ferroxrc.com/flasher[Ferrox-RC Web Flasher] (WebUSB, Chrome/Edge).
