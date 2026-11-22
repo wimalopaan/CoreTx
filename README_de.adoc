@@ -33,6 +33,8 @@ Jeder Board-Build erzeugt beide Sprachen:
 GitHub Actions baut i6X bei Pushes, Pull Requests und manuellem Start.
 Unter https://github.com/wimalopaan/CoreTx/actions/workflows/i6x.yml[Actions]
 enthält das Artefakt `coretx-i6x-de-en` die deutschen und englischen `.bin`- und `.hex`-Dateien.
+Versionstags wie `v3` veröffentlichen diese Dateien außerdem unter
+https://github.com/wimalopaan/CoreTx/releases[Releases].
 
 Die zugehörigen `.elf`- und `.hex`-Dateien liegen im selben Verzeichnis.
 Das Image beginnt bei `0x08000000`; diese Befehle flashen *nicht*.

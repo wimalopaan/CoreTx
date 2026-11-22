@@ -2,6 +2,10 @@ name: i6X firmware
 
 on:
   push:
+    branches:
+      - '**'
+    tags:
+      - 'v[0-9]*'
   pull_request:
   workflow_dispatch:
 
@@ -45,3 +49,27 @@ jobs:
             build-i6x/coretx-i6x-*.bin
             build-i6x/coretx-i6x-*.hex
           if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: firmware
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware
+        uses: actions/download-artifact@v8
+        with:
+          name: coretx-i6x-de-en
+          path: firmware
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" firmware/*.bin firmware/*.hex \
+            --verify-tag \
+            --title "CoreTX $RELEASE_TAG - i6X DE/EN" \
+            --notes "Experimental firmware for Flysky FS-i6X (STM32F072). German and English BIN/HEX images. Back up the original firmware and EEPROM before flashing. Flash start address: 0x08000000."
