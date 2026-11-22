@@ -1,0 +1,158 @@
+= EdgeTX compatibility and future extensions
+
+== Pinned baseline
+
+Repository: https://github.com/wimalopaan/edgetx
+
+Revision: `90e8f0c55cdee7984eb0e7f415108be94c4232fe`
+
+Compatibility means identical integer results for the documented supported
+configuration subset. It does not mean binary model compatibility or that all
+EdgeTX runtime behavior is reproduced.
+
+The original checkout is not a build dependency. Original function bodies are
+captured in `tests/upstream/mixer.inc`, with provenance and hashes in
+`tests/upstream/manifest.json`. `tests/edgetx_pipeline.cpp` compiles these bodies
+against a minimal host adapter for the supported model subset.
+
+This executes the original input selection, expo, trim routing, mixer ordering
+and output-limit code, not a second hand-written copy of the pipeline.
+Calibration is bypassed because `Controls` is already normalized. The adapter
+connects `evalFlightModeMixes()` directly to `applyLimits()`; the full
+`evalMixes()` wrapper for flight-mode blending and special functions is outside
+the supported subset.
+
+The smaller independent arithmetic reference in `tests/edgetx_reference.cpp`
+remains useful for wide parameter sweeps and the intentionally widened multiply.
+Neither reference may be changed merely to make a failing test pass.
+
+== Function mapping
+
+The portable calculation definitions live in
+`coretx/core/detail/core_impl.hpp`, included automatically by
+`coretx/core/core.hpp`. They are `constexpr`; the upstream snapshots and
+their provenance remain independent of this implementation layout.
+
+[cols="2,2,3",options="header"]
+|===
+| EdgeTX source | CoreTX equivalent | Scope
+| `mixer.cpp`: `evalInputs()`
+| `Controls`, input source resolution
+| Controls arrive calibrated and logically mapped; ADC and stick-mode mapping
+  remain the board/application's responsibility.
+| `mixer.cpp`: `applyExpos()`, `expo()`, `expou()`
+| Input evaluation loop, `expo()`, `positive_expo()`
+| First matching line, side selection, expo, weight, offset, trim assignment.
+| `mixer.cpp`: `evalTrims()`, `getSourceTrimOrigin()`, `getSourceTrimValue()`
+| `trim_origin()`, `mix_trim()`
+| Normal trims, explicit assignment, negative input weight and source inversion.
+  No throttle-idle trim or flight-mode trim inheritance.
+| `mixer.cpp`: `evalFlightModeMixes()`
+| Mixer evaluation loop
+| Source, condition, trim, weight, offset, ordered Add/Multiply/Replace.
+| `mixer.cpp`: `evalMixes()`, `applyLimits()`
+| `apply_output()`, `Frame::mixes`, `Frame::channels`
+| Pre-limit accumulator, asymmetric travel, subtrim, clipping, final reversal.
+  No flight-mode blending, output curve or safety-function overrides.
+| `edgetx_helpers.h`: `divRoundClosest()`
+| `round_divide()`
+| Signed round-to-nearest with ties away from zero and a positive divisor.
+| `edgetx.h`: `calc100to256()`, `calc100toRESX()`, `calc1000toRESX()`
+| Explicit integer conversions
+| Preserve the original order of rounding stages, not just the real-valued formula.
+|===
+
+== Deliberate differences and limits
+
+The bounded source pool has sixteen analog and sixteen switch slots.
+Legacy calibration remains eight physical slots; optional auxiliary input
+modes/calibration use a separate journal. Disabled analog/switch sources
+evaluate to zero; disabled-switch conditions never match, even when inverted.
+Six-position switches use {-1024, -614, -205, 205, 614, 1024}.
+The captured EdgeTX comparisons continue to cover the original supported
+input/mixer/output arithmetic rather than these board-specific decoders.
+
+* Each evaluation starts with empty inputs. If no input line matches, its value
+  is zero and there is no trim assignment; a previous cycle is not retained.
+  The upstream pipeline comparison explicitly demonstrates both stale values
+  after a false switch condition and retained trims after a nonmatching half.
+* Unrepresentable mixer results fail with `arithmetic_overflow` instead of
+  overflowing signed arithmetic. A widened multiplication intermediate is
+  permitted, but floating point is not.
+* Trims use the symmetric range -127..127 instead of EdgeTX's normal -128..128
+  range, allowing one-byte storage. Each trim step still contributes two
+  channel units. Upstream comparisons use the common supported range.
+* Weights, offsets, expo, output travel/subtrim and trims use tagged bounded
+  integer types. Invalid numeric settings are rejected before assignment;
+  model validation still checks indices, enums, ordering and cross-field limits.
+* Sorted, bounded model data is validated rather than assuming a GUI has
+  produced valid indices, enum values and line order.
+* Input/mixer configuration contains only supported fields. There is no
+  best-effort import of an arbitrary EdgeTX model.
+* Heli and Lua are permanently out of scope.
+
+These differences must stay visible when adding a model importer or comparing
+whole evaluation cycles with EdgeTX.
+
+== Checking and capturing the upstream source
+
+The default CTest suite verifies the captured snapshot's hashes. The optional
+`CORETX_EDGETX_SOURCE` CMake path adds a source-tree comparison. It watches
+the complete mixer, helper, data-structure and constant files; even a change
+outside the captured functions therefore requests a review. It does not watch
+every transitive EdgeTX dependency or discover new upstream commits.
+
+[source,sh]
+----
+python3 tools/sync_edgetx_reference.py --check
+python3 tools/sync_edgetx_reference.py --check --source /path/to/edgetx
+----
+
+Only after reviewing an upstream revision, explicitly replace the capture:
+
+[source,sh]
+----
+python3 tools/sync_edgetx_reference.py --write --source /path/to/edgetx
+----
+
+Capture requires a Git checkout with the watched files clean relative to HEAD.
+The tool copies the selected bodies verbatim and records HEAD and file hashes.
+It does not rewrite the adapter, alter the production kernel, fetch commits, or
+automatically declare the new revision behaviorally compatible.
+
+== Porting an upstream change
+
+. Compare the pinned revision against the desired EdgeTX revision in the
+  function groups listed above. Classify each change as supported behavior,
+  an unsupported feature, or an intentional local difference.
+. For a relevant change, first add a concrete reference case using the new
+  EdgeTX behavior. Preserve old cases unless the intended semantics changed.
+  Record the source revision and rationale next to the case.
+. Recapture the original upstream functions with the tool above and review the
+  snapshot diff. Update the adapter only where the new upstream interface
+  requires it, independently of the production implementation.
+. Port the behavior into the existing input/mixer/output stage. Keep integer
+  arithmetic, bounded storage, no blocking, and no runtime polymorphism.
+. Compare intermediate inputs and pre-limit accumulators as well as final
+  channels: output clipping can otherwise hide a wrong mixer result.
+. Update this mapping, supported scope and pinned revision only after the
+  change has been reviewed and the comparisons succeed.
+
+For delay/slow or channel references, introduce explicit runtime state and
+multi-cycle scenarios before porting the implementation. Replaying a timeline
+must give the same result regardless of unrelated GUI/main-loop activity.
+
+The tests compare arithmetic across the normalized control range, including
+negative signs, non-integral scaling, extended/asymmetric limits and subtrim.
+The original pipeline is also compared across complete scenarios, repeated
+cycles and deterministic generated models. The adapter preserves input values
+and trim assignments between cycles so the deliberate unmatched-input
+differences remain observable.
+
+The native pipeline comparisons avoid signed overflow in the original EdgeTX
+multiply intermediate, even when its final result would fit. The production
+kernel's wider, checked arithmetic is tested separately. Delay/slow and channel
+references still require additional adapter state and coverage before support.
+Unused upstream mixer slots are represented as disabled tail lines to avoid
+reading uninitialized upstream UI activation flags after an early terminator.
+These fixture-only details do not change production model evaluation.

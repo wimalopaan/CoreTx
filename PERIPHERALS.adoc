@@ -1,0 +1,264 @@
+= STM32F072: verwendete Peripherie
+
+Belegung der aktuellen Sender-Firmware fuer FS-i6X mit STM32F072xB.
+Die i6S-Abweichungen stehen am Ende. Dies beschreibt die Implementierung,
+nicht alle moeglichen Alternativfunktionen oder freie Anschluesse der Platine.
+
+== Funktionsuebersicht (i6X)
+
+[cols="1,2,3",options="header"]
+|===
+|Peripherie |Aufgabe |Betriebsart
+
+|RCC / HSE / PLL
+|Systemtakt
+|8 MHz HSE, PLL x6; CPU/AHB/APB 48 MHz. HSI dient der Startumschaltung.
+
+|FLASH
+|Programm und Konstanten
+|1 Waitstate, Prefetch. Keine Modell-/Kalibrierungsdaten im internen Flash.
+
+|TIM2
+|Gemeinsame Mikrosekunden-Zeitbasis und AFHDS-Zeitsteuerung
+|32-Bit-Zaehler mit 1 MHz, freilaufend. CC1 setzt RF-Deadlines per Interrupt;
+kein Timer-Ausgangspin.
+
+|ADC1
+|Sticks, Potis, Schalter und Senderakku
+|12 Bit, elf Kanaele; optional 15 beim i6X / 16 beim i6S.
+Kontinuierlicher Scan; ADC-Takt 12 MHz,
+239,5 Takte Sampling pro Kanal. DMA statt ADC-Interrupt.
+
+|TIM1 / PA8
+|Pot-D-Mittenhinweis
+|AF2, TIM1_CH1, aktive Low-PWM: 2200 Hz fuer 10 ms.
+Start/Stopp aus der Main-Loop, kein Interrupt und keine blockierende Wartezeit.
+
+|DMA1
+|ADC und CRSF
+|Kanal 1: ADC; Kanal 6: USART2 RX; Kanal 7: USART2 TX.
+Status/Fehler werden in der Main-Loop abgefragt, keine DMA-Interrupts.
+
+|USART2
+|Externes CRSF-Modul, RC-Ausgabe und Telemetrieempfang
+|8N1, Standard 400000 Baud, modellbezogen einstellbar.
+RX mit zirkulaerem DMA-Puffer, TX mit normalen DMA-Transfers.
+
+|SPI1
+|Internes A7105-Funkmodul
+|Master, Mode 0, 8 Bit, 6 MHz, Software-CS.
+Begrenzte FIFO-Service-Schritte, kein SPI-DMA und kein SPI-Interrupt.
+
+|I2C2
+|Externes 16-KiB-EEPROM: Modelle, Kalibrierung und Einstellungen
+|Standard-Mode, nominell etwa 100 kHz, Open Drain.
+Kooperative Zustandsautomaten; kein I2C-DMA oder I2C-Interrupt.
+
+|GPIO
+|LCD, Tastenmatrix, Funk-Frontend und Modulversorgung
+|Direkte Registerzugriffe; LCD parallel ueber GPIO, nicht ueber SPI.
+
+|EXTI2 / SYSCFG / NVIC
+|A7105 GIO2-Ereignisse
+|PB2, fallende Flanke; EXTI2_3-Interrupt.
+SYSCFG routet EXTI2 und remappt USART2-DMA auf Kanal 6/7.
+
+|IWDG / LSI
+|Unabhaengiger Watchdog
+|LSI /64; nominell 2 s beim Start und etwa 501 ms zur Laufzeit.
+Refresh alle 50 ms ausschliesslich aus der Main-Loop.
+
+|PWR / RTC-Backupregister
+|Watchdog-Resetzaehler
+|BKP0R: Kennung, BKP1R: Zaehler. Kein RTC-Kalenderbetrieb.
+
+|DBGMCU
+|Debug-Unterstuetzung
+|TIM2 und IWDG werden beim Debug-Halt angehalten.
+|===
+
+== GPIO-Belegung (i6X)
+
+Optionale Hardwareerweiterungen mit `CORETX_EXTENDED_INPUTS=ON`:
+i6X analog PC2-PC5, digital PC12/PC15; i6S analog PC1-PC5,
+digital J4 PA13/PA14 und J15 PB6/PB7/PF10. Getrennte Laufzeitschalter
+fuer analoge/digitale Erweiterungen; standardmaessig deaktiviert.
+i6S J4 ersetzt SWD, J15 schliesst externes CRSF aus.
+Analogtypen aller Zusatzbedienelemente sind separat einstellbar.
+Das zusaetzliche Eingangs-Journal verwendet 14784/14912, je 128 Bytes;
+I2C-Transfers bleiben auf 64-Byte-Seiten begrenzt.
+
+[cols="1,2,2",options="header"]
+|===
+|Pins |Funktion |Modus / Zuordnung
+
+|PA0 / PA1 / PA2 / PA3
+|Stickachsen RH / RV / LV / LH
+|Analog, ADC_IN0 / IN1 / IN2 / IN3
+
+|PA4 / PA5
+|Schalter SA / SB
+|Analog, ADC_IN4 / IN5
+
+|PA6 / PA7
+|Potis VRA / VRB
+|Analog, ADC_IN6 / IN7
+
+|PB0 / PB1
+|Schalter SC / SD
+|Analog, ADC_IN8 / IN9
+
+|PC0
+|Sender-Akkuspannung
+|Analog, ADC_IN10
+
+|PD5 / PA15
+|CRSF TX / RX
+|USART2, AF0 / AF1
+
+|PC13
+|Versorgung externes Modul
+|GPIO-Ausgang, aktiv Low
+
+|PE13 / PE14 / PE15
+|A7105 SCK / MISO / MOSI
+|SPI1, AF1
+
+|PE12
+|A7105 CS
+|GPIO-Ausgang, aktiv Low
+
+|PE8 / PE9
+|A7105 RX_EN / TX_EN
+|GPIO-Ausgaenge, aktiv Low; High/High schaltet das Frontend aus
+
+|PE10 / PE11
+|Antennenumschaltung
+|GPIO-Ausgaenge
+
+|PB2
+|A7105 GIO2
+|GPIO-Eingang und EXTI2, fallende Flanke
+
+|PE0..PE7
+|LCD D0..D7
+|GPIO-Ausgaenge, paralleler 8-Bit-Bus
+
+|PB3 / PB4 / PB5
+|LCD RS / RESET / RW
+|GPIO-Ausgaenge
+
+|PD2 / PD7
+|LCD CS / E
+|GPIO-Ausgaenge
+
+|PF3 / PC9
+|LCD Backlight / Brightness
+|GPIO-Ausgaenge; derzeit fest eingeschaltet, kein Timer-PWM
+
+|PC6..PC8
+|Tastenmatrix: drei Spalten
+|Open-Drain-Ausgaenge; jeweils eine Spalte Low
+
+|PD12..PD15
+|Tastenmatrix: vier Zeilen
+|Eingaenge mit Pull-up; Scan per Main-Loop, kein EXTI
+
+|PB10 / PB11
+|EEPROM SCL / SDA
+|I2C2, AF1, Open Drain mit Pull-up
+|===
+
+Die Schalter werden als Analogspannungen eingelesen, nicht als digitale GPIO.
+Die Tastenmatrix liefert UP/DOWN/OK/CANCEL und vier Trimwippen.
+Die ersten acht Bits sind RH +/−, RV +/−, LV +/− und LH +/−;
+die Paarung entspricht der https://github.com/ferrox-rc/ferrox/blob/HEAD/crates/ferrox-core/src/trim.rs[Ferrox-Referenz].
+Mehrere Tasten sind moeglich; mehrdeutige Ghost-Rechtecke werden unterdrueckt.
+Die i6X verwendet ihren mechanischen Hauptschalter:
+kein i6S-Power-Latch auf PB15.
+
+== DMA und Interrupts
+
+[cols="1,1,2",options="header"]
+|===
+|DMA1-Kanal |Richtung |Nutzung
+|1 |ADC1 -> RAM |Zirkulaer, 16-Bit-Transfers, hohe Prioritaet
+|6 |USART2 RX -> RAM |Zirkulaer, 8-Bit-Transfers
+|7 |RAM -> USART2 TX |Normal, 8-Bit-Transfers
+|2..5 |- |Von der i6X-Sender-Firmware nicht verwendet
+|===
+
+Die einzigen regulaeren Peripherie-ISRs bei `CORETX_A7105=ON`
+(i6X und i6S):
+
+[cols="2,2,2,1",options="header"]
+|===
+|ISR |Ausloeser |Aufgabe |NVIC-Prioritaet
+|`TIM2_IRQHandler` |TIM2 CC1 |AFHDS 2A RF-Deadlines; TIM2 teilt die Systemzeitbasis |0
+|`EXTI2_3_IRQHandler` |A7105 GIO2: PB2 / EXTI2, fallende Flanke |AFHDS 2A GIO2-Ereignisse |0
+|===
+
+Gleiche Prioritaet verhindert gegenseitige Unterbrechung und konkurrierende
+SPI-Zugriffe. Die Main-Loop uebergibt Daten ueber geschuetzte Schnittstellen.
+
+SysTick ist abgeschaltet. ADC, UART, DMA, I2C, LCD und Tasten werden ohne eigene
+ISRs bedient. Weitere Timer, SPI2, I2C1, USB, CAN, DAC und Komparatoren werden
+im i6X-Sender nicht verwendet. Das bedeutet nicht, dass ihre Pins frei sind:
+beispielsweise sind PA0..PA7 bereits durch die Analogbedienung belegt.
+
+Mit `CORETX_A7105=OFF` entfallen SPI1 und die RF-ISRs; TIM2 bleibt
+Zeitbasis. Mit `CORETX_CRSF=OFF` entfallen USART2 und DMA-Kanal 6/7.
+Die GPIO-Abschaltung von Funk-Frontend und externer Modulversorgung bleibt aktiv.
+
+== Abweichungen beim i6S-Touch-Sender
+
+[cols="1,2",options="header"]
+|===
+|Funktion |i6S-Belegung
+|CRSF |USART1: TX PB6 AF0, RX PB7 AF0
+|CRSF DMA |TX Kanal 2, RX Kanal 3; kein USART1-DMA-Remapping
+|Externe Modulversorgung |PF6, aktiv High statt PC13 aktiv Low
+|Touch-Bus |I2C1: SCL PB8 AF1, SDA PB9 AF1; Adresse 0x38
+|Touch Reset / Ereignis |PA15 Ausgang / PC12 Eingang, gepollt statt EXTI
+|Power-Latch |PB15 Ausgang, High haelt die Versorgung eingeschaltet
+|Bedienung |Touch statt i6X-Tastenmatrix
+|===
+
+ADC, LCD, EEPROM/I2C2, SPI1/A7105 und TIM2/RF-ISRs werden im Touch-Sender
+mit denselben gemeinsamen Treibern betrieben. Das separate i6S-Messimage ist
+nicht mit dieser Sender-Belegung gleichzusetzen.
+
+== Quellcode
+
+Alle folgenden Pfade sind relativ zum Projektverzeichnis:
+
+* `boards/i6x/hardware.hpp`, `boards/i6s/hardware.hpp`: zentrale Pin- und
+  Peripheriebelegung, einschliesslich ADC-Reihenfolge und erweiterter Eingaenge.
+* `boards/common/hardware.hpp`, `boards/common/board.hpp`: statische Boardauswahl
+  und Bindung der Hardwarebelegung und IO an Treiber.
+* `platform/stm32f072/peripherals.hpp`: STM32-Register-, RCC-, DMA-, EXTI- und
+  AF-Traits; keine Registerkodierungen in den Boarddateien.
+* `platform/stm32f072/platform.hpp`, `platform/stm32f072/clock.hpp`: Takte und TIM2-Zeitbasis.
+* `platform/stm32f072/radio_timer.hpp`, `boards/common/main.cpp`: EXTI/NVIC und RF-ISRs.
+* `platform/stm32f072/adc.hpp`, `platform/stm32f072/crsf.hpp`: ADC, UART und DMA.
+* `platform/stm32f072/a7105.hpp`, `boards/common/radio_board.hpp`: SPI und Funk-GPIO.
+* `platform/stm32f072/lcd.hpp`, `boards/i6x/keys.hpp`: Display und Tastenmatrix.
+* `platform/stm32f072/i2c.hpp`, `platform/stm32f072/eeprom.hpp`: EEPROM-Bus und Transfers.
+* `platform/stm32f072/watchdog.hpp`: IWDG und Backupregister.
+* `boards/i6s/touch.hpp`, `boards/i6s/power.hpp`: i6S-Touch und Power-Latch.
+
+Die LCD-Datenleitungen bleiben ein zusammenhaengender 8-Bit-Port, die
+Tastenmatrix drei zusammenhaengende Spalten und vier zusammenhaengende Zeilen.
+TIM2 bleibt die gemeinsame 32-Bit-
+Zeitbasis fuer Systemuhr und Funk-Compare; die IRQ-Namen in `main.cpp` werden
+gegen die Boardbelegung statisch geprueft. Der Buzzer verwendet immer Kanal 1
+eines PWM-faehigen Timers; TIM6/TIM7 und ungueltige AF-Kombinationen sind
+nicht zulaessig. Die AF-Traits enthalten bewusst nur die unterstuetzten
+Signalbelegungen, keine vollstaendige alternative Boardkonfiguration.
+
+Die Hardwaredateien deklarieren keine Laufzeitkonfiguration. Feature-Schalter,
+der i6S-Ausschluss von PB6/PB7 zwischen CRSF und erweiterten Eingaengen,
+die Rueckgabe von PA13/PA14 an SWD und die Abschaltreihenfolge bleiben unveraendert.
+Taktfrequenzen, Protokollparameter, Touch-/EEPROM-Adressen und Klickdauer gehoeren
+weiterhin zu den jeweiligen Treibern. Feste Chipdienste (RCC-Systemtakt,
+IWDG, UID, Backupregister und Stackpruefung) sind keine Boardzuordnungen.

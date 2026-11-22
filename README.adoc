@@ -1,0 +1,9 @@
+= CoreTX
+
+Experimentelle Senderfirmware für Flysky FS-i6X/i6S.
+Experimental transmitter firmware for Flysky FS-i6X/i6S.
+
+Aktuelle Firmwareversion / Current firmware version: *3*.
+
+* link:README_de.adoc[Deutsch: Schnellstart]
+* link:README_en.adoc[English: getting started]

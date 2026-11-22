@@ -1,0 +1,56 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CORETX_SIMULATOR": "ON",
+        "CORETX_SANITIZERS": "OFF"
+      }
+    },
+    {
+      "name": "sanitize",
+      "inherits": "build",
+      "binaryDir": "${sourceDir}/build-sanitize",
+      "cacheVariables": { "CORETX_SANITIZERS": "ON" }
+    },
+    {
+      "name": "i6x",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-i6x",
+      "toolchainFile": "${sourceDir}/cmake/arm-none-eabi-gcc.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "CORETX_STM32F072": "ON",
+        "CORETX_BOARD": "I6X"
+      }
+    },
+    {
+      "name": "i6s",
+      "inherits": "i6x",
+      "binaryDir": "${sourceDir}/build-i6s",
+      "cacheVariables": { "CORETX_BOARD": "I6S" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "build", "configurePreset": "build" },
+    { "name": "sanitize", "configurePreset": "sanitize" },
+    { "name": "i6x", "configurePreset": "i6x" },
+    { "name": "i6s", "configurePreset": "i6s" }
+  ],
+  "testPresets": [
+    {
+      "name": "build",
+      "configurePreset": "build",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "sanitize",
+      "configurePreset": "sanitize",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

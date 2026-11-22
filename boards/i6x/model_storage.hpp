@@ -1,0 +1,736 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#pragma once
+
+#include "boards/common/controls.hpp"
+#include "boards/common/radio_storage.hpp"
+#include "coretx/ui/translation.hpp"
+#include "platform/stm32f072/crsf.hpp"
+
+#include <memory>
+
+namespace coretx::firmware::i6x {
+
+namespace models {
+inline constexpr std::size_t count = 8;
+inline constexpr std::size_t record_size = 768;
+inline constexpr std::uint8_t format_version = coretx::storage::format_version;
+inline constexpr std::uint16_t base = 2304;
+inline constexpr std::uint16_t directory_base = base + count * 2 * record_size;
+inline constexpr std::uint32_t magic = 0x314C444D;           // MDL1.
+inline constexpr std::uint32_t directory_magic = 0x31524944; // DIR1.
+static_assert((directory_base + 128) <= 16'384);
+// Packed lines keep trim settings and per-function controls in the existing journals.
+static_assert((34 + 2 + (max_input_lines * coretx::storage::detail::packed_model::input_bytes) +
+               (max_mix_lines * coretx::storage::detail::packed_model::mix_bytes) +
+               (channel_count * coretx::storage::detail::packed_model::output_bytes) + 8 +
+               (logical_switch_count * 7) + (multiswitch_page_count * 51) + 1 +
+               (multiswitch_page_count * multiswitch_function_count * sizeof(MultiSwitchControl)) +
+               trim_count + 1) <= (record_size - 4));
+using Record = std::array<std::uint8_t, record_size>;
+using Name = std::array<char, 12>;
+
+struct Data {
+    Model model{diagnostic_model};
+    RadioSettings radio{};
+    Name name{'M', 'o', 'd', 'e', 'l', ' ', '0', '1'};
+    std::uint8_t baud_index{static_cast<std::uint8_t>(crsf_default_baudrate_index)};
+};
+
+struct Info {
+    Name name{};
+    std::uint32_t generation{};
+    std::uint32_t checksum{};
+    std::uint8_t bank{};
+    bool present{};
+    bool valid{};
+};
+
+constexpr void default_name(Name &name, const std::size_t index) noexcept {
+    name = {'M', 'o', 'd', 'e', 'l', ' ', '0', static_cast<char>('1' + index)};
+}
+
+constexpr void four_channel_model(Model &model) noexcept {
+    // Reconstruct in caller-owned storage instead of assigning a full-model stack temporary.
+    std::destroy_at(&model);
+    std::construct_at(&model);
+    model.inputs.resize<4>();
+    model.mixes.resize<4>();
+    for (std::size_t i = 0; i < 4; ++i) {
+        model.inputs[i].destination = static_cast<std::uint8_t>(i);
+        model.inputs[i].source.index = static_cast<std::uint8_t>(i);
+        model.inputs[i].trim = TrimSource::automatic;
+        model.mixes[i].destination = static_cast<std::uint8_t>(i);
+        model.mixes[i].source = {SourceKind::input, static_cast<std::uint8_t>(i), false};
+        model.mixes[i].carry_trim = true;
+    }
+}
+constexpr Model four_channel_model() noexcept {
+    Model model{};
+    four_channel_model(model);
+    return model;
+}
+
+constexpr bool valid_data(const Data &data, const afhds2a::TxId transmitter) noexcept {
+    if (!coretx::validate(data.model) || (data.radio.transmitter != transmitter) ||
+        !afhds2a::valid_id(transmitter.value) || (data.radio.output > RadioOutput::external) ||
+        (data.radio.channel_mode > afhds2a::ChannelMode::extended16) ||
+        (data.baud_index >= crsf_baudrates.size()) ||
+        ((data.radio.receiver.value != 0) && !afhds2a::valid_id(data.radio.receiver.value)) ||
+        (data.name[0] == 0) || (data.name.back() != 0))
+        return false;
+    bool ended{};
+    for (const char ch : data.name) {
+        if (ch == 0)
+            ended = true;
+        else if (ended || (ch < ' ') || (ch > '~'))
+            return false;
+    }
+    return true;
+}
+
+constexpr bool encode(const Data &data, const std::size_t index, const bool present,
+                      const std::uint32_t generation, Record &record) noexcept {
+    if ((index >= count) || !valid_data(data, data.radio.transmitter))
+        return false;
+    record.fill(0xFF);
+    coretx::storage::detail::Writer out{record};
+    out.word(magic);
+    out.field(format_version);
+    out.field(static_cast<std::uint8_t>(index));
+    out.field(present);
+    out.field(data.baud_index);
+    out.word(generation);
+    out.word(data.radio.transmitter.value);
+    out.word(data.radio.receiver.value);
+    out.field(data.radio.output);
+    out.field(data.radio.channel_mode);
+    for (const auto ch : data.name)
+        out.field(static_cast<std::uint8_t>(ch));
+    if (!coretx::storage::detail::transfer_model_counts(out, data.model) ||
+        !coretx::storage::detail::transfer_model_lines(out, data.model) ||
+        !coretx::storage::detail::transfer_model_extension(out, data.model) ||
+        !coretx::storage::detail::transfer_multiswitch(out, data.model) ||
+        !coretx::storage::detail::transfer_dashboard_options(out, data.model) ||
+        !coretx::storage::detail::transfer_multiswitch_controls(out, data.model))
+        return false;
+    coretx::storage::detail::Writer crc{std::span{record}.last(4)};
+    crc.word(coretx::storage::crc32(std::span{record}.first(record_size - 4)));
+    return out.good && (out.position <= (record_size - 4));
+}
+
+// 0: erased, 1: valid, 2: damaged, 3: incompatible version.
+constexpr int decode(const Record &record, const std::size_t index, const afhds2a::TxId transmitter,
+                     Data &data, Info &info) noexcept {
+    if (std::all_of(record.begin(), record.end(), [](auto b) { return b == 0xFF; }))
+        return 0;
+    if ((record[0] == 0) && (((record[1] == 'D') && (record[2] == 'L') && (record[3] == '1')) ||
+                             ((record[1] == 0xFF) && (record[2] == 0xFF) && (record[3] == 0xFF))))
+        return 0; // Uncommitted journal bank.
+    coretx::storage::detail::Reader crc{std::span{record}.last(4)};
+    std::uint32_t checksum{};
+    crc.word(checksum);
+    if (checksum != coretx::storage::crc32(std::span{record}.first(record_size - 4)))
+        return 2;
+    coretx::storage::detail::Reader in{std::span{record}.first(record_size - 4)};
+    std::uint32_t identifier{};
+    std::uint8_t version{}, slot{};
+    in.word(identifier);
+    in.field(version);
+    in.field(slot);
+    if (identifier != magic)
+        return 2;
+    if (version > format_version)
+        return 3;
+    if (version < format_version)
+        return 2;
+    if (slot != index)
+        return 2;
+    in.field(info.present);
+    in.field(data.baud_index);
+    in.word(info.generation);
+    in.word(data.radio.transmitter.value);
+    in.word(data.radio.receiver.value);
+    in.field(data.radio.output);
+    in.field(data.radio.channel_mode);
+    for (auto &ch : data.name)
+        ch = static_cast<char>(in.byte());
+    if (!coretx::storage::detail::transfer_model_counts(in, data.model) ||
+        !coretx::storage::detail::transfer_model_lines(in, data.model) ||
+        !coretx::storage::detail::transfer_model_extension(in, data.model) ||
+        !coretx::storage::detail::transfer_multiswitch(in, data.model) ||
+        !coretx::storage::detail::transfer_dashboard_options(in, data.model) ||
+        !coretx::storage::detail::transfer_multiswitch_controls(in, data.model) ||
+        !valid_data(data, transmitter) ||
+        !std::all_of(record.begin() + static_cast<std::ptrdiff_t>(in.position), record.end() - 4,
+                     [](auto b) { return b == 0xFF; }))
+        return 2;
+    info.name = data.name;
+    info.checksum = checksum;
+    info.valid = true;
+    return 1;
+}
+} // namespace models
+
+template <typename Memory> class ModelStorage {
+    static_assert(Memory::page_size == 64);
+
+  public:
+    constexpr void initialize(const afhds2a::TxId transmitter) noexcept {
+        stage_ = Stage::wait;
+        pending_ = loaded_ = writable_ = dirty_ = changed_ = switch_after_ = directory_write_ =
+            false;
+        trim_save_pending_ = false;
+        directory_valid_ = false;
+        resettable_ = directory_damaged_ = slot_damaged_ = false;
+        reset_verify_ = false;
+        directory_empty_ = scan_empty_ = slot_empty_ = true;
+        active_ = target_ = offset_ = copy_target_ = 0;
+        bank_ = directory_bank_ = 0;
+        directory_generation_ = 0;
+        entries_.fill({});
+        message_ = coretx::ui::tr::models_loading;
+        data_.model = diagnostic_model;
+        data_.radio = {};
+        data_.baud_index = 1;
+        models::default_name(data_.name, 0);
+        transmitter_ = transmitter;
+        data_.radio.transmitter = transmitter;
+    }
+    [[nodiscard]] constexpr models::Data &data() noexcept { return data_; }
+    [[nodiscard]] constexpr const models::Data &data() const noexcept { return data_; }
+    [[nodiscard]] constexpr const auto &entries() const noexcept { return entries_; }
+    [[nodiscard]] constexpr std::size_t active() const noexcept { return active_; }
+    [[nodiscard]] constexpr bool loaded() const noexcept { return loaded_; }
+    [[nodiscard]] constexpr bool editable() const noexcept { return loaded_ && writable_; }
+    [[nodiscard]] constexpr bool can_initialize() const noexcept { return resettable_; }
+    constexpr bool initialize_models(const Model &model, const RadioSettings radio) noexcept {
+        if (!resettable_ || busy())
+            return false;
+        if (!coretx::validate(model)) {
+            message_ = coretx::ui::tr::models_error;
+            return false;
+        }
+        data_.model = model;
+        data_.radio = radio;
+        data_.radio.output = RadioOutput::off;
+        data_.baud_index = static_cast<std::uint8_t>(crsf_default_baudrate_index);
+        models::default_name(data_.name, 0);
+        resettable_ = false;
+        reset_index_ = 0;
+        reset_verify_ = false;
+        stage_ = Stage::reset;
+        message_ = coretx::ui::tr::models_saving;
+        return true;
+    }
+    [[nodiscard]] constexpr bool busy() const noexcept {
+        return (stage_ != Stage::ready) || dirty_;
+    }
+    [[nodiscard]] constexpr bool owns_memory() const noexcept {
+        return (stage_ != Stage::wait) && (stage_ != Stage::ready);
+    }
+    [[nodiscard]] constexpr const char *message() const noexcept { return message_; }
+    [[nodiscard]] constexpr bool take_changed() noexcept {
+        const bool changed = changed_;
+        changed_ = false;
+        return changed;
+    }
+    constexpr bool save() noexcept {
+        if (!loaded_ || !writable_)
+            return false;
+        dirty_ = true;
+        trim_save_pending_ = false;
+        return true;
+    }
+    inline static constexpr DurationUs trim_save_delay{500'000};
+    constexpr bool save_trims(const TimestampUs now) noexcept {
+        if (!save())
+            return false;
+        trim_save_pending_ = true;
+        trim_changed_at_ = now;
+        message_ = coretx::ui::tr::models_saving;
+        return true;
+    }
+    constexpr bool select(const std::size_t index) noexcept {
+        if (!available())
+            return false;
+        if ((index >= models::count) || !entries_[index].present) {
+            message_ = coretx::ui::tr::models_none;
+            return false;
+        }
+        if (index == active_)
+            return true;
+        target_ = index;
+        bank_ = entries_[index].bank;
+        offset_ = 0;
+        stage_ = Stage::select;
+        message_ = coretx::ui::tr::models_loading_one;
+        return true;
+    }
+    constexpr bool create(const bool copy, const std::size_t source = models::count) noexcept {
+        if (!available())
+            return false;
+        if (source > models::count) {
+            message_ = coretx::ui::tr::models_none;
+            return false;
+        }
+        std::size_t index =
+            !copy && (source < models::count) && !entries_[source].present ? source : 0;
+        while ((index < models::count) && entries_[index].present)
+            ++index;
+        if (index == models::count) {
+            message_ = coretx::ui::tr::models_full;
+            return false;
+        }
+        if (copy && (source < models::count) && (source != active_)) {
+            if (!entries_[source].present) {
+                message_ = coretx::ui::tr::models_none;
+                return false;
+            }
+            copy_target_ = index;
+            target_ = source;
+            bank_ = entries_[source].bank;
+            offset_ = 0;
+            stage_ = Stage::copy;
+            return true;
+        }
+        scratch_ = data_;
+        if (!copy) {
+            models::four_channel_model(scratch_.model);
+            scratch_.radio = {transmitter_, {}, RadioOutput::off, afhds2a::ChannelMode::extended16};
+            scratch_.baud_index = 1;
+        }
+        models::default_name(scratch_.name, index);
+        return begin_save(index, true, true);
+    }
+    constexpr bool rename(const std::size_t index, const models::Name &name) noexcept {
+        if (!available())
+            return false;
+        if ((index >= models::count) || !entries_[index].present) {
+            message_ = coretx::ui::tr::models_none;
+            return false;
+        }
+        if (index == active_) {
+            const auto old = data_.name;
+            data_.name = name;
+            if (!models::valid_data(data_, transmitter_)) {
+                data_.name = old;
+                message_ = coretx::ui::tr::models_invalid_name;
+                return false;
+            }
+            return save();
+        }
+        pending_name_ = name;
+        target_ = index;
+        bank_ = entries_[index].bank;
+        offset_ = 0;
+        stage_ = Stage::rename;
+        return true;
+    }
+    constexpr bool erase(const std::size_t index) noexcept {
+        if (!available())
+            return false;
+        if ((index >= models::count) || !entries_[index].present) {
+            message_ = coretx::ui::tr::models_none;
+            return false;
+        }
+        if (index == active_) {
+            message_ = coretx::ui::tr::models_active_delete;
+            return false;
+        }
+        scratch_ = data_;
+        models::default_name(scratch_.name, index);
+        return begin_save(index, false, false);
+    }
+    constexpr void service(const TimestampUs now, const StorageProbeResult probe,
+                           const Model &legacy, const RadioSettings radio) noexcept {
+        if (stage_ == Stage::wait) {
+            if ((probe.state == StorageProbeState::idle) ||
+                (probe.state == StorageProbeState::scanning))
+                return;
+            loaded_ = true;
+            if ((probe.state != StorageProbeState::found) ||
+                (std::popcount(probe.addresses) != 1)) {
+                finish(coretx::ui::tr::models_unique_eeprom, false);
+                return;
+            }
+            Memory::select(static_cast<std::uint8_t>(StorageProbeResult::first_address +
+                                                     std::countr_zero(probe.addresses)));
+            loaded_ = false;
+            if (!coretx::validate(legacy)) {
+                finish(coretx::ui::tr::models_legacy_invalid, false);
+                return;
+            }
+            data_.model = legacy;
+            data_.radio = radio;
+            record_.fill(0xFF);
+            stage_ = Stage::directory_load;
+        }
+        if (stage_ == Stage::ready) {
+            if (!dirty_ || !writable_)
+                return;
+            if (trim_save_pending_ && ((now - trim_changed_at_) < trim_save_delay))
+                return;
+            trim_save_pending_ = false;
+            dirty_ = false;
+            scratch_ = data_;
+            if (!begin_save(active_, true, false))
+                return;
+        }
+        if (pending_) {
+            Memory::service(now);
+            if (Memory::busy())
+                return;
+            pending_ = false;
+            if (Memory::error() != I2cError::none) {
+                finish(error_message(Memory::error()), false);
+                return;
+            }
+            if (stage_ == Stage::reset) {
+                if (!reset_verify_) {
+                    reset_verify_ = true;
+                } else {
+                    if (!std::equal(verify_.begin(), verify_.begin() + 4, record_.begin())) {
+                        finish(coretx::ui::tr::models_error, false);
+                        return;
+                    }
+                    reset_verify_ = false;
+                    ++reset_index_;
+                }
+                if (reset_index_ == ((models::count * 2) + 2)) {
+                    entries_.fill({});
+                    active_ = 0;
+                    directory_bank_ = 0;
+                    directory_generation_ = 0;
+                    directory_damaged_ = slot_damaged_ = false;
+                    writable_ = true;
+                    scratch_ = data_;
+                    if (!begin_save(0, true, true))
+                        return;
+                }
+            } else if (stage_ == Stage::directory_load) {
+                if (!load_directory())
+                    return;
+            } else if ((stage_ == Stage::scan) || (stage_ == Stage::select) ||
+                       (stage_ == Stage::copy) || (stage_ == Stage::rename)) {
+                offset_ += Memory::page_size;
+                if (offset_ == models::record_size) {
+                    offset_ = 0;
+                    if (stage_ != Stage::scan) {
+                        models::Info info{};
+                        if ((models::decode(record_, target_, transmitter_, scratch_, info) != 1) ||
+                            !info.present || (info.checksum != entries_[target_].checksum)) {
+                            finish(coretx::ui::tr::models_error, false);
+                            return;
+                        }
+                        if (stage_ == Stage::copy) {
+                            models::default_name(scratch_.name, copy_target_);
+                            if (!begin_save(copy_target_, true, true))
+                                return;
+                        } else if (stage_ == Stage::rename) {
+                            scratch_.name = pending_name_;
+                            if (!begin_save(target_, true, false))
+                                return;
+                        } else {
+                            switch_after_ = true;
+                            start_directory();
+                        }
+                    } else if (!scan_record())
+                        return;
+                }
+            } else if (stage_ == Stage::invalidate) {
+                offset_ = directory_write_ ? 0 : Memory::page_size;
+                stage_ = directory_write_ ? Stage::commit : Stage::body;
+            } else if (stage_ == Stage::body) {
+                offset_ += Memory::page_size;
+                if (offset_ == transfer_size()) {
+                    offset_ = 0;
+                    stage_ = Stage::commit;
+                }
+            } else if (stage_ == Stage::commit) {
+                offset_ = 0;
+                stage_ = Stage::verify;
+            } else if (stage_ == Stage::verify) {
+                if (!std::equal(verify_.begin(), verify_.end(), record_.begin() + offset_)) {
+                    finish(coretx::ui::tr::models_error, false);
+                    return;
+                }
+                offset_ += Memory::page_size;
+                if (offset_ == transfer_size()) {
+                    offset_ = 0;
+                    if (directory_write_) {
+                        directory_bank_ = bank_;
+                        ++directory_generation_;
+                        if (switch_after_) {
+                            data_ = scratch_;
+                            active_ = target_;
+                            changed_ = true;
+                        }
+                        switch_after_ = false;
+                        directory_write_ = false;
+                        finish(coretx::ui::tr::models_saved, true);
+                        return;
+                    }
+                    models::Info info{};
+                    if (models::decode(record_, target_, transmitter_, scratch_, info) != 1) {
+                        finish(coretx::ui::tr::models_error, false);
+                        return;
+                    }
+                    info.bank = bank_;
+                    entries_[target_] = info;
+                    if (switch_after_)
+                        start_directory();
+                    else {
+                        finish(coretx::ui::tr::models_saved, true);
+                        return;
+                    }
+                }
+            }
+        }
+        const auto address = static_cast<std::uint16_t>(
+            ((stage_ == Stage::directory_load) || directory_write_
+                 ? models::directory_base + bank_ * Memory::page_size
+                 : models::base + (target_ * 2 + bank_) * models::record_size) +
+            offset_);
+        bool started{};
+        if (stage_ == Stage::reset) {
+            const auto reset_address = static_cast<std::uint16_t>(
+                reset_index_ < (models::count * 2)
+                    ? models::base + reset_index_ * models::record_size
+                    : models::directory_base +
+                          (reset_index_ - models::count * 2) * Memory::page_size);
+            const std::array<std::uint8_t, 4> marker{
+                0, static_cast<std::uint8_t>(reset_index_ < (models::count * 2) ? 'D' : 'I'),
+                static_cast<std::uint8_t>(reset_index_ < (models::count * 2) ? 'L' : 'R'), '1'};
+            // EEPROM writes retain their span across cooperative service calls.
+            std::copy(marker.begin(), marker.end(), record_.begin());
+            started = reset_verify_ ? Memory::read(reset_address, std::span{verify_}.first(4))
+                                    : Memory::write(reset_address, std::span{record_}.first(4));
+        } else if ((stage_ == Stage::directory_load) || (stage_ == Stage::scan) ||
+                   (stage_ == Stage::select) || (stage_ == Stage::copy) ||
+                   (stage_ == Stage::rename))
+            started = Memory::read(address, std::span{record_}.subspan(offset_, Memory::page_size));
+        else if (stage_ == Stage::verify)
+            started = Memory::read(address, verify_);
+        else if (stage_ == Stage::invalidate)
+            started = Memory::write(static_cast<std::uint16_t>(address - offset_), invalid_);
+        else if ((stage_ == Stage::body) || (stage_ == Stage::commit))
+            started =
+                Memory::write(address, std::span{record_}.subspan(offset_, Memory::page_size));
+        else
+            return;
+        pending_ = started;
+        if (!started)
+            finish(Memory::error() == I2cError::none ? coretx::ui::tr::bad_request
+                                                     : error_message(Memory::error()),
+                   false);
+    }
+
+  private:
+    enum class Stage : std::uint8_t {
+        wait,
+        directory_load,
+        scan,
+        ready,
+        select,
+        copy,
+        rename,
+        reset,
+        invalidate,
+        body,
+        commit,
+        verify
+    };
+    constexpr bool available() noexcept {
+        if (!loaded_ || !writable_)
+            return false;
+        if (busy() || dirty_) {
+            message_ = coretx::ui::tr::models_busy;
+            return false;
+        }
+        return true;
+    }
+    constexpr void finish(const char *message, const bool writable) noexcept {
+        message_ = message;
+        writable_ = writable;
+        stage_ = Stage::ready;
+        pending_ = false;
+        loaded_ = true;
+        if (!writable) {
+            dirty_ = false;
+            directory_write_ = false;
+            switch_after_ = false;
+        }
+    }
+    constexpr std::size_t transfer_size() const noexcept {
+        return directory_write_ ? Memory::page_size : models::record_size;
+    }
+    constexpr bool begin_save(const std::size_t target, const bool present,
+                              const bool switch_after) noexcept {
+        target_ = target;
+        bank_ = entries_[target].valid ? static_cast<std::uint8_t>(1U - entries_[target].bank) : 0;
+        const auto generation = entries_[target].valid ? entries_[target].generation + 1U : 0U;
+        if (!models::encode(scratch_, target, present, generation, record_)) {
+            finish(coretx::ui::tr::models_error, false);
+            return false;
+        }
+        switch_after_ = switch_after;
+        directory_write_ = false;
+        offset_ = 0;
+        stage_ = Stage::invalidate;
+        message_ = coretx::ui::tr::models_saving;
+        return true;
+    }
+    constexpr void start_directory() noexcept {
+        directory_write_ = true;
+        bank_ = static_cast<std::uint8_t>(1U - directory_bank_);
+        record_.fill(0xFF);
+        coretx::storage::detail::Writer out{std::span{record_}.first(Memory::page_size)};
+        out.word(models::directory_magic);
+        out.field(std::uint8_t{1});
+        out.field(static_cast<std::uint8_t>(target_));
+        out.word(directory_generation_ + 1U);
+        coretx::storage::detail::Writer crc{std::span{record_}.subspan(Memory::page_size - 4, 4)};
+        crc.word(coretx::storage::crc32(std::span{record_}.first(Memory::page_size - 4)));
+        offset_ = 0;
+        stage_ = Stage::invalidate;
+    }
+    constexpr bool load_directory() noexcept {
+        const auto bytes = std::span{record_}.first(Memory::page_size);
+        const bool empty =
+            std::all_of(bytes.begin(), bytes.end(), [](auto b) { return b == 0xFF; }) ||
+            ((bytes[0] == 0) && (((bytes[1] == 'I') && (bytes[2] == 'R') && (bytes[3] == '1')) ||
+                                 ((bytes[1] == 0xFF) && (bytes[2] == 0xFF) && (bytes[3] == 0xFF))));
+        coretx::storage::detail::Reader in{bytes};
+        coretx::storage::detail::Reader crc{bytes.last(4)};
+        std::uint32_t magic{}, generation{}, checksum{};
+        std::uint8_t version{}, index{};
+        in.word(magic);
+        in.field(version);
+        in.field(index);
+        in.word(generation);
+        crc.word(checksum);
+        const bool recognized =
+            !empty && (magic == models::directory_magic) &&
+            (checksum == coretx::storage::crc32(bytes.first(Memory::page_size - 4)));
+        if (recognized && (version != 1)) {
+            finish(coretx::ui::tr::models_directory_version, false);
+            return false;
+        }
+        const bool valid =
+            recognized && (index < models::count) &&
+            std::all_of(bytes.begin() + 10, bytes.end() - 4, [](auto b) { return b == 0xFF; });
+        if (valid) {
+            if (directory_valid_) {
+                const auto delta = generation - directory_generation_;
+                if ((delta == 0x80000000U) || ((delta == 0) && (index != active_))) {
+                    finish(coretx::ui::tr::models_directory_ambiguous, false);
+                    return false;
+                }
+                if ((delta != 0) && (delta < 0x80000000U)) {
+                    active_ = index;
+                    directory_generation_ = generation;
+                    directory_bank_ = bank_;
+                }
+            } else {
+                active_ = index;
+                directory_generation_ = generation;
+                directory_bank_ = bank_;
+            }
+            directory_valid_ = true;
+        }
+        directory_empty_ = directory_empty_ && empty;
+        if (bank_ == 0) {
+            bank_ = 1;
+            return true;
+        }
+        if (!directory_valid_ && !directory_empty_) {
+            directory_damaged_ = true;
+        }
+        bank_ = 0;
+        target_ = 0;
+        stage_ = Stage::scan;
+        return true;
+    }
+    constexpr bool scan_record() noexcept {
+        models::Info info{};
+        const auto status = models::decode(record_, target_, transmitter_, scratch_, info);
+        if (status == 3) {
+            finish(coretx::ui::tr::models_version, false);
+            return false;
+        }
+        scan_empty_ = scan_empty_ && (status == 0);
+        slot_empty_ = slot_empty_ && (status == 0);
+        auto &entry = entries_[target_];
+        bool chosen = (status == 1) && !entry.valid;
+        if ((status == 1) && entry.valid) {
+            const auto delta = info.generation - entry.generation;
+            if ((delta == 0x80000000U) || ((delta == 0) && (info.checksum != entry.checksum))) {
+                finish(coretx::ui::tr::models_ambiguous, false);
+                return false;
+            }
+            chosen = (delta != 0) && (delta < 0x80000000U);
+        }
+        if (chosen) {
+            info.bank = bank_;
+            entry = info;
+            if ((target_ == active_) && info.present)
+                data_ = scratch_;
+        }
+        if (bank_ == 0) {
+            bank_ = 1;
+            return true;
+        }
+        if (!entry.valid && !slot_empty_) {
+            slot_damaged_ = true;
+        }
+        slot_empty_ = true;
+        bank_ = 0;
+        if (++target_ != models::count)
+            return true;
+        if (directory_damaged_ || slot_damaged_) {
+            resettable_ = true;
+            finish(directory_damaged_ ? coretx::ui::tr::models_directory_damaged
+                                      : coretx::ui::tr::models_error,
+                   false);
+            return false;
+        }
+        if (scan_empty_ && directory_empty_) {
+            writable_ = loaded_ = true;
+            scratch_ = data_;
+            models::default_name(scratch_.name, 0);
+            return begin_save(0, true, true);
+        }
+        if (!entries_[active_].valid || !entries_[active_].present) {
+            resettable_ = true;
+            finish(coretx::ui::tr::models_active_missing, false);
+            return false;
+        }
+        changed_ = true;
+        finish(coretx::ui::tr::models_loaded, true);
+        return false;
+    }
+    models::Data data_{};
+    models::Data scratch_{};
+    models::Name pending_name_{};
+    models::Record record_{};
+    std::array<models::Info, models::count> entries_{};
+    std::array<std::uint8_t, Memory::page_size> verify_{};
+    inline static constexpr std::array<std::uint8_t, 1> invalid_{0};
+    afhds2a::TxId transmitter_{};
+    const char *message_{coretx::ui::tr::models_loading};
+    std::uint32_t directory_generation_{};
+    std::size_t active_{}, target_{}, offset_{}, copy_target_{};
+    std::size_t reset_index_{};
+    std::uint8_t bank_{}, directory_bank_{};
+    Stage stage_{Stage::wait};
+    TimestampUs trim_changed_at_{};
+    bool trim_save_pending_{};
+    bool pending_{}, loaded_{}, writable_{}, dirty_{}, changed_{}, switch_after_{},
+        directory_write_{};
+    bool directory_valid_{}, directory_empty_{true}, scan_empty_{true};
+    bool slot_empty_{true};
+    bool resettable_{}, directory_damaged_{}, slot_damaged_{};
+    bool reset_verify_{};
+};
+
+} // namespace coretx::firmware::i6x

@@ -1,0 +1,95 @@
+{
+  "repository": "https://github.com/wimalopaan/edgetx",
+  "revision": "90e8f0c55cdee7984eb0e7f415108be94c4232fe",
+  "snapshot_sha256": "bafdd6ce92130a9820d988f6a608d171b1e1b2b3b81e062042c507c6e18d6007",
+  "functions": [
+    {
+      "path": "radio/src/edgetx_helpers.h",
+      "name": "divRoundClosest",
+      "sha256": "04c1179c526cb4d09c5122d78c015a872df1bd60fb3c691065fe0c0cd2ff7725"
+    },
+    {
+      "path": "radio/src/edgetx.h",
+      "name": "calc100to256",
+      "sha256": "9a5c950e055a75db9c172c78afa28e704cecf3c5ef85a47cd7218ad776371714"
+    },
+    {
+      "path": "radio/src/edgetx.h",
+      "name": "calc100toRESX",
+      "sha256": "df13c367c8ca85aa557dd3c872ae35807847cec6e7155c34f53294e3b48d4086"
+    },
+    {
+      "path": "radio/src/edgetx.h",
+      "name": "calc1000toRESX",
+      "sha256": "c1cd550fb599aa64b5b6e0a0394719c7232f8fdec38340d72ed493520d3705a4"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "expou",
+      "sha256": "4a3f4e4d3af9c3658bf6680698d9745a55beeca3d65c8d64d2397cafb699c9c3"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "expo",
+      "sha256": "894065041c7082dce4175753812b3d22113020f7baada4cb953f614eca07796c"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "applyExpos",
+      "sha256": "099672b2480d6c9e617ab346f2d19a1d28dbdbd29e721ed1394875b03e92e4d6"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "applyLimits",
+      "sha256": "f3a506c87ee9d534d7fa5e2e0399b483f870694c83bf8982becf8651253398d2"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "evalTrims",
+      "sha256": "f066378a78d43a27d1c8f8f8790b742103259254e8ea456a9b80d6d041237563"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "getStickTrimValue",
+      "sha256": "9562c27e54fa6b2a99af87ed74d75d804250671d012baf6f3cf4d9715499844f"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "getSourceTrimOrigin",
+      "sha256": "7ae8405785b96604e70ad1b139b61f75ed1bfa5d0ebdc7f4665af33be3a4c7fc"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "getSourceTrimValue",
+      "sha256": "9361bac0590924f024cdffa68e5b5051f68727a720a7dc6ba799850585226977"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "channel_bit",
+      "sha256": "9d261e88034d458e654432f78195234ab82c9f581636b72707f6786d4a5dee3a"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "channel_dirty",
+      "sha256": "d6b89726d2d1611cba7e9ce4f5f3588291b9ae0f7887c88b9495a980bdcb55ca"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "upper_channels_mask",
+      "sha256": "0042e907143c1ce41c5da16f3c6ea45f3c84f2953953e183c72bf32b029d8bfb"
+    },
+    {
+      "path": "radio/src/mixer.cpp",
+      "name": "evalFlightModeMixes",
+      "sha256": "5103b02fce625e9adb1dfa90bd57002c3de112ae4aeb9337199296baecc14942"
+    }
+  ],
+  "watched_files": {
+    "radio/src/edgetx_helpers.h": "b828c6d74954f8a928e6253cdd9aad8cda0824775f47ad88d33efaed51beaeea",
+    "radio/src/edgetx.h": "025f47e63976c9d84ee94b6f269d00c14f398b91c86d030b057cdf196f4f4ff6",
+    "radio/src/mixer.cpp": "d5baccaf360058e64a90983167815919e7538b319d9b4e46af52ffd96f8869b8",
+    "radio/src/dataconstants.h": "0204a1f04325f58a7df12d2d2e4d56bb0475381a06d9d3c79dd02896f688d497",
+    "radio/src/datastructs_private.h": "64272dd430f945b793a61a0ddd76ca75b33dcb1dafec787249bc03c5083eb25a",
+    "radio/src/myeeprom.h": "97f404fdf391e268e6ca1e1a59cfec1f45a5fc2f37ad8b58b33571f39506d8e2"
+  }
+}

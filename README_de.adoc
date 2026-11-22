@@ -1,0 +1,155 @@
+= CoreTX
+
+*Deutsch* | link:README_en.adoc[English] | link:README.adoc[Sprachauswahl]
+
+Experimentelle C++26-Senderfirmware für Flysky FS-i6X und FS-i6S mit
+STM32F072xB. Bare-Metal, ohne RTOS, Heap oder Fließkommaarithmetik:
+`Inputs -> Mixer -> Outputs` rechnet ganzzahlig.
+Unterstützt Modellverwaltung, Kalibrierung, logische Schalter, internes
+A7105/AFHDS 2A und externes CRSF. Kein vollständiger EdgeTX-Ersatz.
+
+Aktuelle Firmwareversion: *3*. Die Versionsnummer ist ganzzahlig
+und unabhängig vom Speicherformat.
+
+== Bauen und ausprobieren
+
+Im Projektverzeichnis ausführen. Benötigt CMake >= 3.30, Ninja, Python 3
+und einen C++26-Compiler; für Firmware eine passende ARM-GCC-Toolchain.
+Die erste Konfiguration lädt benötigte CMSIS-Quellen herunter.
+
+[source,sh]
+----
+cmake --preset i6x
+cmake --build --preset i6x
+cmake --preset i6s
+cmake --build --preset i6s
+----
+
+Jeder Board-Build erzeugt beide Sprachen:
+
+* i6X: `build-i6x/coretx-i6x-de.bin` und `build-i6x/coretx-i6x-en.bin`.
+* i6S: `build-i6s/coretx-i6s-de.bin` und `build-i6s/coretx-i6s-en.bin`.
+
+Die zugehörigen `.elf`- und `.hex`-Dateien liegen im selben Verzeichnis.
+Das Image beginnt bei `0x08000000`; diese Befehle flashen *nicht*.
+Alternativ: https://ferroxrc.com/flasher[Ferrox-RC Web Flasher] (WebUSB, Chrome/Edge).
+Dort die passende Senderplattform und die eigene CoreTX-`.bin` wählen,
+nicht die angebotenen Ferrox-Releases.
+Vor dem Programmieren Originalfirmware und EEPROM sichern.
+
+Desktop-Simulator (POSIX-System mit SDL3):
+
+[source,sh]
+----
+cmake --preset build -DTRANSLATION=DE
+cmake --build --preset build
+./build/coretx_simulator
+----
+
+`TRANSLATION=EN|DE` wählt die native Sprache; Firmware-Builds enthalten beide.
+`CORETX_A7105`, `CORETX_CRSF`, `CORETX_MULTISWITCH` und
+`CORETX_EXTENDED_INPUTS` sind standardmäßig
+`ON`; zum Abschalten z. B. `cmake --preset i6x -DCORETX_CRSF=OFF`.
+Zusätzliche analoge/digitale Eingänge müssen außerdem im Sender aktiviert
+werden und sind dort zunächst aus.
+
+`CORETX_SECURE_UI` ist standardmäßig `OFF`: UI-Änderungen sind auch bei HF ON erlaubt.
+Mit `cmake --preset i6x -DCORETX_SECURE_UI=ON` werden die HF-OFF-Sperren für
+Modellverwaltung, Kalibrierung, Knüppelmodus, Eingangszuordnung, RF-Format/Baudrate
+und das Umstellen der Trim-Betriebsart aktiviert. Speicher- und Geräteprüfungen bleiben bestehen.
+
+== Im Alltag
+
+Menüpfade unten verwenden die englischen Bezeichnungen.
+Beim i6X öffnet gehaltenes OK das Hauptmenü; UP/DOWN wählt oder ändert,
+kurzes OK öffnet/bestätigt, CANCEL verwirft/geht zurück.
+Beim i6S öffnet gehaltenes, ruhendes Berühren das Menü;
+vertikal wischen wählt/ändert, rechts bestätigt, links bricht ab.
+Im Simulator: Tab wechselt Seiten, Pfeiltasten navigieren, Enter bestätigt,
+Esc bricht ab, Q beendet; Maus/Touch funktioniert ebenfalls.
+
+* `Models`: Modell auswählen, neu anlegen, kopieren, umbenennen oder löschen.
+* `Model setup`: Inputs, Mixer, Outputs, logische Schalter und RF konfigurieren.
+* `Radio setup`: Knüppelmodus, Kalibrierung und Eingangszuordnung.
+* Dashboard: Übersicht/System-Info; i6X UP/DOWN wechselt die Seiten.
+
+Acht Modelle liegen im externen EEPROM. Neues Modell und Modellwechsel
+lassen RF aus; Ausgabe unter `Model setup -> RF setup` ausdrücklich aktivieren.
+Bei `CORETX_SECURE_UI=ON` verlangen Modellverwaltung, Kalibrierung und Änderungen an Eingängen HF OFF.
+Vor dem Ausschalten den Abschluss des Speicherns abwarten.
+Modelle und portable Zustandsdateien verwenden nur Speicherformat 6.
+Alte Modelle und Kalibrierungsdaten müssen neu angelegt werden; vor Updates/Downgrades sichern.
+
+Unter `Radio setup -> Input setup` nur tatsächlich verdrahtete Quellen aktivieren.
+Für die Kalibrierung zuerst Knüppel und Pot-D-Regler zentrieren, dann Knüppel
+und alle aktivierten Pot/Pot-D-Regler über den ganzen Bereich bewegen.
+Die Kalibrierung zeigt sechs Zeilen pro Seite; UP/DOWN wechselt die Seiten.
+Kalibrierung und Eingangszuordnung gelten senderweit.
+
+== Trims
+
+`Model setup -> Trims`: pro i6X-Wippe T1–T4 wahlweise Trim oder momentaner
+Schalter; beide Richtungen sind getrennt über ihre Stellung nutzbar.
+Trimmen und die Tasterfunktion funktionieren auch bei HF ON.
+Nur bei `CORETX_SECURE_UI=ON` verlangt das Umstellen zwischen Trim- und Tasterbetrieb HF OFF.
+Trimwerte gelten pro Modell, folgen dem Knüppelmodus und reichen von −127 bis +127.
+Im Input wählt `Trim` AUTO, OFF oder frei AIL/ELE/THR/RUD;
+im Mischer wird die Übernahme der zugehörigen Trimmung ein-/ausgeschaltet.
+Halten wiederholt; nach der letzten Änderung werden die Werte nach 500 ms gespeichert.
+Auf dem i6S werden die Werte im Menü eingestellt; virtuelle Trimtasten gibt es nicht.
+
+== MultiSwitch
+
+Nur mit `CORETX_MULTISWITCH=ON` und `CORETX_CRSF=ON`; abschalten mit
+`cmake --preset i6x -DCORETX_MULTISWITCH=OFF`. Gespeicherte Einstellungen bleiben erhalten.
+`Model setup -> MultiSwitch` konfiguriert bis zu vier zusätzliche Dashboard-Seiten:
+je Seite `OFF` oder Adresse 0–255, acht Beschriftungen mit je sechs Zeichen
+und Typ Schalter/Taster. Je Funktion sind Output 1–8, eigene/geerbte Adresse
+und physischer/logischer Schalter samt aktiver Stellung in einem Feld einstellbar
+(z. B. `SA^`).
+Die Übersicht zeigt `Output@Adresse`; doppelte aktive Ziele werden abgewiesen.
+Zugeordnete Schalter steuern auch außerhalb der Seite; ihre Kacheln sind nur Anzeige.
+Die aktive Schalterstellung steht unter der Beschriftung der Kachel.
+Seiten-OFF deaktiviert alle Funktionen, auch mit eigener Adresse. Zunächst sind alle Seiten OFF.
+Taster haben einen Doppelrahmen; Beschriftungen werden unter der Funktion in `Text` bearbeitet.
+Kopieren behält die Konfiguration; aktuelle EIN-Zustände werden nicht gespeichert.
+Benötigt ein gültiges, kalibriertes Modell und aktive externe CRSF-Ausgabe;
+MultiSwitch belegt keine RC-Kanäle.
+
+* i6X: kurzes OK startet die Kachelauswahl; UP/DOWN wählt, OK schaltet bzw.
+  hält einen Taster. CANCEL beendet die Auswahl. Gehaltenes OK öffnet das
+  Hauptmenü *nur außerhalb* der Kachelauswahl.
+* i6S: Kachel antippen schaltet, Taster bleibt nur bei Berührung der Kachel EIN.
+  Wischen wechselt Seiten, Tippen auf den Kopf zur nächsten Seite;
+  Fußzeile halten öffnet das Menü. Berührungsverlust, Seitenwechsel oder
+  Menüöffnung lässt einen gehaltenen Taster los.
+
+== CRSF
+
+Zuerst unter `Model setup -> RF setup` externes CRSF und passende Baudrate wählen,
+dann `Radio setup -> CRSF configuration` für Geräte und Parameter öffnen.
+Mit `CORETX_CRSF=ON` aktiviert alternativ `Model setup -> CRSF-Dashboard`
+eine Dashboard-Seite, unabhängig von der MultiSwitch-Option.
+OK startet die Bedienung; langes CANCEL (i6S: lang halten außerhalb der Bearbeitung)
+gibt den Seitenwechsel frei. Geräte-Pings laufen nur bei sichtbarer Geräteliste;
+beim Wiedereintritt werden die Parameter des aktuellen Ordners neu geladen.
+Das Konfigurationsmenü aktiviert RF nicht selbstständig.
+UP/DOWN wählt/ändert, OK öffnet/bestätigt, BACK verwirft/geht zurück;
+gehaltenes BACK verlässt die Konfiguration. Gerätekompatibilität am Prüfstand prüfen.
+
+== Sicherheit und Hardware
+
+* Vor jeder Verdrahtung ausschalten und Stromversorgung trennen.
+* i6S J15 PB6/PB7 teilen sich die CRSF-UART: Zusatzschalter und externes CRSF
+  schließen sich aus. Angelötete Schalter vor CRSF-Nutzung trennen/isolieren;
+  eine deaktivierte Menüoption trennt die Verdrahtung nicht.
+* i6S J4 PA13/PA14 übernimmt SWD-Pins; aktivierte Zusatzeingänge verhindern SWD.
+* Hardwareänderungen und neue Funktionen nicht als am realen Sender validiert
+  ansehen. Boardrevision und Pinbelegung vor Umbauten prüfen.
+* Ohne gültige/frische Eingangswerte werden Kanäle auf 1500 µs zentriert,
+  *auch Gas*: kein sicherer Motor-Aus-Failsafe.
+* Nur mit getrennten Motoren/Propellern erproben. Ein erfolgreicher Build
+  bestätigt weder Flugsicherheit noch zulässigen Sendebetrieb.
+
+Technische Details: link:PERIPHERALS.adoc[Peripherie und Verdrahtung] und
+link:COMPATIBILITY.adoc[Kompatibilität und Grenzen].
