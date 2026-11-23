@@ -2,12 +2,13 @@
 #pragma once
 
 #include "boards/common/hardware.hpp"
+#include "coretx/features.hpp"
 #include "coretx/ui/translation.hpp"
 #include "platform/stm32f072/gpio.hpp"
 
 #include <array>
 
-namespace coretx::firmware::i6x {
+namespace coretx::firmware {
 
 using i2c_registers = stm32f072::I2cTraits<firmware::Hardware::storage.peripheral>;
 
@@ -70,11 +71,19 @@ class ProbeState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
     inline static constexpr auto first_address = StorageProbeResult::first_address;
     inline static constexpr auto last_address = StorageProbeResult::last_address;
     inline static constexpr DurationUs timeout_us{10'000};
-    // I2C2 uses the 48 MHz APB clock: 250 ns prescaled ticks, >= 5 us low/high.
-    inline static constexpr std::uint32_t timing =
+    // Fast mode at 48 MHz, analog filter on, DNF=0; allow up to 300 ns rise/fall.
+    // 41.67 ns prescaled ticks; SCLDEL=416.67 ns, SDADEL=208.33 ns.
+    inline static constexpr std::uint32_t fast_timing =
+        (1U << I2C_TIMINGR_PRESC_Pos) | (9U << I2C_TIMINGR_SCLDEL_Pos) |
+        (5U << I2C_TIMINGR_SDADEL_Pos) | (19U << I2C_TIMINGR_SCLH_Pos) |
+        (36U << I2C_TIMINGR_SCLL_Pos);
+    // Standard mode at 48 MHz: 250 ns prescaled ticks, >= 5 us low/high.
+    inline static constexpr std::uint32_t standard_timing =
         (11U << I2C_TIMINGR_PRESC_Pos) | (3U << I2C_TIMINGR_SCLDEL_Pos) |
         (1U << I2C_TIMINGR_SDADEL_Pos) | (19U << I2C_TIMINGR_SCLH_Pos) |
         (19U << I2C_TIMINGR_SCLL_Pos);
+    inline static constexpr std::uint32_t timing =
+        features::i2c_fast_mode ? fast_timing : standard_timing;
     constexpr void initialize() noexcept {
         namespace reg = stm32f072::registers;
         Io::write(reg::rcc_ahbenr, Io::read(reg::rcc_ahbenr) | gpio_clock(Assignment::storage.scl) |
@@ -219,4 +228,4 @@ template <typename Io, typename Assignment = firmware::Hardware> class StoragePr
     inline static constinit State state_{};
 };
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

@@ -331,13 +331,24 @@ constexpr bool transfer_multiswitch_controls(Archive &archive, Snapshot &model) 
 }
 
 template <typename Archive, typename Snapshot>
-constexpr bool transfer_dashboard_options(Archive &archive, Snapshot &model) noexcept {
-    archive.field(model.crsf_dashboard);
+constexpr bool transfer_dashboard_options(Archive &archive, Snapshot &model,
+                                          const bool sound_options = true) noexcept {
+    // Format 6 has no mute bit, so its feedback remains enabled.
+    auto flags = static_cast<std::uint8_t>((model.crsf_dashboard ? 1U : 0U) |
+                                           (model.multiswitch_beep ? 0U : 2U));
+    archive.field(flags);
+    if constexpr (!std::is_const_v<Snapshot>) {
+        if (flags > (sound_options ? 3U : 1U))
+            archive.reject(archive.position - 1);
+        model.crsf_dashboard = (flags & 1U) != 0;
+        model.multiswitch_beep = (flags & 2U) == 0;
+    }
     return archive.good;
 }
 
 template <typename Archive, typename Snapshot>
-constexpr bool transfer(Archive &archive, Snapshot &state) noexcept {
+constexpr bool transfer(Archive &archive, Snapshot &state,
+                        const bool sound_options = true) noexcept {
     if (!transfer_model_counts(archive, state.model))
         return false;
     for (auto &calibration : state.setup.calibration) {
@@ -352,7 +363,7 @@ constexpr bool transfer(Archive &archive, Snapshot &state) noexcept {
     return transfer_model_lines(archive, state.model) &&
            transfer_model_extension(archive, state.model) &&
            transfer_multiswitch(archive, state.model) &&
-           transfer_dashboard_options(archive, state.model) &&
+           transfer_dashboard_options(archive, state.model, sound_options) &&
            transfer_multiswitch_controls(archive, state.model);
 }
 
@@ -407,7 +418,7 @@ record_crc(const std::span<const std::uint8_t> &record) noexcept {
     if (version > format_version) {
         return {{Error::version, 4}, 0};
     }
-    if (version < format_version)
+    if (version < oldest_format_version)
         return {{Error::obsolete, 4}, 0};
     if ((length > maximum_payload) ||
         !std::all_of(record.begin() + header_size + length, record.end(),
@@ -415,7 +426,7 @@ record_crc(const std::span<const std::uint8_t> &record) noexcept {
         return {{Error::length, 6}, 0};
     }
     Reader payload{record.subspan(header_size, length)};
-    if (!transfer(payload, state)) {
+    if (!transfer(payload, state, version >= 7)) {
         return {{Error::field, header_size + payload.error_offset}, 0};
     }
     if (payload.position != length) {

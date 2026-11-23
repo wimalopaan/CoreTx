@@ -1,9 +1,66 @@
 = CoreTX
 
-Experimentelle Senderfirmware für Flysky FS-i6X/i6S.
-Experimental transmitter firmware for Flysky FS-i6X/i6S.
+link:README_de.adoc[Deutsch]
 
-Aktuelle Firmwareversion / Current firmware version: *3*.
+WARNING: Experimental firmware: disconnect motors/remove propellers before testing.
+Back up the original firmware and external EEPROM separately.
+Neutral channel output is not a guaranteed motor-off failsafe.
 
-* link:README_de.adoc[Deutsch: Schnellstart]
-* link:README_en.adoc[English: getting started]
+Experimental firmware for the *Flysky FS-i6X and FS-i6S*, based on the STM32F072
+with 128 KiB flash and 16 KiB RAM. Current source firmware version: *4*
+(`coretx/version.hpp`).
+
+== Goals
+
+* Use ISO C++26, a header-only core/UI and template metaprogramming for
+  compile-time configuration and validation.
+* Preserve EdgeTX's integer `Inputs -> Mixer -> Outputs` channel processing,
+  including its rounding and limiting behavior.
+* Run a deterministic, cooperative main loop without an RTOS, heap allocation,
+  floating point, exceptions or RTTI.
+* Use CRC-protected binary records in the transmitter's external I2C EEPROM,
+  not YAML or an SD card. Keep model and mixer capacities deliberately small.
+* Provide a compact, familiar 128x64 user interface: keys on the i6X, touch on the i6S.
+* Support internal A7105/AFHDS 2A or an external UART CRSF module; omit unrelated
+  protocols and helicopter-specific functionality.
+
+== Releases, building and flashing
+
+Download board-specific binaries from the
+https://github.com/wimalopaan/CoreTx/releases[GitHub releases].
+If no image is available for your board, build it locally; never substitute an i6X
+image for an i6S image.
+
+Build both menu languages with CMake >= 3.30, Ninja and an ARM GCC toolchain
+supporting C++26:
+
+[source,shell]
+----
+cmake --preset i6x
+cmake --build --preset i6x
+cmake --preset i6s
+cmake --build --preset i6s
+----
+
+Flash the matching `.bin` as a *local firmware file* with the
+https://ferroxrc.com/flasher[Ferrox Web Flasher] in a WebUSB-capable browser.
+Do not select a Ferrox firmware download instead of the CoreTX file.
+See link:BUILDING.adoc#first-flash[first-installation hardware preparation] and
+link:BUILDING.adoc[building, all CMake options and flashing]
+for prerequisites, backups, `dfu-util` and `rdfu`.
+For subsequent updates, hold both horizontal trims inward (i6X) or both rear
+buttons SE/SF (i6S) while switching on to enter ROM DFU without opening the case.
+
+== Extensions
+
+* *External CRSF:* bidirectional UART for channel output, telemetry and module
+  configuration. Only one RF path is active at a time.
+* *MultiSwitch:* CRSF dashboards and SET4 commands for compatible receivers/modules.
+* *Additional inputs:* individually selectable Off, pots and stepped analog
+  switches; additional digital switches can also be disabled or paired into
+  three-position switches where supported.
+  The i6S additionally offers setup-only rear-button/slider navigation.
+
+Wiring, pin ownership, power control and board-specific limitations:
+link:PERIPHERALS.adoc#i6x[FS-i6X] and link:PERIPHERALS.adoc#i6s[FS-i6S].
+See also link:COMPATIBILITY.adoc[EdgeTX compatibility and deliberate restrictions].

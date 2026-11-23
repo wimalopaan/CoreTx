@@ -222,7 +222,7 @@ constexpr bool touch_buttons() {
     if ((service() != Key::none) || (navigation.held() != 1))
         return false;
     sample.x = 70;
-    if ((service() != Key::none) || navigation.held())
+    if ((service() != Key::ok) || navigation.held())
         return false;
     sample.x = 34;
     service();
@@ -235,7 +235,12 @@ constexpr bool touch_buttons() {
     service();
     if (navigation.held() != 1)
         return false;
-    now += 40'000;
+    now += 242'000;
+    (void)navigation.service(TimestampUs{now}, nullptr, true, 2);
+    if (navigation.held() != 1)
+        return false;
+    service();
+    now += fw::i6s::TouchNavigation::release_timeout_us.count();
     (void)navigation.service(TimestampUs{now}, nullptr, true, 2);
     if (navigation.held() || navigation.tapped())
         return false;
@@ -256,7 +261,7 @@ constexpr bool touch_buttons() {
     sample.x = 8;
     service();
     sample.x = 16;
-    if (service() != Key::up)
+    if (service() != Key::ok)
         return false;
     sample.contacts = 0;
     service();
@@ -265,7 +270,7 @@ constexpr bool touch_buttons() {
     sample = {0, 0, 2, 2, 1, fw::i6s::Gesture::none};
     service();
     sample.contacts = 0;
-    return service() == Key::down;
+    return service() == Key::none;
 }
 
 constexpr bool tile_rendering() {
@@ -304,6 +309,35 @@ constexpr bool tile_rendering() {
     const std::array<char, 6> padded{' ', 'H', 0, 'I', ' ', ' '};
     return (fw::multiswitch_label(empty, buffer, 7) == "8") &&
            (fw::multiswitch_label(padded, buffer, 0) == "H I");
+}
+
+constexpr bool fast_touch_swipes() {
+    constexpr std::array gestures{fw::i6s::Gesture::up, fw::i6s::Gesture::down,
+                                  fw::i6s::Gesture::right, fw::i6s::Gesture::left};
+    constexpr std::array keys{Key::up, Key::down, Key::ok, Key::cancel};
+    for (unsigned direction = 0; direction < gestures.size(); ++direction) {
+        for (const bool hardware : {false, true}) {
+            fw::MultiSwitchTouch navigation{};
+            fw::i6s::TouchSample sample{};
+            (void)navigation.service(TimestampUs{0}, &sample, true, 0);
+            std::array<std::uint8_t, 7> packet{0, 0, 1, 0, 64, 0, 128};
+            if (!fw::i6s::decode_touch(packet, sample))
+                return false;
+            sample.gesture = hardware ? gestures[direction] : fw::i6s::Gesture::none;
+            if (navigation.service(TimestampUs{1}, &sample, true, 0) !=
+                (hardware ? keys[direction] : Key::none))
+                return false;
+            packet[3] = 0x40;
+            packet[4] = direction == 0 ? 32 : direction == 1 ? 96 : 64;
+            packet[6] = direction == 2 ? 96 : direction == 3 ? 160 : 128;
+            if (!fw::i6s::decode_touch(packet, sample) ||
+                (navigation.service(TimestampUs{10'000}, &sample, true, 0) !=
+                 (hardware ? Key::none : keys[direction])) ||
+                navigation.tapped())
+                return false;
+        }
+    }
+    return true;
 }
 
 constexpr bool bound_tile_rendering() {
@@ -380,6 +414,7 @@ static_assert(assigned_targets());
 static_assert(all_addresses_and_retirement());
 static_assert(changes_precede_repeats());
 static_assert(touch_buttons());
+static_assert(fast_touch_swipes());
 static_assert(tile_rendering());
 static_assert(bound_tile_rendering());
 } // namespace
@@ -387,7 +422,7 @@ static_assert(bound_tile_rendering());
 int main() {
     if (!wire_vectors() || !pages_and_repeats() || !touch_buttons() || !tile_rendering() ||
         !active_headers() || !assigned_targets() || !all_addresses_and_retirement() ||
-        !changes_precede_repeats() || !bound_tile_rendering()) {
+        !changes_precede_repeats() || !bound_tile_rendering() || !fast_touch_swipes()) {
         std::fputs("MultiSwitch tests failed\n", stderr);
         return 1;
     }

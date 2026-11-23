@@ -1,0 +1,463 @@
+= CoreTX: Peripherie und Hardware-Erweiterungen
+:toc:
+:toclevels: 3
+
+link:PERIPHERALS.adoc[English] | link:README_de.adoc[Projektübersicht] |
+link:BUILDING_de.adoc[Bauen und Flashen]
+
+Beide Senderabschnitte beschreiben die *normale Firmware* jeweils vollständig.
+Grundlage sind `boards/i6x/hardware.hpp`, `boards/i6s/hardware.hpp` und die
+gemeinsamen Treiber in `platform/stm32f072/`.
+Eigenständige Diagnose-/Messabbilder sind nicht die normale Senderanwendung.
+
+WARNING: MCU-Pinnamen sind keine Steckerkontaktnummern und garantieren keine
+zugänglichen Lötpads. Platinenrevision und Schaltung vor dem Löten prüfen.
+Kompatible 3,3-V-Logik und gemeinsame Masse verwenden; keine Modulversorgung
+auf Signalleitungen geben und kein HF-Modul direkt aus einem MCU-GPIO versorgen.
+Vor Umbauten Akku/USB trennen; für alle Tests Motoren abklemmen/Propeller entfernen.
+Neutrale Kanalausgabe ist kein garantierter Motor-Aus-Failsafe.
+
+[[i6x]]
+== Flysky FS-i6X
+
+=== Prozessor, Takte und Ablauf
+
+* STM32F072xB, Cortex-M0, 128 KiB interner Flash, 16 KiB SRAM.
+  Einstellungen werden nicht im internen Flash gespeichert.
+* Start mit HSI, anschließend liefern 8-MHz-HSE und PLL x6 einen
+  CPU-/AHB-/APB-Takt von 48 MHz. Flash mit einem Waitstate und Prefetch.
+* Eine kooperative Main-Loop bedient ADC-Auswertung, Tasten, UI, EEPROM und CRSF.
+  Kein RTOS oder SysTick-Scheduling; Treiber arbeiten in begrenzten Schritten.
+* TIM2 läuft frei als 32-Bit-Zeitbasis mit 1 MHz. CC1 terminiert AFHDS-2A-
+  Ereignisse ohne Ausgabe auf einem Pin.
+* IWDG nutzt LSI/64: nominal 2 s beim Start und etwa 500,8 ms im Betrieb,
+  die Main-Loop füttert ihn alle 50 ms.
+  DBGMCU hält TIM2/IWDG bei einem Debugger-Halt an.
+* RTC-Backupregister speichern Reset-/Fehlerdiagnosen: BKP0 Magic,
+  BKP1 Reset-Zähler, BKP2 Fehler und BKP3 Fehler-Magic.
+  Die RTC wird nicht als Kalenderuhr verwendet.
+
+=== ADC1: serienmäßige und zusätzliche Eingänge
+
+ADC1 arbeitet mit 12 MHz, 12 Bit und 239,5 Abtast- plus 12,5 Wandlungszyklen
+pro Kanal. DMA1-Kanal 1 überträgt 16-Bit-Werte zirkulär mit hoher Priorität.
+Die Anwendung veröffentlicht Bedieneingänge alle 5 ms;
+10 ms ohne ADC-Daten werden als Fehler behandelt.
+
+[cols="1,1,3",options="header"]
+|===
+|GPIO |ADC-Kanal |Serienmäßiger Eingang
+|PA0 |0 |Rechter Knüppel horizontal (RH).
+|PA1 |1 |Rechter Knüppel vertikal (RV).
+|PA2 |2 |Linker Knüppel vertikal (LV).
+|PA3 |3 |Linker Knüppel horizontal (LH).
+|PA4 |4 |SA, Zweistufenschalter.
+|PA5 |5 |SB, Zweistufenschalter.
+|PA6 |6 |VRA.
+|PA7 |7 |VRB.
+|PB0 |8 |SC, Dreistufenschalter.
+|PB1 |9 |SD, Zweistufenschalter.
+|PC0 |10 |Akkuspannungsmessung.
+|===
+
+Der Stickmode bestimmt die logische Knüppelzuordnung. SA bis SD werden als
+Analogspannungen gemessen, nicht als GPIO-Schalter.
+
+[cols="1,1,2",options="header"]
+|===
+|GPIO |ADC-Kanal |Zusätzliche Quelle
+|PC2 |12 |VRC.
+|PC3 |13 |VRD.
+|PC4 |14 |VRE.
+|PC5 |15 |VRF.
+|===
+
+Serienmäßig werden 11 ADC-Kanäle verwendet, mit allen vier Erweiterungen 15.
+Jeder zusätzliche Eingang lässt sich einzeln auf
+*Off / Pot / Pot-D / 2pos / 3pos / 6pos* stellen und kalibrieren.
+Abgeschaltete Eingänge verschwinden aus den Quellenauswahllisten.
+Voraussetzung ist `CORETX_EXTENDED_INPUTS=ON`.
+`CORETX_ADC_COHERENT_SNAPSHOTS=ON` verwendet optional zwei DMA-Hälften für
+kohärente Snapshots; das kostet zusätzliches RAM und ist standardmäßig aus.
+
+=== Zusätzliche Digitalschalter und SWD
+
+[cols="1,1,3",options="header"]
+|===
+|GPIO |Quelle |Konfiguration
+|PC12 |SE |Off, Zweistufenschalter oder Dreistufenschalter mit PC12 und PC15.
+|PC15 |SF |Off oder Zweistufenschalter; bei SE als Dreistufenschalter belegt/ausgeblendet.
+|PA13/PA14 |SWDIO/SWCLK |Bleiben Debug-Pins; nicht für diese Erweiterungsschalter verwendet.
+|===
+
+Die Erweiterungsschalter sind aktiv LOW mit Pull-ups; Kontakte schalten nach GND.
+Jeder ist einzeln abschaltbar. Bei SE als Dreistufenschalter gilt:
+kein Kontakt aktiv = Mitte, SE aktiv = oben, SF aktiv = unten.
+Beide Kontakte gleichzeitig aktiv sind nach 20 ms Entprellung ungültig und
+werden als Eingabefehler gemeldet.
+Für den kombinierten Schalter bleibt nur SE auswählbar.
+Diese GPIO-Eingänge teilen sich keine Pins mit der CRSF-UART.
+
+=== Tastenmatrix und Trimmungen
+
+[cols="2,3",options="header"]
+|===
+|Pins |Verwendung
+|PC6/PC7/PC8 |Drei Open-Drain-Spalten der Matrix.
+|PD12/PD13/PD14/PD15 |Vier Matrixzeilen mit Pull-ups.
+|===
+
+Alle Millisekunde wird eine Spalte abgefragt. Die Matrix umfasst Hoch, Runter,
+OK, Cancel und vier Trimmwippen. Ghost-Rechtecke werden unterdrückt.
+Die Trimmzuordnung folgt dem Stickmode; alternativ können Trimmungen als
+RC-Schaltquellen T1 bis T4 dienen. Es gibt keinen Tasteninterrupt.
+
+=== Internes A7105 / AFHDS 2A
+
+[cols="2,3",options="header"]
+|===
+|Pins/Peripherie |Verwendung
+|SPI1 PE13/PE14/PE15, AF1 |SCK/MISO/MOSI, Mode 0, 8 Bit, 6 MHz.
+|PE12 |A7105-Chip-Select, aktiv LOW.
+|PE8/PE9 |RX_EN/TX_EN, aktiv LOW; beide HIGH schaltet das Frontend ab.
+|PE10/PE11 |Antennenwahl.
+|PB2 |GIO2, fallende Flanke an EXTI2.
+|TIM2 CC1 |HF-Terminierung/Deadline-Interrupt.
+|===
+
+`CORETX_A7105=ON` aktiviert diesen HF-Pfad. Für das interne A7105 ist nur
+AFHDS 2A implementiert; interne und externe HF laufen nicht gleichzeitig.
+
+=== Externes CRSF-Modul
+
+[cols="2,3",options="header"]
+|===
+|Pins/Peripherie |Verwendung
+|USART2 TX: PD5 AF0 |Sender zum Modul.
+|USART2 RX: PA15 AF1 |Modul zum Sender.
+|PC13 |Freigabe der Modulversorgung, aktiv LOW.
+|DMA1-Kanal 7 |UART-TX, normale DMA.
+|DMA1-Kanal 6 |UART-RX, zirkuläre DMA mit 256-Byte-Puffer.
+|SYSCFG |USART2-DMA-Remap auf Kanäle 6/7.
+|===
+
+UART mit 8N1, normalerweise 400000 Baud. Wählbar sind 115200, 400000,
+416666, 420000, 921600, 1870000, 3750000 und 5250000 Baud.
+DMA-Abschluss und RX-Fortschritt werden gepollt; keine USART-/DMA-ISR.
+Kompatible Logikpegel, gemeinsame Masse und geeignete Modulversorgung verwenden;
+PC13 ist ein Steuersignal, keine Angabe zur verfügbaren Versorgungsleistung.
+
+`CORETX_CRSF=ON` aktiviert Kanäle, Telemetrie und Modulkonfiguration.
+*Sendereinstellungen -> Externes Modul* erlaubt/sperrt zusätzlich den externen
+HF-Pfad zur Laufzeit. Vor Änderungen externe HF abschalten.
+`CORETX_MULTISWITCH=ON` ergänzt Dashboards und SET4-Befehle bei einkompiliertem CRSF.
+
+=== LCD und Buzzer
+
+[cols="2,3",options="header"]
+|===
+|Pins/Peripherie |Verwendung
+|PE0 bis PE7 |128x64-LCD, paralleler 8-Bit-Datenbus.
+|PB3/PB4/PB5 |LCD RS/RESET/RW.
+|PD2/PD7 |LCD CS/E.
+|PF3/PC9 |Backlight-/Helligkeits-GPIO, derzeit dauerhaft ein; kein PWM-Timer.
+|PA8 AF2, TIM1 CH1 |Buzzer-PWM, aktiv LOW.
+|===
+
+LCD-Updates sind kooperativ mit 100 us Budget pro Aufruf.
+Der Buzzer erzeugt 10-ms-Töne: 2200 Hz für Bedienung/Trimmung/Rastung und
+1100 Hz für MultiSwitch-Rückmeldung, ohne Timer-ISR.
+
+=== Externes EEPROM
+
+I2C2 nutzt *PB10 SCL / PB11 SDA, AF1, Open Drain*.
+Das 16-KiB-EEPROM hat 64-Byte-Seiten. `CORETX_I2C_FAST_MODE=ON` wählt
+etwa 400 kHz; OFF wählt 100 kHz.
+Der kooperative Treiber erledigt Schreiben und Fertigmeldung ohne I2C-ISR.
+
+Kalibrierung, Sendereinstellungen, acht Modellspeicher und Eingangskonfiguration
+nutzen binäre, CRC-geschützte Datensätze mit Zwei-Bank-/Journal-Wiederherstellung.
+Modelldatensätze belegen 768 Byte pro Bank.
+Die Eingangskonfiguration nutzt Format 3 und liest ältere Formate 1/2.
+Eine DFU-Sicherung des internen Flash enthält dieses EEPROM *nicht*.
+
+=== Versorgung, Interrupts und ungenutzte Ressourcen
+
+Der i6X verwendet seinen mechanischen Einschalter; es gibt weder die
+PB15-Selbsthaltung des i6S noch dessen Zweitasten-Abschaltsteuerung.
+Beim ersten Flashen aus der Werksfirmware die *R53-Pads* vorübergehend für
+ROM-DFU brücken; das dokumentierte Verfahren erfordert kein Auslöten.
+Siehe link:BUILDING_de.adoc#first-flash-i6x[i6X-Erstflash mit Platinenreferenz].
+Nach Installation von CoreTX mit Einschalt-DFU für Updates beide horizontalen
+Trimmungen beim Kaltstart *nach innen* drücken; eine Brücke ist dann nicht nötig.
+Die Matrixkombination ist PC6/PD13 plus PC7/PD14 (Bits 1 und 6), unabhängig vom
+Stickmode. HF bleibt aus; ROM-DFU wird vor dem Watchdog-Start aktiviert.
+Siehe link:BUILDING_de.adoc#dfu-update[Einschalt-DFU und Wiederherstellung].
+
+In der normalen Firmware sind bei aktiviertem A7105 nur
+`TIM2_IRQHandler` und `EXTI2_3_IRQHandler` als Anwendungs-ISRs vorhanden,
+beide mit Priorität 0 (`boards/common/rf_interrupts.cpp`).
+Gemeinsamer HF-Zustand wird über geschützte Übergaben ausgetauscht.
+ADC/DMA, UART, EEPROM, Tasten, LCD und Buzzer werden aus der Main-Loop bedient.
+
+DMA1-Kanal 1 gehört zum ADC, Kanäle 6/7 zu CRSF-RX/TX; Kanäle 2 bis 5 sind frei.
+I2C1 und USART1 bleiben ungenutzt. USB, CAN, DAC, Komparatoren, SPI2 und weitere
+Timer werden von der laufenden Anwendung nicht verwendet.
+USB-ROM-DFU ist eine Bootloaderfunktion, keine USB-Implementierung von CoreTX.
+Ungenutzte Peripherie bedeutet nicht, dass die zugehörigen Pins frei oder zugänglich sind.
+
+`CORETX_A7105=OFF` entfernt SPI-/HF-Interruptnutzung; TIM2 bleibt Zeitbasis.
+`CORETX_CRSF=OFF` entfernt UART-/CRSF-DMA-Nutzung; sichere Modul-Aus-GPIOs bleiben.
+Eine Build-Option macht angeschlossene HF-Hardware nicht im Betrieb umsteckbar.
+
+[[i6s]]
+== Flysky FS-i6S
+
+=== Prozessor, Takte und Ablauf
+
+* STM32F072xB, Cortex-M0, 128 KiB interner Flash, 16 KiB SRAM.
+  Einstellungen werden nicht im internen Flash gespeichert.
+* Start mit HSI, anschließend liefern 8-MHz-HSE und PLL x6 einen
+  CPU-/AHB-/APB-Takt von 48 MHz. Flash mit einem Waitstate und Prefetch.
+* Eine kooperative Main-Loop bedient ADC-Auswertung, Touch, Tasten, UI, EEPROM und CRSF.
+  Kein RTOS oder SysTick-Scheduling; Treiber arbeiten in begrenzten Schritten.
+* TIM2 läuft frei als 32-Bit-Zeitbasis mit 1 MHz. CC1 terminiert AFHDS-2A-
+  Ereignisse ohne Ausgabe auf einem Pin.
+* IWDG nutzt LSI/64: nominal 2 s beim Start und etwa 500,8 ms im Betrieb,
+  die Main-Loop füttert ihn alle 50 ms.
+  DBGMCU hält TIM2/IWDG bei einem Debugger-Halt an.
+* RTC-Backupregister speichern Reset-/Fehlerdiagnosen: BKP0 Magic,
+  BKP1 Reset-Zähler, BKP2 Fehler und BKP3 Fehler-Magic.
+  Die RTC wird nicht als Kalenderuhr verwendet.
+
+=== ADC1: serienmäßige und zusätzliche Eingänge
+
+ADC1 arbeitet mit 12 MHz, 12 Bit und 239,5 Abtast- plus 12,5 Wandlungszyklen
+pro Kanal. DMA1-Kanal 1 überträgt 16-Bit-Werte zirkulär mit hoher Priorität.
+Die Anwendung veröffentlicht Bedieneingänge alle 5 ms;
+10 ms ohne ADC-Daten werden als Fehler behandelt.
+
+[cols="1,1,3",options="header"]
+|===
+|GPIO |ADC-Kanal |Serienmäßiger Eingang
+|PA0 |0 |Rechter Knüppel horizontal (RH).
+|PA1 |1 |Rechter Knüppel vertikal (RV).
+|PA2 |2 |Linker Knüppel vertikal (LV).
+|PA3 |3 |Linker Knüppel horizontal (LH).
+|PA4 |4 |SA, Zweistufenschalter.
+|PA5 |5 |SB, Dreistufenschalter.
+|PA6 |6 |VRA.
+|PA7 |7 |VRB.
+|PB0 |8 |SC, Dreistufenschalter.
+|PB1 |9 |SD, Zweistufenschalter.
+|PC0 |10 |Akkuspannungsmessung.
+|===
+
+Der Stickmode bestimmt die logische Knüppelzuordnung. SA bis SD werden als
+Analogspannungen gemessen, nicht als GPIO-Schalter.
+
+[cols="1,1,2,2",options="header"]
+|===
+|GPIO |ADC-Kanal |Poti-Quelle |Schalterquelle
+|PC1 |11 |VRC |SWI.
+|PC2 |12 |VRD |SWJ.
+|PC3 |13 |VRE |SWK.
+|PC4 |14 |VRF |SWL.
+|PC5 |15 |VRG |SWM.
+|===
+
+Serienmäßig werden 11 ADC-Kanäle verwendet, mit allen fünf Erweiterungen 16.
+Jeder zusätzliche Eingang lässt sich einzeln auf
+*Off / Pot / Pot-D / 2pos / 3pos / 6pos* stellen und kalibrieren.
+Abgeschaltete Eingänge verschwinden aus den Quellenauswahllisten.
+Voraussetzung ist `CORETX_EXTENDED_INPUTS=ON`.
+`CORETX_ADC_COHERENT_SNAPSHOTS` aktiviert in der i6S-Firmware keine Zwei-Hälften-DMA.
+
+=== Zusätzliche Digitalschalter, SWD und Modul-Pinbelegung
+
+[cols="1,1,1,3",options="header"]
+|===
+|Anschluss |GPIO |Quelle |Konfiguration
+|J4 |PA13 |SG |Off, Zweistufenschalter oder Dreistufenschalter mit PA13 und PA14.
+|J4 |PA14 |SH |Off oder Zweistufenschalter; bei SG als Dreistufenschalter belegt/ausgeblendet.
+|J15 |PB6 |SN |Off, Zweistufenschalter oder Dreistufenschalter mit PB6 und PB7; nur ohne externes Modul.
+|J15 |PB7 |SO |Off oder Zweistufenschalter; bei SN als Dreistufenschalter belegt/ausgeblendet; nur ohne externes Modul.
+|J15 |PF10 |SP |Off oder Zweistufenschalter, unabhängig vom externen Modul.
+|===
+
+Alle fünf zusätzlichen GPIOs sind einzeln abschaltbar und verschwinden dann aus
+den Quellenauswahllisten. Eingänge sind aktiv LOW mit Pull-ups, Kontakte schalten
+nach GND. Bei jedem gepaarten Dreistufenschalter gilt:
+kein Kontakt = Mitte, erster Kontakt = oben, zweiter Kontakt = unten.
+Beide Kontakte gleichzeitig sind nach 20 ms Entprellung ungültig und werden als
+Eingabefehler gemeldet. Nur der kombinierte SG beziehungsweise SN bleibt auswählbar.
+
+PA13/PA14 sind normalerweise SWDIO/SWCLK. Die Schalternutzung schränkt Debugging ein.
+Freigabe beider Pins stellt AF0-Debugbetrieb mit Pull-up an PA13 und Pull-down
+an PA14 wieder her.
+
+*Sendereinstellungen -> Externes Modul = Ja* reserviert PB6/PB7 für CRSF;
+gespeicherte SN/SO-Einstellungen bleiben erhalten, sind aber inaktiv.
+Bei *Nein* ist externe HF gesperrt und die Pins können als Schalter dienen.
+Diese Option nicht bei laufender externer HF ändern.
+J4-Schalter und PF10 sind gleichzeitig mit CRSF nutzbar.
+PF10 ist in CoreTX kein PPM-Ausgang.
+
+WARNING: Schalter an PB6/PB7 vor Aktivierung des externen Moduls physisch
+trennen/isolieren. Eine Softwareoption entfernt keinen Kurzschluss einer UART-Leitung.
+
+=== Rücktasten, Setup-Bedienung und LEDs
+
+[cols="2,2,3",options="header"]
+|===
+|Pins |RC-Eingang |Setup-Funktion
+|PA9, hinten links |SE, aktiv LOW |OK; halten für OK-lang.
+|PA10, hinten rechts |SF, aktiv LOW |Zurück; halten zum Verlassen des Menüs.
+|PA6, VRA |Normaler Analogeingang |Vertikale Setup-Navigation.
+|PA7, VRB |Normaler Analogeingang |Setup-Navigation, gleicher Hoch/Runter-Jog wie VRA.
+|PD10/PD11 |Keiner |LEDs unter den Einschalttasten, aktiv HIGH.
+|===
+
+Rücktasten haben 20 ms Entprellung und 800 ms Langdruckschwelle.
+Die Tasten-/Slider-Navigation ist nur im Setup aktiv; im Dashboard bleiben es
+normale RC-Eingänge. Während Setup werden ihre RC-Werte auf dem Stand beim
+Menüeintritt gehalten.
+Slider-Navigation benötigt etwa +/-300/1024 Auslenkung und Rückkehr zur Mitte
+vor dem nächsten Schritt; Halten löst keine Wiederholung aus.
+Beide LEDs leuchten im Dashboard dauerhaft, wechseln im Setup alle 250 ms
+ihren Zustand und gehen beim Abschalten aus.
+Es gibt weder die i6X-Tastenmatrix noch physische Trimmtasten; Trimmungen
+werden in der UI eingestellt.
+
+=== FT6236-Touchcontroller
+
+[cols="2,3",options="header"]
+|===
+|Pins/Peripherie |Verwendung
+|I2C1 PB8/PB9, AF1 |SCL/SDA, Open Drain, FT6236 mit 7-Bit-Adresse `0x38`.
+|PA15 |Touch-Reset, aktiv LOW.
+|PC12 |Touch-INT, aktiv LOW; fallende EXTI12-Flanke wird ohne NVIC/ISR gepollt.
+|===
+
+I2C1 verwendet den 48-MHz-Systemtakt und Timingwert `0x00B01A4B`.
+Der Bus ist unabhängig von der EEPROM-I2C-Geschwindigkeitsoption.
+Beim Start liegt Reset 20 ms an, anschließend folgen 60 ms Wartezeit.
+Die Reset-Vorgaben des Controllers bleiben erhalten; CoreTX überschreibt die
+Register `0xA4`, `0x80` und `0x88` nicht.
+
+Transfers laufen kooperativ mit höchstens 300 us/512 Schritten pro Serviceaufruf.
+Eine neue Interruptflanke startet das Lesen ohne Warten auf das normale Pollintervall.
+Solange ein Kontakt aktiv ist, wird auch bei wieder hohem INT alle 8 ms gelesen;
+im Ruhezustand wird nicht fortlaufend gepollt.
+Ein 300-ms-Timeout für veraltete Kontakte gibt die Geste frei;
+nach Übertragungsfehlern folgt ein neuer Versuch nach 250 ms.
+Im Dashboard wechselt horizontales Wischen die Seite, vertikales Wischen scrollt
+innerhalb einer Seite; MultiSwitch-Elemente unterstützen ihre jeweiligen Tipp-/Halteaktionen.
+
+=== Internes A7105 / AFHDS 2A
+
+[cols="2,3",options="header"]
+|===
+|Pins/Peripherie |Verwendung
+|SPI1 PE13/PE14/PE15, AF1 |SCK/MISO/MOSI, Mode 0, 8 Bit, 6 MHz.
+|PE12 |A7105-Chip-Select, aktiv LOW.
+|PE8/PE9 |RX_EN/TX_EN, aktiv LOW; beide HIGH schaltet das Frontend ab.
+|PE10/PE11 |Antennenwahl.
+|PB2 |GIO2, fallende Flanke an EXTI2.
+|TIM2 CC1 |HF-Terminierung/Deadline-Interrupt.
+|===
+
+`CORETX_A7105=ON` aktiviert diesen HF-Pfad. Für das interne A7105 ist nur
+AFHDS 2A implementiert; interne und externe HF laufen nicht gleichzeitig.
+
+=== Externes CRSF-Modul
+
+[cols="2,3",options="header"]
+|===
+|Pins/Peripherie |Verwendung
+|J15 PB6, USART1 TX AF0 |Sender zum Modul.
+|J15 PB7, USART1 RX AF0 |Modul zum Sender.
+|H1 PF6 |Freigabe der Modulversorgung, aktiv HIGH; Referenz: rechts PF6, links GND.
+|DMA1-Kanal 2 |UART-TX, normale DMA.
+|DMA1-Kanal 3 |UART-RX, zirkuläre DMA mit 256-Byte-Puffer.
+|SYSCFG |Kein USART1-DMA-Remap.
+|===
+
+H1-Ausrichtung und Verdrahtung an der konkreten Platinenrevision prüfen.
+PF6 ist ein Steuersignal, keine Angabe zum verfügbaren Modulversorgungsstrom.
+Kompatible Logikpegel, gemeinsame Masse und geeignete Modulversorgung verwenden.
+UART mit 8N1, normalerweise 400000 Baud. Wählbar sind 115200, 400000,
+416666, 420000, 921600, 1870000, 3750000 und 5250000 Baud.
+DMA-Abschluss und RX-Fortschritt werden gepollt; keine USART-/DMA-ISR.
+
+`CORETX_CRSF=ON` aktiviert Kanäle, Telemetrie und Modulkonfiguration.
+Die Laufzeitoption *Externes Modul* muss zusätzlich auf Ja stehen und reserviert PB6/PB7.
+`CORETX_MULTISWITCH=ON` ergänzt Dashboards und SET4-Befehle bei einkompiliertem CRSF.
+
+=== LCD und Buzzer
+
+[cols="2,3",options="header"]
+|===
+|Pins/Peripherie |Verwendung
+|PE0 bis PE7 |128x64-LCD, paralleler 8-Bit-Datenbus.
+|PB3/PB4/PB5 |LCD RS/RESET/RW.
+|PD2/PD7 |LCD CS/E.
+|PF3/PC9 |Backlight-/Helligkeits-GPIO, derzeit dauerhaft ein; kein PWM-Timer.
+|PA8 AF2, TIM1 CH1 |Buzzer-PWM, aktiv LOW.
+|===
+
+LCD-Updates sind kooperativ mit 100 us Budget pro Aufruf.
+Der Buzzer erzeugt 10-ms-Töne: 2200 Hz für Bedienung/Trimmung/Rastung und
+1100 Hz für MultiSwitch-Rückmeldung, ohne Timer-ISR.
+
+=== Externes EEPROM
+
+I2C2 nutzt *PB10 SCL / PB11 SDA, AF1, Open Drain*.
+Das 16-KiB-EEPROM hat 64-Byte-Seiten. `CORETX_I2C_FAST_MODE=ON` wählt
+etwa 400 kHz; OFF wählt 100 kHz. Touch verwendet das getrennte I2C1.
+Der kooperative Treiber erledigt Schreiben und Fertigmeldung ohne I2C-ISR.
+
+Kalibrierung, Sendereinstellungen, acht Modellspeicher und Eingangskonfiguration
+nutzen binäre, CRC-geschützte Datensätze mit Zwei-Bank-/Journal-Wiederherstellung.
+Modelldatensätze belegen 768 Byte pro Bank.
+Die Eingangskonfiguration nutzt Format 3 und liest ältere Formate 1/2.
+Eine DFU-Sicherung des internen Flash enthält dieses EEPROM *nicht*.
+
+=== Versorgung und sicheres Abschalten
+
+*PB15* ist die aktive HIGH-Selbsthaltung. *PB14* ist das gemeinsame aktive
+LOW-Signal der beiden Einschalttasten.
+Nach dem Start müssen die Tasten zunächst losgelassen werden.
+Beide Tasten 1,5 s halten, um das Abschalten anzufordern.
+CoreTX deaktiviert sofort die HF, beendet ausstehende Speichervorgänge,
+schaltet die LEDs aus und gibt erst dann die Selbsthaltung frei.
+Bei einem Speicherfehler bleibt der Sender eingeschaltet, statt einen
+fehlgeschlagenen Schreibvorgang durch Abschalten abzubrechen.
+USB kann den Sender auch nach Freigabe der Selbsthaltung weiter versorgen.
+Beim ersten Flashen aus der Werksfirmware *R60* vorübergehend brücken und den
+Zweitasten-ROM-Start verwenden; das dokumentierte Verfahren erfordert kein Auslöten.
+Siehe link:BUILDING_de.adoc#first-flash-i6s[i6S-Erstflash mit Platinenreferenz].
+Nach Installation von CoreTX mit Einschalt-DFU beide hinteren Tasten
+*SE/SF (PA9/PA10)* beim Einschalten mit den vorderen Einschalttasten halten.
+ROM-DFU startet dann ohne Brücke vor Watchdog-/EEPROM-Initialisierung;
+PB15 bleibt HIGH und GPIOB wird bei der Übergabe nicht zurückgesetzt.
+Siehe link:BUILDING_de.adoc#dfu-update[Einschalt-DFU und Wiederherstellung].
+
+=== Interrupts und ungenutzte Ressourcen
+
+In der normalen Firmware sind bei aktiviertem A7105 nur
+`TIM2_IRQHandler` und `EXTI2_3_IRQHandler` als Anwendungs-ISRs vorhanden,
+beide mit Priorität 0 (`boards/common/rf_interrupts.cpp`).
+Gemeinsamer HF-Zustand wird über geschützte Übergaben ausgetauscht.
+Touch-EXTI12 ist nur eine gepollte Flankenmerker-Funktion, keine weitere ISR.
+ADC/DMA, UART, Touch-I2C, EEPROM, Tasten, LCD und Buzzer laufen aus der Main-Loop.
+
+DMA1-Kanal 1 gehört zum ADC, Kanal 2 zu CRSF-TX, Kanal 3 zu CRSF-RX;
+Kanäle 4 bis 7 sind ungenutzt. USART2, USB, CAN, DAC, Komparatoren, SPI2 und
+weitere Timer werden von der laufenden Anwendung nicht verwendet.
+USB-ROM-DFU ist eine Bootloaderfunktion, keine USB-Implementierung von CoreTX.
+Ungenutzte Peripherie bedeutet nicht, dass die zugehörigen Pins frei oder zugänglich sind.
+
+`CORETX_A7105=OFF` entfernt SPI-/HF-Interruptnutzung; TIM2 bleibt Zeitbasis.
+`CORETX_CRSF=OFF` entfernt UART-/CRSF-DMA-Nutzung; sichere Modul-Aus-GPIOs bleiben.
+Eine Build-Option macht angeschlossene Hardware nicht im Betrieb umsteckbar.

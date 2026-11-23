@@ -6,7 +6,7 @@
 #include "coretx/ui/translation.hpp"
 #include "platform/stm32f072/eeprom.hpp"
 
-namespace coretx::firmware::i6x {
+namespace coretx::firmware {
 
 enum class CalibrationStorageState : std::uint8_t {
     waiting,
@@ -250,4 +250,4 @@ template <typename Memory> class CalibrationStorage {
     bool has_active_{};
 };
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

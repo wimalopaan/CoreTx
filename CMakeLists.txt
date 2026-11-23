@@ -13,6 +13,7 @@ option(CORETX_CRSF "Enable external CRSF module" ON)
 option(CORETX_MULTISWITCH "Enable MultiSwitch dashboards and SET4 commands (requires CRSF)" ON)
 option(CORETX_EXTENDED_INPUTS "Enable optional i6X/i6S analog and digital hardware inputs" ON)
 option(CORETX_SECURE_UI "Require RF OFF for protected UI operations" OFF)
+option(CORETX_I2C_FAST_MODE "Use 400 kHz Fast mode instead of 100 kHz for storage I2C" ON)
 set(CORETX_EDGETX_SOURCE "" CACHE PATH "Optional EdgeTX checkout to verify against the snapshot")
 set(TRANSLATION "EN" CACHE STRING "Menu language")
 set_property(CACHE TRANSLATION PROPERTY STRINGS EN DE)
@@ -53,6 +54,7 @@ target_compile_definitions(coretx INTERFACE
     CORETX_I6S=$<BOOL:${CORETX_I6S}>
     CORETX_EXTENDED_INPUTS=$<BOOL:${CORETX_EXTENDED_INPUTS}>
     CORETX_SECURE_UI=$<BOOL:${CORETX_SECURE_UI}>
+    CORETX_I2C_FAST_MODE=$<BOOL:${CORETX_I2C_FAST_MODE}>
 )
 if(NOT CORETX_STM32F072 AND TRANSLATION STREQUAL "DE")
     target_compile_definitions(coretx INTERFACE CORETX_LANGUAGE_DE)

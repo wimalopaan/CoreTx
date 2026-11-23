@@ -8,7 +8,7 @@
 
 #include <memory>
 
-namespace coretx::firmware::i6x {
+namespace coretx::firmware {
 
 namespace models {
 inline constexpr std::size_t count = 8;
@@ -141,7 +141,7 @@ constexpr int decode(const Record &record, const std::size_t index, const afhds2
         return 2;
     if (version > format_version)
         return 3;
-    if (version < format_version)
+    if (version < coretx::storage::oldest_format_version)
         return 2;
     if (slot != index)
         return 2;
@@ -158,7 +158,7 @@ constexpr int decode(const Record &record, const std::size_t index, const afhds2
         !coretx::storage::detail::transfer_model_lines(in, data.model) ||
         !coretx::storage::detail::transfer_model_extension(in, data.model) ||
         !coretx::storage::detail::transfer_multiswitch(in, data.model) ||
-        !coretx::storage::detail::transfer_dashboard_options(in, data.model) ||
+        !coretx::storage::detail::transfer_dashboard_options(in, data.model, version >= 7) ||
         !coretx::storage::detail::transfer_multiswitch_controls(in, data.model) ||
         !valid_data(data, transmitter) ||
         !std::all_of(record.begin() + static_cast<std::ptrdiff_t>(in.position), record.end() - 4,
@@ -224,6 +224,9 @@ template <typename Memory> class ModelStorage {
     }
     [[nodiscard]] constexpr bool busy() const noexcept {
         return (stage_ != Stage::ready) || dirty_;
+    }
+    [[nodiscard]] constexpr bool background_loading() const noexcept {
+        return loaded_ && (stage_ == Stage::background_scan);
     }
     [[nodiscard]] constexpr bool owns_memory() const noexcept {
         return (stage_ != Stage::wait) && (stage_ != Stage::ready);
@@ -410,12 +413,12 @@ template <typename Memory> class ModelStorage {
             } else if (stage_ == Stage::directory_load) {
                 if (!load_directory())
                     return;
-            } else if ((stage_ == Stage::scan) || (stage_ == Stage::select) ||
+            } else if (scanning() || (stage_ == Stage::select) ||
                        (stage_ == Stage::copy) || (stage_ == Stage::rename)) {
                 offset_ += Memory::page_size;
                 if (offset_ == models::record_size) {
                     offset_ = 0;
-                    if (stage_ != Stage::scan) {
+                    if (!scanning()) {
                         models::Info info{};
                         if ((models::decode(record_, target_, transmitter_, scratch_, info) != 1) ||
                             !info.present || (info.checksum != entries_[target_].checksum)) {
@@ -505,7 +508,7 @@ template <typename Memory> class ModelStorage {
             std::copy(marker.begin(), marker.end(), record_.begin());
             started = reset_verify_ ? Memory::read(reset_address, std::span{verify_}.first(4))
                                     : Memory::write(reset_address, std::span{record_}.first(4));
-        } else if ((stage_ == Stage::directory_load) || (stage_ == Stage::scan) ||
+        } else if ((stage_ == Stage::directory_load) || scanning() ||
                    (stage_ == Stage::select) || (stage_ == Stage::copy) ||
                    (stage_ == Stage::rename))
             started = Memory::read(address, std::span{record_}.subspan(offset_, Memory::page_size));
@@ -530,6 +533,8 @@ template <typename Memory> class ModelStorage {
         wait,
         directory_load,
         scan,
+        active_scan,
+        background_scan,
         ready,
         select,
         copy,
@@ -540,6 +545,10 @@ template <typename Memory> class ModelStorage {
         commit,
         verify
     };
+    [[nodiscard]] constexpr bool scanning() const noexcept {
+        return (stage_ == Stage::scan) || (stage_ == Stage::active_scan) ||
+               (stage_ == Stage::background_scan);
+    }
     constexpr bool available() noexcept {
         if (!loaded_ || !writable_)
             return false;
@@ -647,8 +656,8 @@ template <typename Memory> class ModelStorage {
             directory_damaged_ = true;
         }
         bank_ = 0;
-        target_ = 0;
-        stage_ = Stage::scan;
+        target_ = directory_damaged_ ? 0 : active_;
+        stage_ = directory_damaged_ ? Stage::scan : Stage::active_scan;
         return true;
     }
     constexpr bool scan_record() noexcept {
@@ -685,7 +694,19 @@ template <typename Memory> class ModelStorage {
         }
         slot_empty_ = true;
         bank_ = 0;
-        if (++target_ != models::count)
+        if (stage_ == Stage::active_scan) {
+            // Resolve both active banks before exposing a model to the RC pipeline.
+            if (entry.valid && entry.present) {
+                loaded_ = writable_ = changed_ = true;
+            }
+            stage_ = Stage::background_scan;
+            target_ = active_ == 0 ? 1 : 0;
+            return true;
+        }
+        ++target_;
+        if ((stage_ == Stage::background_scan) && (target_ == active_))
+            ++target_;
+        if (target_ != models::count)
             return true;
         if (directory_damaged_ || slot_damaged_) {
             resettable_ = true;
@@ -705,7 +726,8 @@ template <typename Memory> class ModelStorage {
             finish(coretx::ui::tr::models_active_missing, false);
             return false;
         }
-        changed_ = true;
+        if (!loaded_)
+            changed_ = true;
         finish(coretx::ui::tr::models_loaded, true);
         return false;
     }
@@ -733,4 +755,4 @@ template <typename Memory> class ModelStorage {
     bool reset_verify_{};
 };
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

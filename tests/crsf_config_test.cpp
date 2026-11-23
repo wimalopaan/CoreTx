@@ -645,6 +645,77 @@ void progressive_menu_and_editing() {
     require(coretx::firmware::crsf_menu_detail::number(buffer, 4'294'967'295LL, 0) == "4294967295",
             "unsigned 32-bit presentation");
 }
+void dashboard_touch_rows_and_transactions() {
+    using coretx::firmware::Key;
+    Link link{};
+    coretx::firmware::CrsfMenu menu{};
+    menu.open(link.client, coretx::TimestampUs{});
+    link.start(3);
+    link.entry(0, folder(0, {1, 2, 3}));
+    for (const std::uint8_t id : {std::uint8_t{1}, std::uint8_t{2}, std::uint8_t{3}}) {
+        link.request(id);
+        link.entry(id, number(0));
+    }
+    const auto now = coretx::TimestampUs{link.clock};
+    menu.tap(70, 56, link.client, now);
+    require(!menu.editing(), "touching footer cannot activate a row");
+    menu.tap(70, 33, link.client, now);
+    require(menu.editing(), "tap directly activates the third visible row");
+    menu.handle(Key::up, link.client, now);
+    menu.tap(10, 4, link.client, now);
+    require(!menu.editing() && !link.client.pending_write(),
+            "visible Back discards an unconfirmed touch edit");
+    menu.tap(70, 23, link.client, now);
+    menu.handle(Key::up, link.client, now);
+    coretx::ui::Framebuffer display{};
+    menu.render(link.client, display, now, false, coretx::ui::tr::crsf_dashboard_touch_help, true);
+    require(display.pixel_at(0, 0) && display.pixel_at(31, 9) && display.pixel_at(96, 0) &&
+                display.pixel_at(127, 9),
+            "touch header exposes Back and edit confirmation hit regions");
+    coretx::ui::Framebuffer buttons{};
+    buttons.rectangle(0, 0, 32, 10);
+    buttons.small_text(2, 2, coretx::ui::tr::touch_back, false);
+    buttons.rectangle(96, 0, 32, 10);
+    buttons.small_text(106, 2, "OK", false);
+    for (int y = 0; y < 10; ++y)
+        for (int x = 0; x < 128; ++x)
+            if ((x < 32) || (x >= 96))
+                require(display.pixel_at(x, y) == buttons.pixel_at(x, y),
+                        "touch button labels contrast with their filled backgrounds");
+    menu.tap(110, 4, link.client, now);
+    require(link.client.pending_write(), "visible OK confirms the selected field");
+    menu.suspend(link.client);
+    require(!menu.visible() && link.client.pending_write(),
+            "horizontal page navigation preserves a queued parameter write");
+    menu.resume(link.client, now);
+    require(menu.visible() && link.client.pending_write(),
+            "returning before completion does not restart discovery or lose a write");
+    menu.suspend(link.client);
+    require(link.client.next_frame(now, link.outbound) == 8 && link.outbound[5] == 2 &&
+                link.outbound[6] == 13,
+            "the tapped row's write is transmitted while off-page");
+    link.reply(0x2D, {2, 13});
+    menu.suspend(link.client);
+    require(link.client.mode() == cfg::Mode::closed,
+            "configuration polling stops after the background transaction finishes");
+    menu.resume(link.client, coretx::TimestampUs{link.clock});
+    menu.tap(10, 4, link.client, coretx::TimestampUs{link.clock});
+    require(menu.visible() && link.client.view_mode() == cfg::Mode::devices,
+            "Back at the parameter root returns to device selection");
+    menu.tap(10, 4, link.client, coretx::TimestampUs{link.clock});
+    require(menu.visible(), "Back at the device root cannot strand the embedded dashboard");
+    link.start(1);
+    link.entry(0, folder(0, {1}));
+    link.request(1);
+    link.entry(1, command(0));
+    menu.tap(70, 13, link.client, coretx::TimestampUs{link.clock});
+    const auto running = link.client.command();
+    menu.suspend(link.client);
+    menu.resume(link.client, coretx::TimestampUs{link.clock});
+    require((running != cfg::Command::idle) && (link.client.command() == running),
+            "page changes do not abandon asynchronous module commands");
+}
+
 void dashboard_header_and_help() {
     Link link{};
     link.start(1);
@@ -676,6 +747,7 @@ void dashboard_header_and_help() {
 } // namespace
 
 int main() {
+    dashboard_touch_rows_and_transactions();
     dashboard_header_and_help();
     dashboard_discovery();
     breadth_first_and_focus();

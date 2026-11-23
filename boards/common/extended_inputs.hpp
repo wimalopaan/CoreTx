@@ -22,10 +22,10 @@ template <typename Io, typename Assignment> class ExtendedInputs {
     ExtendedInputs() = delete;
 
     static void initialize() noexcept {
-        enabled_ = false;
+        enabled_ = 0;
         Sound::initialize();
     }
-    static void configure(const bool enabled) noexcept {
+    static void configure(const std::uint8_t enabled) noexcept {
         if constexpr (features::extended_inputs) {
             if (enabled == enabled_)
                 return;
@@ -38,9 +38,12 @@ template <typename Io, typename Assignment> class ExtendedInputs {
             }();
             Io::write(rcc_ahbenr, Io::read(rcc_ahbenr) | clocks);
             (void)Io::read(rcc_ahbenr);
-            for (const auto input : Assignment::digital_inputs) {
+            for (std::size_t i = 0; i < Assignment::digital_inputs.size(); ++i) {
+                if (((enabled ^ enabled_) & (1U << i)) == 0)
+                    continue;
+                const auto input = Assignment::digital_inputs[i];
                 const auto pin = input.pin();
-                if (enabled)
+                if ((enabled & (1U << i)) != 0)
                     configure_input<Io>(pin);
                 else if constexpr (restores_swd) {
                     if (input.released != DigitalInput::Released::analog) {
@@ -67,21 +70,24 @@ template <typename Io, typename Assignment> class ExtendedInputs {
             if (enabled_)
                 for (std::size_t i = 0; i < Assignment::digital_inputs.size(); ++i) {
                     const auto pin = Assignment::digital_inputs[i].pin();
-                    if ((Io::read(pin.port + offsetof(GPIO_TypeDef, IDR)) & (1U << pin.index)) == 0)
+                    if (((enabled_ & (1U << i)) != 0) &&
+                        ((Io::read(pin.port + offsetof(GPIO_TypeDef, IDR)) & (1U << pin.index)) ==
+                         0))
                         result |= static_cast<std::uint8_t>(1U << i);
                 }
         }
         return result;
     }
-    static void service(const TimestampUs now, const bool click) noexcept {
+    static void service(const TimestampUs now, const bool click,
+                        const ClickTone tone = ClickTone::control) noexcept {
         if (click)
-            Sound::click(now);
+            Sound::click(now, tone);
         Sound::service(now);
     }
     static void stop() noexcept { Sound::stop(); }
 
   private:
-    inline static bool enabled_{};
+    inline static std::uint8_t enabled_{};
 };
 
 } // namespace coretx::firmware

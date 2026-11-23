@@ -26,7 +26,7 @@ template <typename Io, typename Assignment = Hardware> class KeysState {
         "Key columns must be three consecutive pins on one port");
 
   public:
-    constexpr void initialize() noexcept {
+    constexpr void initialize(const TimestampUs now = Io::now_us()) noexcept {
         *this = {};
         using namespace stm32f072::registers;
         Io::write(rcc_ahbenr, Io::read(rcc_ahbenr) | gpio_clocks(Assignment::key_columns) |
@@ -45,7 +45,7 @@ template <typename Io, typename Assignment = Hardware> class KeysState {
                                  static_cast<std::uint8_t>(Assignment::key_rows_first + i)});
         }
         drive<Io>({first_column.port, first_column.index}, false);
-        changed_ = Io::now_us();
+        changed_ = now;
         selected_at_ = changed_;
     }
     [[nodiscard]] constexpr Key service(const TimestampUs now) noexcept {

@@ -3,20 +3,17 @@
 
 #include "boards/common/extended_inputs.hpp"
 #include "boards/common/radio_board.hpp"
+#include "boards/common/rf_modules.hpp"
 #include "boards/common/sender_input.hpp"
 #include "boards/i6s/power.hpp"
+#include "boards/i6s/setup_controls.hpp"
 #include "boards/i6x/keys.hpp"
 #include "platform/stm32f072/adc.hpp"
+#include "platform/stm32f072/bootloader.hpp"
 #include "platform/stm32f072/eeprom.hpp"
 #include "platform/stm32f072/lcd.hpp"
 #include "platform/stm32f072/measurements.hpp"
 #include "platform/stm32f072/watchdog.hpp"
-#if CORETX_A7105
-#include "platform/stm32f072/radio_timer.hpp"
-#endif
-#if CORETX_CRSF
-#include "platform/stm32f072/crsf.hpp"
-#endif
 
 #include <string_view>
 #include <type_traits>
@@ -32,7 +29,7 @@ struct SenderInput {
     using Type = PhysicalInput<i6x::Keys<Io, Assignment>>;
 };
 template <typename Io, typename Assignment> struct SenderInput<Io, Assignment, true> {
-    using Type = TouchInput<i6s::Touch<Io, Assignment>>;
+    using Type = TouchInput<i6s::Touch<Io, Assignment>, i6s::SetupControls<Io, Assignment>>;
 };
 
 template <typename Io, typename Assignment = Hardware> struct SenderBoard {
@@ -42,21 +39,19 @@ template <typename Io, typename Assignment = Hardware> struct SenderBoard {
                   "Buzzer must not reconfigure the system clock");
     inline static constexpr std::string_view name = Hardware::name;
     inline static constexpr bool sb_three_position = Hardware::sb_three_position;
-    using Adc = i6x::Adc<Io, Hardware::sender_inputs, i6x::coherent_adc_snapshots, Hardware>;
+    using Adc = firmware::Adc<Io, Hardware::sender_inputs, coherent_adc_snapshots, Hardware>;
     using Input = typename SenderInput<Io, Hardware>::Type;
     using Inputs = ExtendedInputs<Io, Hardware>;
     using Display = Lcd<Io, Hardware>;
-    using Probe = i6x::StorageProbe<Io, Hardware>;
-    using Memory = i6x::Eeprom<Io, Hardware>;
+    using Probe = StorageProbe<Io, Hardware>;
+    using Memory = Eeprom<Io, Hardware>;
     using Watchdog = firmware::Watchdog<Io>;
-#if CORETX_CRSF
-    using Transmitter = i6x::Crsf<Io, Hardware>;
-#endif
-#if CORETX_A7105
-    using RadioTimer = firmware::RadioTimer<Io, InterruptGuard, Hardware>;
-    using Internal = TimedAfhds2a<A7105<Io, Hardware::radio>, RadioTimer>;
-    using Radio = typename Internal::Radio;
-#endif
+    using Bootloader = stm32f072::Bootloader<Io>;
+    using Modules = RfModules<Io, Hardware>;
+    using ExternalRFModule = typename Modules::ExternalRFModule;
+    using RadioTimer = typename Modules::RadioTimer;
+    using InternalRFModule = typename Modules::InternalRFModule;
+    using Radio = typename Modules::Radio;
 
     static void prepare_power() noexcept {
         // The i6X has a mechanical switch; only the i6S needs the PB15 latch.
@@ -64,24 +59,86 @@ template <typename Io, typename Assignment = Hardware> struct SenderBoard {
             i6s::hold_power<Io, Hardware>();
         }
     }
+    [[nodiscard]] static stm32f072::BootloaderRequest bootloader_request() noexcept {
+        using Request = stm32f072::BootloaderRequest;
+        if (!Bootloader::cold_start())
+            return Request::none;
+        using Buttons = std::conditional_t<Hardware::power_latch, i6s::SetupControls<Io, Hardware>,
+                                           i6x::detail::KeysState<Io, Hardware>>;
+        Buttons buttons{};
+        if constexpr (Hardware::power_latch)
+            buttons.initialize();
+        else
+            buttons.initialize(TimestampUs{});
+        Bootloader::start_sampling();
+        bool sampled = true;
+        for (std::uint32_t ms = 1; ms <= 30; ++ms) {
+            if (!Bootloader::wait_tick()) {
+                sampled = false;
+                break;
+            }
+            const auto now = TimestampUs{ms * 1'000U};
+            if constexpr (Hardware::power_latch)
+                (void)buttons.service(now, false, 0, 0, false);
+            else
+                (void)buttons.service(now);
+        }
+        Bootloader::stop_sampling();
+        if constexpr (!Hardware::power_latch)
+            for (const auto pin : Hardware::key_columns)
+                drive<Io>(pin, true);
+        if (!sampled)
+            return Request::error;
+        if constexpr (Hardware::power_latch)
+            return (buttons.buttons() & buttons.sample_buttons()) == 3 ? Request::requested
+                                                                       : Request::none;
+        else
+            return (buttons.trim_buttons() & Hardware::bootloader_trim_mask) ==
+                           Hardware::bootloader_trim_mask
+                       ? Request::requested
+                       : Request::none;
+    }
+    [[nodiscard]] static bool bootloader_startup() noexcept {
+        const auto request = bootloader_request();
+        if (request == stm32f072::BootloaderRequest::error)
+            return false;
+        if (request == stm32f072::BootloaderRequest::requested) {
+            __disable_irq();
+            if (!Bootloader::prepare())
+                return false;
+            coretx_enter_rom_bootloader(Bootloader::address);
+        }
+        return true;
+    }
     [[nodiscard]] static afhds2a::TxId transmitter_id() noexcept {
         return firmware::transmitter_id<Io>();
     }
     static void power_off() noexcept {
-#if CORETX_A7105
-        RadioTimer::stop();
-#endif
+        if constexpr (!std::is_void_v<RadioTimer>)
+            RadioTimer::stop();
         external_module_off<Io, Hardware>();
         internal_front_end_off<Io, Hardware::radio>();
-#if CORETX_CRSF
-        Transmitter::power_off();
-#endif
-#if CORETX_A7105
-        Radio::power_off();
-#endif
+        if constexpr (!std::is_void_v<ExternalRFModule>)
+            ExternalRFModule::power_off();
+        if constexpr (!std::is_void_v<Radio>)
+            Radio::power_off();
     }
     [[nodiscard]] static stm32f072::HardwareError initialize() noexcept {
-        return Clock<Io, Hardware::clock_timer>::initialize();
+        const auto error = Clock<Io, Hardware::clock_timer>::initialize();
+        if constexpr (Hardware::power_latch)
+            if (error == stm32f072::HardwareError::none)
+                i6s::initialize_power_button<Io, Hardware>();
+        return error;
+    }
+    [[nodiscard]] static bool power_button_pressed() noexcept
+        requires(Hardware::power_latch)
+    {
+        return i6s::power_button_pressed<Io, Hardware>();
+    }
+    static void release_power() noexcept
+        requires(Hardware::power_latch)
+    {
+        i6s::release_power<Io, Hardware>();
     }
     [[nodiscard]] static TimestampUs now_us() noexcept { return Io::now_us(); }
     [[nodiscard]] static bool stack_intact() noexcept {

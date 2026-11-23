@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "boards/common/model_storage.hpp"
 #include "boards/common/multiswitch_ui.hpp"
-#include "boards/i6x/model_storage.hpp"
 #include "coretx/ui/translation.hpp"
 #include "coretx/ui/ui.hpp"
 
-namespace coretx::firmware::i6x {
+namespace coretx::firmware {
 
 enum class MenuCommand : std::uint8_t {
     none,
@@ -18,6 +18,8 @@ enum class MenuCommand : std::uint8_t {
     stick_mode,
     crsf_config,
     input_setup,
+    trim_beep,
+    external_module,
     initialize_models
 };
 enum class MenuScreen : std::uint8_t {
@@ -42,6 +44,8 @@ enum class MenuScreen : std::uint8_t {
 };
 
 namespace menu_detail {
+inline constexpr std::size_t trim_beep_row = features::crsf ? 4U : 3U;
+inline constexpr std::size_t external_module_row = trim_beep_row + 1;
 inline constexpr std::size_t multiswitch_row = 6;
 inline constexpr std::size_t crsf_dashboard_row =
     multiswitch_row + (features::multiswitch ? 1U : 0U);
@@ -155,9 +159,7 @@ constexpr int change_condition(const int choice, const int direction,
                     return next;
             } else if ((position == SwitchPosition::up) || (position == SwitchPosition::down) ||
                        ((position == SwitchPosition::middle) &&
-                        ((index >= physical_switch_count) ||
-                         ((index < auxiliary_count) &&
-                          (diagnostics.input_setup().modes[index] == InputMode::three_position)))))
+                        ((index >= physical_switch_count) || diagnostics.three_position(index))))
                 return next;
         }
     }
@@ -307,12 +309,19 @@ class Menu {
                 return {};
             }
             if (screen_ == MenuScreen::multiswitch) {
-                if (key == Key::ok) {
+                if ((key == Key::ok) && (selected_ == multiswitch_page_count)) {
+                    const bool old = model.multiswitch_beep;
+                    model.multiswitch_beep = !old;
+                    if (!store.save()) {
+                        model.multiswitch_beep = old;
+                        notice_ = store.message();
+                    }
+                } else if (key == Key::ok) {
                     multiswitch_slot_ = static_cast<std::uint8_t>(selected_);
                     selected_ = 0;
                     screen_ = MenuScreen::multiswitch_page;
                 } else
-                    move_selection(key, multiswitch_page_count);
+                    move_selection(key, row_count());
                 return {};
             }
             auto &page = model.multiswitch[multiswitch_slot_];
@@ -552,8 +561,11 @@ class Menu {
                 if (draft_value_ > maximum)
                     draft_value_ = minimum;
                 if ((screen_ == MenuScreen::rf) && (selected_ == 0)) {
-                    for (int i = 0; (i < 3) && (((draft_value_ == 1) && !features::a7105) ||
-                                                ((draft_value_ == 2) && !features::crsf));
+                    for (int i = 0;
+                         (i < 3) &&
+                         (((draft_value_ == 1) && !features::a7105) ||
+                          ((draft_value_ == 2) &&
+                           (!features::crsf || !diagnostics.input_setup().external_module)));
                          ++i)
                         draft_value_ = (draft_value_ + (key == Key::up ? 1 : 2)) % 3;
                 }
@@ -633,6 +645,15 @@ class Menu {
                     return MenuCommand::calibrate;
                 if (selected_ == 2)
                     return MenuCommand::input_setup;
+                if (selected_ == menu_detail::trim_beep_row)
+                    return MenuCommand::trim_beep;
+                if (selected_ == menu_detail::external_module_row) {
+                    if (output == RadioOutput::external) {
+                        notice_ = coretx::ui::tr::menu_rf_off;
+                        break;
+                    }
+                    return MenuCommand::external_module;
+                }
                 draft_value_ = static_cast<int>(diagnostics.stick_mode());
                 editing_ = true;
                 break;
@@ -642,7 +663,7 @@ class Menu {
                     draft_value_ = 0;
                     return MenuCommand::output;
                 }
-                if (!store.editable() || store.busy()) {
+                if (!store.editable() || (store.busy() && !store.background_loading())) {
                     notice_ = store.message();
                     break;
                 }
@@ -831,10 +852,12 @@ class Menu {
                                 ? tr::menu_crsf_dashboard
                                 : labels[i];
                 } else if (screen_ == MenuScreen::radio)
-                    label = i == 0   ? tr::menu_stick_mode
-                            : i == 1 ? tr::menu_calibration
-                            : i == 2 ? tr::menu_input_setup
-                                     : tr::menu_crsf_config;
+                    label = i == 0                                  ? tr::menu_stick_mode
+                            : i == 1                                ? tr::menu_calibration
+                            : i == 2                                ? tr::menu_input_setup
+                            : i == menu_detail::trim_beep_row       ? tr::menu_trim_beep
+                            : i == menu_detail::external_module_row ? tr::menu_external_module
+                                                                    : tr::menu_crsf_config;
                 else if (screen_ == MenuScreen::model_actions) {
                     constexpr std::array labels{tr::menu_select, tr::menu_new,
                                                 tr::menu_copy,   tr::menu_rename,
@@ -860,6 +883,15 @@ class Menu {
                     display.number(
                         127, y,
                         editing_ ? draft_value_ : static_cast<int>(diagnostics.stick_mode()), ink);
+                if ((screen_ == MenuScreen::radio) && ((i == menu_detail::trim_beep_row) ||
+                                                       (i == menu_detail::external_module_row))) {
+                    const std::string_view value = (i == menu_detail::trim_beep_row
+                                                        ? diagnostics.input_setup().trim_beep
+                                                        : diagnostics.input_setup().external_module)
+                                                       ? tr::menu_yes
+                                                       : tr::menu_no;
+                    display.text(127 - static_cast<int>(value.size()) * 6, y, value, ink);
+                }
                 if ((screen_ == MenuScreen::setup) && features::crsf &&
                     (i == menu_detail::crsf_dashboard_row)) {
                     const std::string_view value =
@@ -919,6 +951,13 @@ class Menu {
             const bool ink = i != selected_;
             menu_detail::row(display, i, selected_, first, "");
             if (screen_ == MenuScreen::multiswitch) {
+                if (i == multiswitch_page_count) {
+                    display.text(1, y, tr::menu_multiswitch_beep, ink);
+                    const std::string_view text =
+                        model.multiswitch_beep ? tr::menu_yes : tr::menu_no;
+                    display.text(128 - static_cast<int>(text.size()) * 6, y, text, ink);
+                    continue;
+                }
                 display.text(1, y, "MS", ink);
                 display.number(30, y, static_cast<std::int32_t>(i + 1), ink);
                 const auto address = model.multiswitch[i].address;
@@ -1095,11 +1134,11 @@ class Menu {
     }
     [[nodiscard]] constexpr std::size_t row_count() const noexcept {
         return screen_ == MenuScreen::root          ? 3
-               : screen_ == MenuScreen::radio       ? features::crsf ? 4 : 3
+               : screen_ == MenuScreen::radio       ? menu_detail::external_module_row + 1
                : screen_ == MenuScreen::models      ? models::count
                : screen_ == MenuScreen::setup       ? menu_detail::trim_row + 1
                : screen_ == MenuScreen::trims       ? features::i6s ? trim_count : (trim_count * 2)
-               : screen_ == MenuScreen::multiswitch ? multiswitch_page_count
+               : screen_ == MenuScreen::multiswitch ? multiswitch_page_count + 1
                : screen_ == MenuScreen::multiswitch_page   ? 9
                : screen_ == MenuScreen::multiswitch_button ? 5
                : (screen_ == MenuScreen::dashboard_channels) ||
@@ -1295,4 +1334,4 @@ class Menu {
     bool can_initialize_{};
 };
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

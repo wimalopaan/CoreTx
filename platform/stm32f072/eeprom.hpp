@@ -5,7 +5,7 @@
 
 #include <span>
 
-namespace coretx::firmware::i6x {
+namespace coretx::firmware {
 
 namespace detail {
 
@@ -160,6 +160,17 @@ class EepromState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
         return (stage_ != Stage::complete) && (stage_ != Stage::failed);
     }
     [[nodiscard]] constexpr I2cError error() const noexcept { return error_; }
+#ifdef CORETX_I6S_TOUCH_TRACE
+    struct Trace {
+        std::uint16_t address;
+        std::size_t position;
+        std::uint8_t stage;
+        std::uint32_t status;
+    };
+    [[nodiscard]] constexpr Trace trace() const noexcept {
+        return {address_, position_, static_cast<std::uint8_t>(trace_stage_), trace_status_};
+    }
+#endif
 
   private:
     enum class Stage : std::uint8_t {
@@ -194,6 +205,10 @@ class EepromState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
         return true;
     }
     constexpr void fail(const I2cError error) noexcept {
+#ifdef CORETX_I6S_TOUCH_TRACE
+        trace_stage_ = stage_;
+        trace_status_ = Io::read(isr);
+#endif
         Bus::reset();
         Io::write(Registers::cr1, 0);
         error_ = error;
@@ -211,6 +226,10 @@ class EepromState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
     I2cError error_{};
     bool writing_{};
     bool nack_{};
+#ifdef CORETX_I6S_TOUCH_TRACE
+    Stage trace_stage_{};
+    std::uint32_t trace_status_{};
+#endif
 };
 
 } // namespace detail
@@ -235,9 +254,12 @@ template <typename Io, typename Assignment = firmware::Hardware> class Eeprom {
     static void service(const TimestampUs now) noexcept { state_.service(now); }
     [[nodiscard]] static bool busy() noexcept { return state_.busy(); }
     [[nodiscard]] static I2cError error() noexcept { return state_.error(); }
+#ifdef CORETX_I6S_TOUCH_TRACE
+    [[nodiscard]] static auto trace() noexcept { return state_.trace(); }
+#endif
 
   private:
     inline static constinit State state_{};
 };
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

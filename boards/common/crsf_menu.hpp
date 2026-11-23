@@ -86,12 +86,16 @@ class CrsfMenu {
     void suspend(coretx::crsf::config::Client &client) noexcept {
         visible_ = false;
         finish_edit(client);
-        client.suspend();
+        if ((client.mode() != coretx::crsf::config::Mode::closed) && !client.pending_write() &&
+            (client.command() == coretx::crsf::config::Command::idle) &&
+            (client.error() == coretx::crsf::config::Error::none))
+            client.suspend();
     }
     void resume(coretx::crsf::config::Client &client, const TimestampUs now) noexcept {
         visible_ = true;
         notice_ = nullptr;
-        client.resume(now);
+        if (client.mode() == coretx::crsf::config::Mode::closed)
+            client.resume(now);
         client.window(first_);
     }
     void open(coretx::crsf::config::Client &client, const TimestampUs now) noexcept {
@@ -210,9 +214,42 @@ class CrsfMenu {
             first_ = static_cast<std::uint8_t>(selected_ - cfg::visible_rows + 1);
         client.window(first_);
     }
+    void tap(const std::uint8_t x, const std::uint8_t y, coretx::crsf::config::Client &client,
+             const TimestampUs now) noexcept {
+        namespace cfg = coretx::crsf::config;
+        namespace md = crsf_menu_detail;
+        if (!visible_)
+            return;
+        if (y < md::list_y - 1) {
+            if (x < 32) {
+                if (client.error() == cfg::Error::link) {
+                    finish_edit(client);
+                    client.open(now);
+                    selected_ = first_ = 0;
+                    notice_ = nullptr;
+                } else if ((client.view_mode() == cfg::Mode::parameters) ||
+                           (client.command() != cfg::Command::idle))
+                    handle(Key::cancel, client, now);
+            } else if ((x >= 96) && (editing_ || (client.command() == cfg::Command::confirmation)))
+                handle(editing_ ? Key::ok_long : Key::ok, client, now);
+            return;
+        }
+        const auto row = static_cast<std::size_t>((y - (md::list_y - 1)) / md::row_height);
+        const auto index = first_ + row;
+        const auto count =
+            client.view_mode() == cfg::Mode::parameters ? client.count() : client.device_count();
+        if ((row >= cfg::visible_rows) || (index >= count))
+            return;
+        if ((editing_ || client.pending_write() || (client.command() != cfg::Command::idle)) &&
+            (index != selected_))
+            return;
+        selected_ = static_cast<std::uint8_t>(index);
+        handle(Key::ok, client, now);
+    }
     void render(const coretx::crsf::config::Client &client, coretx::ui::Framebuffer &display,
                 const TimestampUs now, const bool active_header = false,
-                const char *const navigation_help = nullptr) const noexcept {
+                const char *const navigation_help = nullptr,
+                const bool touch = false) const noexcept {
         namespace md = crsf_menu_detail;
         namespace cfg = coretx::crsf::config;
         display.compact(false);
@@ -226,8 +263,19 @@ class CrsfMenu {
                                : std::string_view{md::tr::crsf_devices};
         if (active_header)
             display.rectangle(0, md::header_y, coretx::ui::Framebuffer::width, md::row_height);
-        display.text(0, md::header_y, md::head(title, 19), !active_header);
-        if (client.busy()) {
+        const bool confirm =
+            touch && (editing_ || (client.command() == cfg::Command::confirmation));
+        if (touch) {
+            display.rectangle(0, 0, 32, 10);
+            display.small_text(2, 2, md::tr::touch_back, false);
+            if (confirm) {
+                display.rectangle(96, 0, 32, 10);
+                display.small_text(106, 2, "OK", false);
+            }
+        }
+        display.text(touch ? 35 : 0, md::header_y, md::head(title, touch ? (confirm ? 9 : 14) : 19),
+                     !active_header);
+        if (client.busy() && !confirm) {
             constexpr std::string_view spinner = "|/-\\";
             display.text(122, md::header_y, {spinner.data() + (now.count() / 200'000U) % 4U, 1},
                          !active_header);
@@ -304,6 +352,7 @@ class CrsfMenu {
                           : client.command() == cfg::Command::confirmation ? md::tr::crsf_confirm
                           : client.command() != cfg::Command::idle         ? md::tr::crsf_running
                           : client.pending_write()                         ? md::tr::saving
+                          : touch && navigation_help != nullptr            ? navigation_help
                           : editing_ && (editing_type_ == coretx::crsf::CRSF_STRING)
                               ? md::tr::menu_name_help
                           : editing_                   ? md::tr::menu_help

@@ -579,7 +579,7 @@ struct Eeprom {
     unsigned writes{};
     bool pending{};
     bool fail{};
-    fw::i6x::I2cError error{};
+    fw::I2cError error{};
     constexpr Eeprom() { bytes.fill(0xFF); }
 };
 template <typename Test> struct Memory {
@@ -620,7 +620,7 @@ template <typename Test> struct Memory {
     static void service(coretx::TimestampUs) {
         auto &e = Test::context;
         if (e.fail) {
-            e.error = fw::i6x::I2cError::bus;
+            e.error = fw::I2cError::bus;
         } else if (!e.input.empty()) {
             std::copy_n(e.bytes.begin() + e.address, e.input.size(), e.input.begin());
         } else {
@@ -630,7 +630,7 @@ template <typename Test> struct Memory {
     }
 };
 template <typename Journal> void journal_step(Journal &journal) {
-    journal.service(coretx::TimestampUs{}, {fw::i6x::StorageProbeState::found, {}, 1});
+    journal.service(coretx::TimestampUs{}, {fw::StorageProbeState::found, {}, 1});
 }
 template <typename Journal> void journal_run(Journal &journal) {
     for (unsigned i = 0; i < 12; ++i)

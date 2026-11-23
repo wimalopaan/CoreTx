@@ -10,9 +10,7 @@
 
 #include <span>
 
-namespace coretx::firmware::i6x {
-
-using coretx::firmware::Key;
+namespace coretx::firmware {
 
 using StockSamples = std::array<std::uint16_t, stock_inputs.size()>;
 inline constexpr std::array<std::size_t, 6> analog_indices{0, 1, 2, 3, 6, 7};
@@ -115,7 +113,8 @@ class Diagnostics {
                 auxiliary_enabled(i) && (mode >= InputMode::two_position)
                     ? decode_input_switch(auxiliary_samples_[i], mode, input_setup_.calibration[i])
                     : SwitchPosition::middle;
-            debounce(i, position, now);
+            if (!setup_frozen_ || ((i != 4) && (i != 5)))
+                debounce(i, position, now);
             if (auxiliary_enabled(i) && (mode == InputMode::pot_detent) &&
                 (phase_ == CalibrationPhase::idle) && calibrated_) {
                 const auto value =
@@ -296,6 +295,25 @@ class Diagnostics {
     }
     [[nodiscard]] constexpr const StockSamples &samples() const noexcept { return samples_; }
     [[nodiscard]] constexpr const RawControls &raw() const noexcept { return raw_; }
+    constexpr void observe_setup_controls(const bool active, const std::uint8_t buttons) noexcept {
+        // The i6S has no trim keys: their first two reserved source slots hold stock SE/SF.
+        bool changed = !rear_inputs_ || (setup_frozen_ != active);
+        rear_inputs_ = true;
+        if (!setup_frozen_ || !active) {
+            for (std::size_t i = 0; i < 2; ++i) {
+                const auto position =
+                    (buttons & (1U << i)) != 0 ? SwitchPosition::down : SwitchPosition::up;
+                auto &previous = raw_.switches[physical_switch_count + i];
+                changed = changed || (previous != position);
+                previous = position;
+            }
+        }
+        if (active && !setup_frozen_)
+            frozen_pots_ = {auxiliary_samples_[4], auxiliary_samples_[5]};
+        setup_frozen_ = active;
+        if (changed)
+            refresh(true);
+    }
     [[nodiscard]] constexpr const ControlSetup &setup() const noexcept { return setup_; }
     [[nodiscard]] constexpr const ControlSetup &draft() const noexcept { return draft_; }
     [[nodiscard]] constexpr const PreparedControls &prepared() const noexcept { return prepared_; }
@@ -352,6 +370,7 @@ class Diagnostics {
         output_valid_ = false;
     }
     [[nodiscard]] constexpr const InputSetup &input_setup() const noexcept { return input_setup_; }
+    constexpr void set_trim_beep(const bool enabled) noexcept { input_setup_.trim_beep = enabled; }
     [[nodiscard]] constexpr std::size_t calibration_pages() const noexcept {
         std::size_t count = 4;
         for (std::size_t i = 0; i < auxiliary_count; ++i)
@@ -381,7 +400,28 @@ class Diagnostics {
                                (index < (6 + extra_adc_count)));
     }
     [[nodiscard]] constexpr bool extra_digital_enabled() const noexcept {
-        return features::extended_inputs && input_setup_.extra_digital;
+        return digital_pin_mask() != 0;
+    }
+    [[nodiscard]] constexpr bool digital_enabled(const std::size_t index) const noexcept {
+        return features::extended_inputs && (index < (features::i6s ? digital_input_count : 2U)) &&
+               (input_setup_.digital_mode(index) != DigitalInputMode::off) &&
+               (!features::i6s || (index < 2) || (index == 4) || !input_setup_.external_module);
+    }
+    [[nodiscard]] constexpr std::uint8_t digital_pin_mask() const noexcept {
+        std::uint8_t result{};
+        for (std::size_t i = 0; i < digital_input_count; ++i)
+            if (digital_enabled(i))
+                result |= static_cast<std::uint8_t>(
+                    (input_setup_.digital_mode(i) == DigitalInputMode::three_position ? 3U : 1U)
+                    << i);
+        return result;
+    }
+    [[nodiscard]] constexpr bool three_position(const std::size_t index) const noexcept {
+        return index < auxiliary_count ? input_setup_.modes[index] == InputMode::three_position
+               : index < physical_switch_count
+                   ? input_setup_.digital_mode(index - auxiliary_count) ==
+                         DigitalInputMode::three_position
+                   : false;
     }
     [[nodiscard]] constexpr bool set_input_setup(const InputSetup &setup,
                                                  const bool custom = true) noexcept {
@@ -401,13 +441,22 @@ class Diagnostics {
         return true;
     }
     constexpr void observe_digital(const std::uint8_t pressed, const TimestampUs now) noexcept {
-        if (!extra_digital_enabled())
-            return;
         bool changed{};
         for (std::size_t i = 0; i < (features::i6s ? 5U : 2U); ++i) {
             const auto previous = raw_.switches[11 + i];
-            const auto position =
-                (pressed & (1U << i)) != 0 ? SwitchPosition::down : SwitchPosition::up;
+            auto position = SwitchPosition::middle;
+            if (digital_enabled(i)) {
+                if (input_setup_.digital_mode(i) == DigitalInputMode::three_position) {
+                    const auto contacts = (pressed >> i) & 3U;
+                    // Contradictory contacts go through the normal control-error/RF inhibit path.
+                    position = contacts == 0   ? SwitchPosition::middle
+                               : contacts == 1 ? SwitchPosition::up
+                               : contacts == 2 ? SwitchPosition::down
+                                               : static_cast<SwitchPosition>(8);
+                } else
+                    position =
+                        (pressed & (1U << i)) != 0 ? SwitchPosition::down : SwitchPosition::up;
+            }
             debounce(11 + i, position, now, digital_initialized_);
             changed = changed || (previous != raw_.switches[11 + i]);
         }
@@ -442,8 +491,11 @@ class Diagnostics {
         for (std::size_t i = 0; i < auxiliary_count; ++i)
             if (auxiliary_enabled(i) && (input_setup_.modes[i] >= InputMode::two_position))
                 result |= static_cast<std::uint16_t>(1U << i);
-        if (extra_digital_enabled())
-            result |= features::i6s ? std::uint16_t{0xF800} : std::uint16_t{0x1800};
+        for (std::size_t i = 0; i < digital_input_count; ++i)
+            if (digital_enabled(i))
+                result |= 1U << (auxiliary_count + i);
+        if (rear_inputs_)
+            result |= 3U << physical_switch_count;
         if constexpr (!features::i6s)
             result |= std::uint32_t{model_->trim_switches} << physical_switch_count;
         return result;
@@ -512,15 +564,18 @@ class Diagnostics {
             const auto mode = input_setup_.modes[i];
             if (is_pot(mode)) {
                 controls.analogs[index] =
-                    decode_pot(auxiliary_samples_[i], input_setup_.calibration[i],
-                               mode == InputMode::pot_detent);
+                    decode_pot(setup_frozen_ && ((i == 4) || (i == 5)) ? frozen_pots_[i - 4]
+                                                                       : auxiliary_samples_[i],
+                               input_setup_.calibration[i], mode == InputMode::pot_detent);
                 controls.active_analogs |= static_cast<std::uint16_t>(1U << index);
             } else if (mode >= InputMode::two_position)
                 controls.active_switches |= static_cast<std::uint16_t>(1U << i);
         }
-        if (extra_digital_enabled())
-            controls.active_switches |=
-                features::i6s ? std::uint16_t{0xF800} : std::uint16_t{0x1800};
+        for (std::size_t i = 0; i < digital_input_count; ++i)
+            if (digital_enabled(i))
+                controls.active_switches |= 1U << (auxiliary_count + i);
+        if (rear_inputs_)
+            controls.active_switches |= 3U << physical_switch_count;
         controls.trims = model_->trims;
         if constexpr (!features::i6s) {
             controls.active_switches |= std::uint32_t{model_->trim_switches}
@@ -573,9 +628,11 @@ class Diagnostics {
     InputSetup input_setup_{};
     InputSetup input_draft_{};
     std::array<std::uint16_t, auxiliary_count> auxiliary_samples_{};
+    std::array<std::uint16_t, 2> frozen_pots_{};
     std::array<std::int8_t, auxiliary_count> detent_side_{};
     TimestampUs last_click_{};
     bool custom_inputs_{};
+    bool rear_inputs_{}, setup_frozen_{};
     bool digital_initialized_{};
     bool click_{};
     bool refresh_deferred_{};
@@ -584,4 +641,4 @@ class Diagnostics {
     const Model *model_{&diagnostic_model};
 };
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

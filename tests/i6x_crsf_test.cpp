@@ -10,7 +10,7 @@
 
 namespace {
 
-namespace hw = coretx::firmware::i6x;
+namespace hw = coretx::firmware;
 using reg = hw::crsf_registers;
 struct MetadataIo;
 using Limits = hw::detail::CrsfState<MetadataIo>;

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#define CORETX_I6S_TOUCH_TRACE
 #include "boards/common/calibration_storage.hpp"
 #include "boards/common/dashboard.hpp"
 #include "boards/i6x/keys.hpp"
@@ -13,7 +14,7 @@
 
 namespace {
 
-namespace hw = coretx::firmware::i6x;
+namespace hw = coretx::firmware;
 namespace chip = coretx::firmware::stm32f072;
 using adc_reg = hw::adc_registers;
 namespace reg = chip::registers;
@@ -137,8 +138,8 @@ struct FakeRegisters {
     [[nodiscard]] constexpr std::uint32_t now_us() { return read(reg::tim2_cnt); }
 
     constexpr void write(const std::uintptr_t address, const std::uint32_t value) {
-        if (address == hw::dma_registers::ifcr) {
-            cell(hw::dma_registers::isr) &=
+        if (address == hw::adc_dma_registers::ifcr) {
+            cell(hw::adc_dma_registers::isr) &=
                 (value & DMA_IFCR_CGIF1) != 0
                     ? ~std::uint32_t{DMA_ISR_GIF1 | DMA_ISR_TCIF1 | DMA_ISR_HTIF1 | DMA_ISR_TEIF1}
                     : ~value;
@@ -162,7 +163,7 @@ struct FakeRegisters {
             }
         }
         cell(address) = value;
-        if (address == hw::dma_registers::cndtr) {
+        if (address == hw::adc_dma_registers::cndtr) {
             dma_length = value;
         }
         if (address == reg::rcc_cr) {
@@ -233,31 +234,31 @@ struct FakeRegisters {
         }
     }
     constexpr void write_address(const std::uintptr_t address, std::uint16_t *const destination) {
-        if (address != hw::dma_registers::cmar) {
+        if (address != hw::adc_dma_registers::cmar) {
             std::abort();
         }
         dma_destination = destination;
     }
 
     constexpr void advance_dma() {
-        if (((cell(hw::dma_registers::ccr) & DMA_CCR_EN) == 0) ||
+        if (((cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) == 0) ||
             ((cell(adc_reg::cr) & ADC_CR_ADSTART) == 0)) {
             return;
         }
         const auto count = static_cast<std::size_t>(std::popcount(cell(adc_reg::chselr)));
-        const auto remaining = cell(hw::dma_registers::cndtr);
+        const auto remaining = cell(hw::adc_dma_registers::cndtr);
         if ((remaining == 0) || (remaining > dma_length)) {
             return;
         }
         dma_destination[dma_length - remaining] = input[converted++ % count];
-        if (--cell(hw::dma_registers::cndtr) == (dma_length / 2)) {
-            cell(hw::dma_registers::isr) |= DMA_ISR_HTIF1;
+        if (--cell(hw::adc_dma_registers::cndtr) == (dma_length / 2)) {
+            cell(hw::adc_dma_registers::isr) |= DMA_ISR_HTIF1;
             cell(adc_reg::isr) |= ADC_ISR_EOSEQ;
         }
-        if (cell(hw::dma_registers::cndtr) == 0) {
-            cell(hw::dma_registers::isr) |= DMA_ISR_TCIF1;
+        if (cell(hw::adc_dma_registers::cndtr) == 0) {
+            cell(hw::adc_dma_registers::isr) |= DMA_ISR_TCIF1;
             cell(adc_reg::isr) |= ADC_ISR_EOSEQ;
-            cell(hw::dma_registers::cndtr) = static_cast<std::uint32_t>(dma_length);
+            cell(hw::adc_dma_registers::cndtr) = static_cast<std::uint32_t>(dma_length);
         }
     }
 
@@ -278,7 +279,7 @@ struct FakeRegisters {
         cell(reg::tim2_cnt) += copy_delay;
         copy_delay = 0;
         if (copy_error) {
-            cell(hw::dma_registers::isr) |= DMA_ISR_TEIF1;
+            cell(hw::adc_dma_registers::isr) |= DMA_ISR_TEIF1;
         }
         return *source;
     }
@@ -310,9 +311,10 @@ bool adc_scans() {
     if ((initialize_adc<Adc>(io) != hw::AdcError::none) || io.calibration_while_enabled ||
         ((io.cell(GPIOA_BASE + offsetof(GPIO_TypeDef, MODER)) & 0xFFFFFF00U) != 0xAAAAAA00U) ||
         (io.cell(adc_reg::cfgr1) != (ADC_CFGR1_DMAEN | ADC_CFGR1_DMACFG | ADC_CFGR1_CONT)) ||
-        (io.cell(hw::dma_registers::cpar) != adc_reg::dr) ||
+        (io.cell(hw::adc_dma_registers::cpar) != adc_reg::dr) ||
         ((io.cell(reg::rcc_ahbenr) & RCC_AHBENR_DMA1EN) == 0) ||
-        (io.cell(hw::dma_registers::ccr) != hw::dma_registers::configuration) || Adc::valid()) {
+        (io.cell(hw::adc_dma_registers::ccr) != hw::adc_dma_registers::configuration) ||
+        Adc::valid()) {
         return false;
     }
     constexpr std::uint32_t start = 0xFFFFFFF0U;
@@ -327,7 +329,7 @@ bool adc_scans() {
     }
     const CoherentAdc::Samples first{0, 1000, 2048, 4095};
     if ((Adc::samples() != first) || (io.cpu_dr_reads != 0) ||
-        ((io.cell(hw::dma_registers::ccr) & DMA_CCR_EN) == 0))
+        ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) == 0))
         return false;
     if ((Adc::service(coretx::TimestampUs{start + 100U}) != hw::ScanEvent::pending) ||
         ((io.cell(adc_reg::cr) & ADC_CR_ADSTART) == 0)) {
@@ -370,7 +372,7 @@ bool isolated_adc_contexts() {
         (Second::samples()[3] != 3000)) {
         return false;
     }
-    first_io.cell(hw::dma_registers::isr) |= DMA_ISR_TEIF1;
+    first_io.cell(hw::adc_dma_registers::isr) |= DMA_ISR_TEIF1;
     return (First::service(coretx::TimestampUs{100}) == hw::ScanEvent::failed) &&
            (Second::service(coretx::TimestampUs{100}) == hw::ScanEvent::pending) &&
            (Second::error() == hw::AdcError::none) && Second::valid();
@@ -413,16 +415,16 @@ template <bool Coherent = true> bool adc_failures() {
         if (failure == hw::AdcError::timeout) {
             io.paused = true;
         } else if (failure == hw::AdcError::dma) {
-            io.cell(hw::dma_registers::isr) |= DMA_ISR_TEIF1;
+            io.cell(hw::adc_dma_registers::isr) |= DMA_ISR_TEIF1;
         } else {
             io.paused = true;
-            io.cell(hw::dma_registers::cndtr) = 9;
+            io.cell(hw::adc_dma_registers::cndtr) = 9;
         }
         if ((Adc::service(coretx::TimestampUs{failure == hw::AdcError::timeout
                                                   ? 100 + CoherentAdc::scan_timeout_us.count()
                                                   : 110}) != hw::ScanEvent::failed) ||
             (Adc::error() != failure) || Adc::valid() ||
-            ((io.cell(hw::dma_registers::ccr) & DMA_CCR_EN) != 0)) {
+            ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) != 0)) {
             return false;
         }
     }
@@ -471,7 +473,7 @@ bool single_buffer_scans() {
         (Adc::service(coretx::TimestampUs{start + 5'100U}) != hw::ScanEvent::complete) ||
         (Adc::samples() != CoherentAdc::Samples{0, 1000, 345, 456}) || (Adc::discarded() != 0) ||
         !Adc::valid() || (io.cpu_dr_reads != 0) ||
-        ((io.cell(hw::dma_registers::ccr) & DMA_CCR_EN) == 0)) {
+        ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) == 0)) {
         return false;
     }
     io.advance_on_each_read = 0;
@@ -514,7 +516,7 @@ template <bool Coherent> bool delayed_adc_service() {
            (Adc::service(coretx::TimestampUs{stopped + Adc::scan_timeout_us.count()}) ==
             hw::ScanEvent::failed) &&
            (Adc::error() == hw::AdcError::timeout) && !Adc::valid() &&
-           ((io.cell(hw::dma_registers::ccr) & DMA_CCR_EN) == 0);
+           ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) == 0);
 }
 
 bool dma_autonomous_scans() {
@@ -540,7 +542,7 @@ bool dma_autonomous_scans() {
         }
         if ((Adc::service(coretx::TimestampUs{now}) != hw::ScanEvent::complete) ||
             (Adc::samples()[0] != io.input[0]) || (Adc::samples()[3] != 4095) ||
-            (io.cell(hw::dma_registers::isr) != 0) || (io.cpu_dr_reads != 0)) {
+            (io.cell(hw::adc_dma_registers::isr) != 0) || (io.cpu_dr_reads != 0)) {
             return false;
         }
         io.input[0] = 999;
@@ -551,7 +553,7 @@ bool dma_autonomous_scans() {
     }
     // Reinitialization must disable the old transfer before rebinding its buffer.
     if ((initialize_adc<Adc>(io) != hw::AdcError::none) || Adc::valid() ||
-        ((io.cell(hw::dma_registers::ccr) & DMA_CCR_EN) != 0)) {
+        ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) != 0)) {
         return false;
     }
     return true;
@@ -1058,7 +1060,7 @@ constexpr bool stock_switches() {
 bool stock_keys() {
     struct KeyScenario {};
     using Test = coretx::test::RegisterFixture<KeyScenario, FakeRegisters>;
-    using Keys = hw::Keys<Test::Io>;
+    using Keys = hw::i6x::Keys<Test::Io>;
     Test::reset_registers();
     auto &io = Test::registers;
     io.cell(reg::tim2_cnt) = 0xFFFFF000U;
@@ -1153,7 +1155,10 @@ constexpr bool extended_physical_footer() {
         return false;
     auto setup = state.input_setup();
     setup.modes.fill(coretx::InputMode::six_position);
-    setup.extra_analog = setup.extra_digital = true;
+    setup.extra_analog = true;
+    setup.external_module = false;
+    for (std::size_t i = 0; i < (coretx::firmware::features::i6s ? 5U : 2U); ++i)
+        setup.set_digital_mode(i, coretx::DigitalInputMode::two_position);
     if (!state.set_input_setup(setup))
         return false;
     std::array<std::uint16_t, 16> samples{};
@@ -1179,7 +1184,7 @@ constexpr bool extended_physical_footer() {
     };
     const std::string_view all = !coretx::firmware::features::extended_inputs ? "A1B1C1D1a1b1"
                                  : coretx::firmware::features::i6s
-                                     ? "A1B1C1D1a1b1c1d1e1f1g1GvH^IvJ^Kv"
+                                     ? "A1B1C1D1a1b1I1J1K1L1M1GvH^NvO^Pv"
                                      : "A1B1C1D1a1b1c1d1e1f1EvF^";
     if (!row_matches(all))
         return false;
@@ -1210,7 +1215,8 @@ constexpr bool extended_physical_footer() {
     }
     setup.modes[0] = coretx::InputMode::off;
     setup.modes[5] = coretx::InputMode::pot;
-    setup.extra_analog = setup.extra_digital = false;
+    setup.extra_analog = false;
+    setup.digital_modes = 0;
     if (!state.set_input_setup(setup) || !row_matches("B?C?D?a?"))
         return false;
     state.observe(samples, coretx::TimestampUs{500'000});
@@ -2323,12 +2329,15 @@ bool eeprom_transactions() {
     stalled.stalled = true;
     using Waiting = hw::Eeprom<StalledTest::Io>;
     Waiting::select(0x50);
-    if (!Waiting::read(0, bytes)) {
+    if (!Waiting::read(0x1234, bytes)) {
         return false;
     }
     Waiting::service(coretx::TimestampUs{0xFFFFF000U});
     Waiting::service(coretx::TimestampUs{0xFFFFF000U + StorageProbe::timeout_us.count()});
-    return !Waiting::busy() && (Waiting::error() == hw::I2cError::timeout);
+    const auto failure = Waiting::trace();
+    return !Waiting::busy() && (Waiting::error() == hw::I2cError::timeout) &&
+           (failure.address == 0x1234) && (failure.position == 0) && (failure.stage == 2) &&
+           (failure.status == I2C_ISR_BUSY) && (stalled.cell(hw::i2c_registers::isr) == 0);
 }
 
 bool persistence_format_protection() {
@@ -2339,7 +2348,7 @@ bool persistence_format_protection() {
     if (!coretx::storage::encode(snapshot, 3, record)) {
         return false;
     }
-    record[4] = 7;
+    record[4] = coretx::storage::format_version + 1;
     coretx::storage::detail::Writer checksum{std::span{record}.subspan(12, 4)};
     checksum.word(coretx::storage::detail::record_crc(record));
     struct IoTestScenario {};
@@ -2360,7 +2369,7 @@ bool persistence_format_protection() {
         (storage.state() != hw::CalibrationStorageState::invalid)) {
         return false;
     }
-    for (std::uint8_t version = 1; version < coretx::storage::format_version; ++version) {
+    for (std::uint8_t version = 1; version < coretx::storage::oldest_format_version; ++version) {
         record[4] = version;
         coretx::storage::detail::Writer old_checksum{std::span{record}.subspan(12, 4)};
         old_checksum.word(coretx::storage::detail::record_crc(record));
@@ -2424,7 +2433,7 @@ bool persistence_format_protection() {
 bool cooperative_persistence() {
     struct CooperativeKeys {};
     using Test = PersistenceFixture<CooperativeKeys>;
-    using Keys = hw::Keys<Test::Io>;
+    using Keys = hw::i6x::Keys<Test::Io>;
     Test::reset();
     using IoTest = Test;
     auto &io = Test::registers;

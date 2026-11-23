@@ -2,6 +2,7 @@
 #pragma once
 
 #include "boards/common/calibration_storage.hpp"
+#include "boards/common/crsf_menu.hpp"
 #include "boards/common/dashboard.hpp"
 #include "boards/common/input_menu.hpp"
 #include "boards/common/input_storage.hpp"
@@ -9,17 +10,36 @@
 #include "boards/common/radio_errors.hpp"
 #include "boards/common/sender_input.hpp"
 #include "boards/common/telemetry_adapters.hpp"
-#include "platform/stm32f072/lcd.hpp"
-#if CORETX_CRSF
-#include "boards/common/crsf_menu.hpp"
+#include "boards/i6s/power.hpp"
+#include "platform/stm32f072/buzzer.hpp"
 #include "platform/stm32f072/crsf.hpp"
-#endif
+#include "platform/stm32f072/lcd.hpp"
 
-namespace coretx::firmware::i6x {
+#include <type_traits>
 
-enum class ApplicationState : std::uint8_t { starting, running, input_error, fatal };
+namespace coretx::firmware {
+
+enum class ApplicationState : std::uint8_t { starting, running, input_error, fatal, powered_off };
 enum class ApplicationFailure : std::uint8_t { none, not_initialized, hardware, lcd, stack };
 struct NoMenu {};
+
+namespace application_detail {
+struct MultiSwitchState {
+    coretx::multiswitch::Pages pages{};
+    std::optional<std::size_t> tapped{};
+    std::uint8_t selected{};
+    bool select{};
+};
+
+template <bool Menu, bool MultiSwitch> struct CrsfUiState {
+    [[no_unique_address]] std::conditional_t<Menu, CrsfMenu, DisabledFeature> menu{};
+    [[no_unique_address]]
+    std::conditional_t<Menu && MultiSwitch, MultiSwitchState, DisabledFeature> multiswitch{};
+    bool dashboard_active{};
+    bool dashboard_saved{};
+    bool dashboard_interacting{};
+};
+} // namespace application_detail
 
 template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> class Application {
     inline static constexpr bool has_menu = (Board::name == "I6X") || (Board::name == "I6S");
@@ -28,19 +48,25 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     using Probe = typename Board::Probe;
     using Memory = typename Board::Memory;
     using Inputs = typename Board::Inputs;
-#if CORETX_CRSF
-    using Transmitter = typename Board::Transmitter;
-#endif
-#if CORETX_A7105
+    using ExternalRFModule = typename Board::ExternalRFModule;
     using Radio = typename Board::Radio;
-    using Internal = typename Board::Internal;
-#endif
+    using InternalRFModule = typename Board::InternalRFModule;
+    inline static constexpr bool has_internal_rf = !std::is_void_v<InternalRFModule>;
+    inline static constexpr bool has_external_rf = !std::is_void_v<ExternalRFModule>;
+    inline static constexpr bool has_crsf_ui = has_menu && has_external_rf;
+    inline static constexpr bool has_multiswitch = has_crsf_ui && features::multiswitch;
     using Watchdog = typename Board::Watchdog;
+    inline static constexpr bool has_power = requires {
+        Board::power_button_pressed();
+        Board::release_power();
+    };
 
   public:
     [[nodiscard]] constexpr ApplicationState initialize() noexcept {
         state_ = ApplicationState::fatal;
         failure_ = ApplicationFailure::none;
+        if constexpr (has_power)
+            power_ = {};
         sampled_at_ = {};
         diagnostics_.invalidate();
         telemetry_ = {};
@@ -64,16 +90,16 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             models_.initialize(Board::transmitter_id());
             model_applied_ = false;
             menu_ = {};
-#if CORETX_CRSF
-            crsf_menu_ = {};
-#if CORETX_MULTISWITCH
-            multiswitch_ = {};
-            multiswitch_select_ = false;
-#endif
-            crsf_dashboard_active_ = false;
-            crsf_dashboard_saved_ = false;
-            crsf_dashboard_interacting_ = false;
-#endif
+            if constexpr (has_external_rf) {
+                crsf_.menu = {};
+                if constexpr (has_multiswitch) {
+                    crsf_.multiswitch.pages = {};
+                    crsf_.multiswitch.select = false;
+                }
+                crsf_.dashboard_active = false;
+                crsf_.dashboard_saved = false;
+                crsf_.dashboard_interacting = false;
+            }
             framebuffer_.compact(false);
         }
         render();
@@ -81,11 +107,25 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         return state_;
     }
     [[nodiscard]] constexpr ApplicationState service(TimestampUs now) noexcept {
-        if (state_ == ApplicationState::fatal) {
+        if ((state_ == ApplicationState::fatal) || (state_ == ApplicationState::powered_off)) {
             return state_;
         }
         if (!Board::stack_intact()) {
             return fail(ApplicationFailure::stack);
+        }
+        if constexpr (has_power) {
+            if (power_.update(now, Board::power_button_pressed())) {
+                select_output(RadioOutput::off, now);
+                Board::power_off();
+                Inputs::stop();
+                diagnostics_.defer_refresh();
+                if constexpr (has_menu)
+                    (void)menu_.handle(Key::cancel_long, models_, diagnostics_, output_);
+                diagnostics_.handle(Key::cancel);
+                diagnostics_.flush_refresh();
+                overview_phase_ = 0;
+                drawn_at_ = now - redraw_interval;
+            }
         }
         if (Display::service(framebuffer_) != LcdError::none) {
             return fail(ApplicationFailure::lcd);
@@ -122,10 +162,10 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         if (!settings_applied_ && radio_storage_.loaded()) {
             settings_ = radio_storage_.settings();
             settings_applied_ = true;
-#if CORETX_A7105
-            internal_.initialize(settings_.transmitter, settings_.receiver, now);
-            internal_.set_channel_mode(settings_.channel_mode);
-#endif
+            if constexpr (has_internal_rf) {
+                internal_.initialize(settings_.transmitter, settings_.receiver, now);
+                internal_.set_channel_mode(settings_.channel_mode);
+            }
             select_output(has_menu ? RadioOutput::off : settings_.output, now);
         }
         if constexpr (has_menu) {
@@ -146,17 +186,19 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
                 overview_phase_ = 0;
                 menu_.model_changed(models_.active());
                 diagnostics_.use_model(models_.data().model);
-#if CORETX_MULTISWITCH
-                multiswitch_ = {};
-                multiswitch_select_ = false;
-#endif
+                if constexpr (has_multiswitch) {
+                    crsf_.multiswitch.pages = {};
+                    crsf_.multiswitch.select = false;
+                }
                 settings_ = models_.data().radio;
-#if CORETX_A7105
-                internal_.deactivate();
-                internal_.initialize(settings_.transmitter, settings_.receiver, Board::now_us());
-                internal_.set_channel_mode(settings_.channel_mode);
-#endif
-                const auto selected_output = model_applied_ ? RadioOutput::off : settings_.output;
+                if constexpr (has_internal_rf) {
+                    internal_.deactivate();
+                    internal_.initialize(settings_.transmitter, settings_.receiver,
+                                         Board::now_us());
+                    internal_.set_channel_mode(settings_.channel_mode);
+                }
+                const auto selected_output =
+                    model_applied_ || shutting_down() ? RadioOutput::off : settings_.output;
                 model_applied_ = true;
                 select_output(selected_output, Board::now_us());
             }
@@ -179,91 +221,138 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             state_ = ApplicationState::running;
         }
         diagnostics_.observe_digital(Inputs::read(), now);
-        Inputs::service(now, diagnostics_.take_click());
+        Inputs::service(now, diagnostics_.take_click() && !shutting_down());
         display_ready_ = display_ready_ || !Display::busy();
-#if CORETX_CRSF
-        if constexpr (has_menu) {
-#if CORETX_MULTISWITCH
-            if (!multiswitch_slot())
-                multiswitch_select_ = false;
-#endif
-            diagnostics_.constrain_page();
-            sync_crsf_dashboard(now);
+        if constexpr (has_external_rf) {
+            if constexpr (has_menu) {
+                if constexpr (has_multiswitch) {
+                    if (!multiswitch_slot())
+                        crsf_.multiswitch.select = false;
+                }
+                diagnostics_.constrain_page();
+                sync_crsf_dashboard(now);
+            }
         }
-#endif
         const auto key =
-            input_.service(now, !Input::needs_display || display_ready_, multiswitch_input());
+            input_.service(now, !Input::needs_display || display_ready_, input_context());
+#ifdef CORETX_I6S_TOUCH_TRACE
+        if (key != Key::none)
+            trace_key_ = key;
+#endif
         // Keep RC evaluation out of nested UI handlers on the 2 KiB stack.
         diagnostics_.defer_refresh();
-        handle(key, now);
+        if (!shutting_down())
+            handle(key, now);
+        if constexpr (requires { input_.rear_buttons(); }) {
+            const bool setup = !dashboard_touch() && !shutting_down();
+            diagnostics_.observe_setup_controls(setup, input_.rear_buttons());
+            input_.set_setup_mode(now, setup);
+        }
         diagnostics_.flush_refresh();
         if constexpr (has_menu && !Input::touch) {
             const auto buttons = input_.trim_buttons();
-            if (diagnostics_.phase() != CalibrationPhase::idle)
+            if (shutting_down() || (diagnostics_.phase() != CalibrationPhase::idle))
                 trim_keys_.reset();
             else if (models_.editable() &&
                      trim_keys_.update(models_.data().model, diagnostics_.setup(), buttons, now)) {
                 diagnostics_.refresh_model();
-                Inputs::service(now, true);
+                Inputs::service(now, diagnostics_.input_setup().trim_beep);
                 if (!models_.save_trims(now))
                     radio_message_ = models_.message();
             }
             diagnostics_.observe_trims(buttons);
         }
-#if CORETX_CRSF
-        if constexpr (has_menu) {
-            sync_crsf_dashboard(now);
-#if CORETX_MULTISWITCH
-            multiswitch_.configure(diagnostics_.model());
-            const auto slot = multiswitch_operable() ? multiswitch_slot() : std::nullopt;
-            const auto held = Input::touch ? input_.held_switch()
-                              : multiswitch_select_ && input_.ok_held()
-                                  ? std::optional<std::size_t>{multiswitch_selected_}
-                                  : std::nullopt;
-            const auto tapped = Input::touch ? input_.tapped_switch() : multiswitch_tapped_;
-            const auto *const controls =
-                multiswitch_signal_operable() ? &diagnostics_.prepared().controls : nullptr;
-            if (multiswitch_.update(slot, held, tapped, controls,
-                                    diagnostics_.evaluation().frame.logical))
-                Inputs::service(now, true);
-            multiswitch_tapped_.reset();
-#endif
-        }
-#endif
-#if CORETX_A7105
-        if (settings_applied_) {
-            internal_.service(Board::now_us(), diagnostics_.evaluation().frame.channels,
-                              (state_ == ApplicationState::running) && diagnostics_.output_valid(),
-                              sampled_at_);
-            if (internal_.take_receiver_changed()) {
-                telemetry_.clear(telemetry::Source::afhds2a);
-                settings_.receiver = internal_.session().receiver();
-                save_radio();
+        if constexpr (has_external_rf) {
+            if constexpr (has_menu) {
+                sync_crsf_dashboard(now);
+                if constexpr (has_multiswitch) {
+                    crsf_.multiswitch.pages.configure(diagnostics_.model());
+                    const auto slot = multiswitch_operable() ? multiswitch_slot() : std::nullopt;
+                    const auto held = Input::touch ? input_.held_switch()
+                                      : crsf_.multiswitch.select && input_.ok_held()
+                                          ? std::optional<std::size_t>{crsf_.multiswitch.selected}
+                                          : std::nullopt;
+                    const auto tapped =
+                        Input::touch ? input_.tapped_switch() : crsf_.multiswitch.tapped;
+                    const auto *const controls =
+                        multiswitch_signal_operable() ? &diagnostics_.prepared().controls : nullptr;
+                    if (crsf_.multiswitch.pages.update(slot, held, tapped, controls,
+                                                       diagnostics_.evaluation().frame.logical) &&
+                        diagnostics_.model().multiswitch_beep && !shutting_down())
+                        Inputs::service(now, true, ClickTone::multiswitch);
+                    crsf_.multiswitch.tapped.reset();
+                }
             }
-            if (output_ == RadioOutput::internal)
-                publish_telemetry(internal_.telemetry(), telemetry_);
         }
-#endif
-#if CORETX_CRSF
-        if (output_ == RadioOutput::external) {
-            (void)Transmitter::service(
-                Board::now_us(), diagnostics_.evaluation().frame.channels,
-                (state_ == ApplicationState::running) && diagnostics_.output_valid(), sampled_at_,
-                [&]() constexpr -> coretx::multiswitch::Pages * {
-                    if constexpr (has_menu && features::multiswitch)
-                        return &multiswitch_;
-                    else
-                        return nullptr;
-                }());
-            publish_telemetry(Transmitter::telemetry(), telemetry_, Board::now_us());
+        if constexpr (has_internal_rf) {
+            if (settings_applied_ && !shutting_down()) {
+                internal_.service(Board::now_us(), diagnostics_.evaluation().frame.channels,
+                                  (state_ == ApplicationState::running) &&
+                                      diagnostics_.output_valid(),
+                                  sampled_at_);
+                if (internal_.take_receiver_changed()) {
+                    telemetry_.clear(telemetry::Source::afhds2a);
+                    settings_.receiver = internal_.session().receiver();
+                    save_radio();
+                }
+                if (output_ == RadioOutput::internal)
+                    publish_telemetry(internal_.telemetry(), telemetry_);
+            }
         }
-#endif
+        if constexpr (has_external_rf) {
+            if (output_ == RadioOutput::external) {
+                (void)ExternalRFModule::service(
+                    Board::now_us(), diagnostics_.evaluation().frame.channels,
+                    (state_ == ApplicationState::running) && diagnostics_.output_valid(),
+                    sampled_at_, [&]() constexpr -> coretx::multiswitch::Pages * {
+                        if constexpr (has_multiswitch)
+                            return &crsf_.multiswitch.pages;
+                        else
+                            return nullptr;
+                    }());
+                publish_telemetry(ExternalRFModule::telemetry(), telemetry_, Board::now_us());
+            }
+        }
         telemetry_.service(Board::now_us());
         if (!Display::busy() &&
             ((overview_phase_ != 0) || ((now - drawn_at_) >= redraw_interval))) {
             render();
+#ifdef CORETX_I6S_TOUCH_TRACE
+            if (overview_phase_ == 0) {
+                input_.render_trace(framebuffer_, trace_key_);
+                framebuffer_.compact();
+                framebuffer_.text(72, 56, "P");
+                framebuffer_.unsigned_number(95, 56, static_cast<unsigned>(diagnostics_.phase()));
+                framebuffer_.text(104, 56, "M");
+                framebuffer_.unsigned_number(127, 56, menu_.visible());
+                framebuffer_.compact(false);
+                if (Memory::error() != I2cError::none) {
+                    const auto storage = Memory::trace();
+                    framebuffer_.rectangle(0, 48, 128, 16, false);
+                    framebuffer_.compact();
+                    framebuffer_.text(0, 48, "EE S");
+                    framebuffer_.unsigned_number(27, 48, storage.stage);
+                    framebuffer_.text(36, 48, "A");
+                    framebuffer_.unsigned_number(79, 48, storage.address);
+                    framebuffer_.text(88, 48, "P");
+                    framebuffer_.unsigned_number(127, 48, storage.position);
+                    framebuffer_.text(0, 56, "E");
+                    framebuffer_.unsigned_number(31, 56, static_cast<unsigned>(Memory::error()));
+                    framebuffer_.text(40, 56, "ISR");
+                    framebuffer_.unsigned_number(127, 56, storage.status);
+                    framebuffer_.compact(false);
+                }
+            }
+#endif
             if (overview_phase_ == 0)
                 drawn_at_ = Board::now_us();
+        }
+        if constexpr (has_power) {
+            if (shutting_down() && (shutdown_error() == nullptr) && shutdown_ready()) {
+                state_ = ApplicationState::powered_off;
+                Inputs::stop();
+                Board::release_power();
+            }
         }
         return state_;
     }
@@ -278,13 +367,11 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     {
         return menu_;
     }
-#if CORETX_CRSF
     [[nodiscard]] const CrsfMenu &crsf_menu() const noexcept
-        requires(has_menu)
+        requires(has_crsf_ui)
     {
-        return crsf_menu_;
+        return crsf_.menu;
     }
-#endif
     [[nodiscard]] constexpr const ModelStorage<Memory> &models() const noexcept
         requires(has_menu)
     {
@@ -292,17 +379,86 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     }
 
   private:
-    [[nodiscard]] constexpr MultiSwitchInput multiswitch_input() const noexcept {
-#if CORETX_MULTISWITCH
-        if constexpr (has_menu)
-            if (const auto slot = multiswitch_slot())
-                return {true, diagnostics_.model().multiswitch[*slot].momentary};
-#endif
-        return {};
+    [[nodiscard]] constexpr bool shutting_down() const noexcept {
+        if constexpr (has_power)
+            return power_.requested();
+        return false;
     }
-#if CORETX_CRSF
-    [[nodiscard]] constexpr bool crsf_dashboard_page() const noexcept {
+    [[nodiscard]] constexpr bool shutdown_ready() const noexcept {
+        if (calibration_storage_.busy() || radio_storage_.busy() || input_storage_.busy() ||
+            Memory::busy())
+            return false;
         if constexpr (has_menu)
+            return !models_.busy();
+        return true;
+    }
+    [[nodiscard]] constexpr const char *shutdown_error() const noexcept {
+        if (Memory::error() != I2cError::none)
+            return error_message(Memory::error());
+        if ((Probe::state() == StorageProbeState::not_found) ||
+            (Probe::state() == StorageProbeState::failed))
+            return coretx::ui::tr::models_unique_eeprom;
+        const auto calibration = calibration_storage_.state();
+        if ((calibration == CalibrationStorageState::multiple) ||
+            (calibration == CalibrationStorageState::io_error) ||
+            (calibration == CalibrationStorageState::invalid) ||
+            (calibration == CalibrationStorageState::verify_error))
+            return coretx::ui::tr::power_off_error;
+        const auto failed = [](const RadioStorageStatus status) constexpr {
+            return (status == RadioStorageStatus::missing) ||
+                   (status == RadioStorageStatus::multiple) ||
+                   (status == RadioStorageStatus::io_error) ||
+                   (status == RadioStorageStatus::invalid) ||
+                   (status == RadioStorageStatus::version) ||
+                   (status == RadioStorageStatus::verify);
+        };
+        if (failed(input_storage_.status()))
+            return input_storage_.message();
+        if (failed(radio_storage_.status()))
+            return coretx::ui::tr::power_off_error;
+        if constexpr (has_menu)
+            if (models_.loaded() && !models_.editable())
+                return models_.message() != nullptr ? models_.message()
+                                                    : coretx::ui::tr::power_off_error;
+        return nullptr;
+    }
+#ifdef CORETX_I6S_TOUCH_TRACE
+    Key trace_key_{};
+#endif
+    [[nodiscard]] constexpr SenderInputContext input_context() const noexcept {
+        SenderInputContext context{};
+        if constexpr (has_multiswitch) {
+            if constexpr (has_menu)
+                if (const auto slot = multiswitch_slot()) {
+                    context.active = true;
+                    context.momentary = diagnostics_.model().multiswitch[*slot].momentary;
+                }
+        }
+        context.taps = !context.active && crsf_dashboard_page();
+        if constexpr (requires { input_.rear_buttons(); }) {
+            context.jog_enabled = diagnostics_.valid() && !input_menu_.visible() &&
+                                  (diagnostics_.phase() == CalibrationPhase::idle);
+            const auto &setup = diagnostics_.input_setup();
+            if (is_pot(setup.modes[4]))
+                context.vra = decode_pot(diagnostics_.samples()[6], setup.calibration[4], true);
+            if (is_pot(setup.modes[5]))
+                context.vrb = decode_pot(diagnostics_.samples()[7], setup.calibration[5], true);
+            context.jog_enabled =
+                context.jog_enabled && (is_pot(setup.modes[4]) || is_pot(setup.modes[5]));
+        }
+        return context;
+    }
+    [[nodiscard]] constexpr bool dashboard_touch() const noexcept {
+        if constexpr (has_menu)
+            if (menu_.visible())
+                return false;
+        if constexpr (has_crsf_ui)
+            if (crsf_.menu.visible() && !crsf_dashboard_page())
+                return false;
+        return !input_menu_.visible() && (diagnostics_.phase() == CalibrationPhase::idle);
+    }
+    [[nodiscard]] constexpr bool crsf_dashboard_page() const noexcept {
+        if constexpr (has_crsf_ui)
             return diagnostics_.model().crsf_dashboard && !menu_.visible() &&
                    !input_menu_.visible() && (diagnostics_.phase() == CalibrationPhase::idle) &&
                    (diagnostics_.page() ==
@@ -312,29 +468,31 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         return false;
     }
     constexpr void sync_crsf_dashboard(const TimestampUs now) noexcept {
-        if constexpr (has_menu) {
+        if constexpr (has_crsf_ui) {
             const bool active = crsf_dashboard_page() && (output_ == RadioOutput::external);
-            if (active == crsf_dashboard_active_) {
-                if (active && !crsf_dashboard_interacting_)
-                    crsf_menu_.handle(Key::none, Transmitter::config(), now);
+            if (active == crsf_.dashboard_active) {
+                if (active && !crsf_.dashboard_interacting)
+                    crsf_.menu.handle(Key::none, ExternalRFModule::config(), now);
+                else if (!active && crsf_.dashboard_saved && !crsf_.menu.visible())
+                    crsf_.menu.suspend(ExternalRFModule::config());
                 return;
             }
-            crsf_dashboard_active_ = active;
-            crsf_dashboard_interacting_ = false;
+            crsf_.dashboard_active = active;
+            crsf_.dashboard_interacting = false;
             if (active) {
-                if (crsf_dashboard_saved_)
-                    crsf_menu_.resume(Transmitter::config(), now);
+                if (crsf_.dashboard_saved)
+                    crsf_.menu.resume(ExternalRFModule::config(), now);
                 else
-                    crsf_menu_.open(Transmitter::config(), now);
+                    crsf_.menu.open(ExternalRFModule::config(), now);
             } else {
-                crsf_menu_.suspend(Transmitter::config());
-                crsf_dashboard_saved_ = true;
+                crsf_.menu.suspend(ExternalRFModule::config());
+                crsf_.dashboard_saved = true;
             }
         }
     }
     [[nodiscard]] constexpr std::optional<std::size_t> multiswitch_slot() const noexcept {
-        if constexpr (has_menu && features::multiswitch) {
-            if (!menu_.visible() && !crsf_menu_.visible() && !input_menu_.visible() &&
+        if constexpr (has_multiswitch) {
+            if (!menu_.visible() && !crsf_.menu.visible() && !input_menu_.visible() &&
                 (diagnostics_.phase() == CalibrationPhase::idle) &&
                 (diagnostics_.page() >= Diagnostics::page_count))
                 return coretx::multiswitch::slot(diagnostics_.model(),
@@ -343,18 +501,17 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         return std::nullopt;
     }
     [[nodiscard]] constexpr bool multiswitch_operable() const noexcept {
-        if constexpr (has_menu && features::multiswitch)
+        if constexpr (has_multiswitch)
             return multiswitch_signal_operable() && models_.editable();
         return false;
     }
     [[nodiscard]] constexpr bool multiswitch_signal_operable() const noexcept {
-        if constexpr (has_menu && features::multiswitch)
+        if constexpr (has_multiswitch)
             return (output_ == RadioOutput::external) && (state_ == ApplicationState::running) &&
                    diagnostics_.output_valid() && models_.loaded() &&
-                   (input_.message() == nullptr) && (Transmitter::error() == CrsfError::none);
+                   (input_.message() == nullptr) && (ExternalRFModule::error() == CrsfError::none);
         return false;
     }
-#endif
     constexpr void apply_inputs() noexcept {
         const bool extended = features::extended_inputs && diagnostics_.input_setup().extra_analog;
         if (extended != adc_extended_) {
@@ -364,7 +521,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             } else
                 adc_extended_ = extended;
         }
-        Inputs::configure(diagnostics_.extra_digital_enabled());
+        Inputs::configure(diagnostics_.digital_pin_mask());
         diagnostics_.invalidate();
     }
     constexpr void save_radio() noexcept {
@@ -378,17 +535,17 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     constexpr void select_output(const RadioOutput output, const TimestampUs now) noexcept {
         telemetry_.clear(telemetry::Source::afhds2a);
         telemetry_.clear(telemetry::Source::crsf);
-#if CORETX_CRSF
-        if constexpr (has_menu)
-            crsf_menu_.close(Transmitter::config());
-        crsf_dashboard_active_ = false;
-        crsf_dashboard_saved_ = false;
-        crsf_dashboard_interacting_ = false;
-        Transmitter::power_off();
-#endif
-#if CORETX_A7105
-        internal_.deactivate();
-#endif
+        if constexpr (has_external_rf) {
+            if constexpr (has_menu)
+                crsf_.menu.close(ExternalRFModule::config());
+            crsf_.dashboard_active = false;
+            crsf_.dashboard_saved = false;
+            crsf_.dashboard_interacting = false;
+            ExternalRFModule::power_off();
+        }
+        if constexpr (has_internal_rf) {
+            internal_.deactivate();
+        }
         output_ = RadioOutput::off;
         radio_message_ = nullptr;
         if ((output != RadioOutput::off) &&
@@ -399,77 +556,101 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             radio_message_ = input_storage_.message();
             return;
         }
-        if constexpr (features::i6s && features::extended_inputs) {
-            if ((output == RadioOutput::external) && diagnostics_.extra_digital_enabled()) {
-                radio_message_ = coretx::ui::tr::inputs_crsf_conflict;
-                return;
-            }
+        if ((output == RadioOutput::external) && !diagnostics_.input_setup().external_module) {
+            radio_message_ = coretx::ui::tr::inputs_module_disabled;
+            return;
         }
-        if (((output == RadioOutput::internal) && !features::a7105) ||
-            ((output == RadioOutput::external) && !features::crsf)) {
+        if (((output == RadioOutput::internal) && !has_internal_rf) ||
+            ((output == RadioOutput::external) && !has_external_rf)) {
             radio_message_ = coretx::ui::tr::radio_not_built;
             return;
         }
         output_ = output;
-#if CORETX_CRSF
-        if (output == RadioOutput::external)
-            Transmitter::initialize(now);
-        if constexpr (has_menu) {
-            if ((output == RadioOutput::external) && models_.loaded() &&
-                !Transmitter::set_baud(models_.data().baud_index, now))
-                radio_message_ = coretx::ui::tr::bad_request;
-        }
-#endif
-#if CORETX_A7105
-        if (output == RadioOutput::internal) {
-            if (internal_.error() != Afhds2aError::none) {
-                internal_.initialize(settings_.transmitter, settings_.receiver, now);
-                internal_.set_channel_mode(settings_.channel_mode);
+        if constexpr (has_external_rf) {
+            if (output == RadioOutput::external)
+                ExternalRFModule::initialize(now);
+            if constexpr (has_menu) {
+                if ((output == RadioOutput::external) && models_.loaded() &&
+                    !ExternalRFModule::set_baud(models_.data().baud_index, now))
+                    radio_message_ = coretx::ui::tr::bad_request;
             }
-            internal_.activate();
         }
-#endif
+        if constexpr (has_internal_rf) {
+            if (output == RadioOutput::internal) {
+                if (internal_.error() != Afhds2aError::none) {
+                    internal_.initialize(settings_.transmitter, settings_.receiver, now);
+                    internal_.set_channel_mode(settings_.channel_mode);
+                }
+                internal_.activate();
+            }
+        }
         (void)now;
     }
     constexpr void handle(const Key key, const TimestampUs now) noexcept {
         if (key != Key::none)
             overview_phase_ = 0;
-#if CORETX_CRSF
-        if constexpr (has_menu) {
-            if (crsf_dashboard_page()) {
-                auto &client = Transmitter::config();
-                if (crsf_dashboard_interacting_) {
-                    const bool leave =
-                        (key == Key::cancel_long) ||
-                        (Input::touch && (key == Key::ok_long) && !crsf_menu_.editing());
-                    if (leave && (client.command() == coretx::crsf::config::Command::idle)) {
-                        if (!client.pending_write()) {
-                            crsf_menu_.finish_edit(client);
-                            crsf_dashboard_interacting_ = false;
-                        }
-                    } else if ((key == Key::cancel) &&
-                               (client.mode() == coretx::crsf::config::Mode::devices) &&
-                               !crsf_menu_.editing()) {
-                        crsf_dashboard_interacting_ = false;
-                    } else
-                        crsf_menu_.handle(key, client, now);
+        if constexpr (Input::touch) {
+            if (dashboard_touch()) {
+                const auto tap = input_.tapped();
+                if (!tap && ((key == Key::ok) || (key == Key::cancel))) {
+                    diagnostics_.handle(key == Key::cancel ? Key::down : Key::up);
                     return;
                 }
-                if (key == Key::ok) {
-                    if (output_ != RadioOutput::external)
-                        radio_message_ = coretx::ui::tr::crsf_select_external;
-                    else if (Transmitter::error() != CrsfError::none)
-                        radio_message_ = coretx::ui::tr::crsf_link;
-                    else
-                        crsf_dashboard_interacting_ = true;
-                    return;
+                if constexpr (has_crsf_ui) {
+                    if (crsf_dashboard_page() && (key != Key::ok_long)) {
+                        if (output_ != RadioOutput::external) {
+                            if (key != Key::none)
+                                radio_message_ = coretx::ui::tr::crsf_select_external;
+                        } else if (ExternalRFModule::error() != CrsfError::none) {
+                            if (key != Key::none)
+                                radio_message_ = coretx::ui::tr::crsf_link;
+                        } else if (tap)
+                            crsf_.menu.tap(tap->x, tap->y, ExternalRFModule::config(), now);
+                        else
+                            crsf_.menu.handle(key, ExternalRFModule::config(), now);
+                        return;
+                    }
                 }
-            } else if (crsf_menu_.visible()) {
-                crsf_menu_.handle(key, Transmitter::config(), now);
-                return;
+                if ((key == Key::up) || (key == Key::down))
+                    return;
             }
         }
-#endif
+        if constexpr (has_external_rf) {
+            if constexpr (has_menu) {
+                if (crsf_dashboard_page() && !Input::touch) {
+                    auto &client = ExternalRFModule::config();
+                    if (crsf_.dashboard_interacting) {
+                        const bool leave =
+                            (key == Key::cancel_long) ||
+                            (Input::touch && (key == Key::ok_long) && !crsf_.menu.editing());
+                        if (leave && (client.command() == coretx::crsf::config::Command::idle)) {
+                            if (!client.pending_write()) {
+                                crsf_.menu.finish_edit(client);
+                                crsf_.dashboard_interacting = false;
+                            }
+                        } else if ((key == Key::cancel) &&
+                                   (client.mode() == coretx::crsf::config::Mode::devices) &&
+                                   !crsf_.menu.editing()) {
+                            crsf_.dashboard_interacting = false;
+                        } else
+                            crsf_.menu.handle(key, client, now);
+                        return;
+                    }
+                    if (key == Key::ok) {
+                        if (output_ != RadioOutput::external)
+                            radio_message_ = coretx::ui::tr::crsf_select_external;
+                        else if (ExternalRFModule::error() != CrsfError::none)
+                            radio_message_ = coretx::ui::tr::crsf_link;
+                        else
+                            crsf_.dashboard_interacting = true;
+                        return;
+                    }
+                } else if (crsf_.menu.visible() && !crsf_dashboard_page()) {
+                    crsf_.menu.handle(key, ExternalRFModule::config(), now);
+                    return;
+                }
+            }
+        }
         if (input_menu_.visible()) {
             const auto command =
                 input_menu_.handle(key, diagnostics_, output_, input_storage_.writable(),
@@ -496,41 +677,41 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             return;
         }
         if constexpr (has_menu) {
-#if CORETX_A7105
-            if (((key == Key::cancel) || (key == Key::cancel_long)) &&
-                internal_.session().binding()) {
-                (void)internal_.bind(now);
-                telemetry_.clear(telemetry::Source::afhds2a);
-            }
-#endif
-#if CORETX_MULTISWITCH
-            if (const auto slot = multiswitch_slot(); slot && !Input::touch) {
-                if (multiswitch_select_) {
-                    if ((key == Key::cancel) || (key == Key::cancel_long))
-                        multiswitch_select_ = false;
-                    else if ((key == Key::up) || (key == Key::down))
-                        multiswitch_selected_ = static_cast<std::uint8_t>(
-                            (multiswitch_selected_ + (key == Key::down ? 1U : 7U)) % 8U);
-                    else if ((key == Key::ok) && multiswitch_operable())
-                        multiswitch_tapped_ = multiswitch_selected_;
-                    return;
-                }
-                if (key == Key::ok) {
-                    if (multiswitch_operable()) {
-                        multiswitch_select_ = true;
-                        multiswitch_selected_ = 0;
-                    } else
-                        radio_message_ = coretx::ui::tr::crsf_select_external;
-                    return;
+            if constexpr (has_internal_rf) {
+                if (((key == Key::cancel) || (key == Key::cancel_long)) &&
+                    internal_.session().binding()) {
+                    (void)internal_.bind(now);
+                    telemetry_.clear(telemetry::Source::afhds2a);
                 }
             }
-#endif
+            if constexpr (has_multiswitch) {
+                if (const auto slot = multiswitch_slot(); slot && !Input::touch) {
+                    if (crsf_.multiswitch.select) {
+                        if ((key == Key::cancel) || (key == Key::cancel_long))
+                            crsf_.multiswitch.select = false;
+                        else if ((key == Key::up) || (key == Key::down))
+                            crsf_.multiswitch.selected = static_cast<std::uint8_t>(
+                                (crsf_.multiswitch.selected + (key == Key::down ? 1U : 7U)) % 8U);
+                        else if ((key == Key::ok) && multiswitch_operable())
+                            crsf_.multiswitch.tapped = crsf_.multiswitch.selected;
+                        return;
+                    }
+                    if (key == Key::ok) {
+                        if (multiswitch_operable()) {
+                            crsf_.multiswitch.select = true;
+                            crsf_.multiswitch.selected = 0;
+                        } else
+                            radio_message_ = coretx::ui::tr::crsf_select_external;
+                        return;
+                    }
+                }
+            }
             if ((key == Key::ok_long) && !menu_.visible() &&
                 (diagnostics_.phase() == CalibrationPhase::idle)) {
                 menu_.open();
-#if CORETX_MULTISWITCH
-                multiswitch_select_ = false;
-#endif
+                if constexpr (has_multiswitch) {
+                    crsf_.multiswitch.select = false;
+                }
                 radio_message_ = nullptr;
                 return;
             }
@@ -552,31 +733,31 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
                     break;
                 case MenuCommand::format:
                     settings_.channel_mode = menu_.requested_format();
-#if CORETX_A7105
-                    internal_.set_channel_mode(settings_.channel_mode);
-#endif
+                    if constexpr (has_internal_rf) {
+                        internal_.set_channel_mode(settings_.channel_mode);
+                    }
                     save_radio();
                     break;
                 case MenuCommand::bind:
-#if CORETX_A7105
-                    radio_message_ = output_ != RadioOutput::internal
-                                         ? coretx::ui::tr::radio_select_internal
-                                     : !internal_.bind(now) ? coretx::ui::tr::not_initialized
-                                                            : nullptr;
-                    if (radio_message_ == nullptr) {
-                        telemetry_.clear(telemetry::Source::afhds2a);
+                    if constexpr (has_internal_rf) {
+                        radio_message_ = output_ != RadioOutput::internal
+                                             ? coretx::ui::tr::radio_select_internal
+                                         : !internal_.bind(now) ? coretx::ui::tr::not_initialized
+                                                                : nullptr;
+                        if (radio_message_ == nullptr) {
+                            telemetry_.clear(telemetry::Source::afhds2a);
+                        }
+                    } else {
+                        radio_message_ = coretx::ui::tr::radio_not_built;
                     }
-#else
-                    radio_message_ = coretx::ui::tr::radio_not_built;
-#endif
                     break;
                 case MenuCommand::baud:
                     models_.data().baud_index = menu_.requested_baud();
-#if CORETX_CRSF
-                    if ((output_ == RadioOutput::external) &&
-                        !Transmitter::set_baud(models_.data().baud_index, now))
-                        radio_message_ = coretx::ui::tr::bad_request;
-#endif
+                    if constexpr (has_external_rf) {
+                        if ((output_ == RadioOutput::external) &&
+                            !ExternalRFModule::set_baud(models_.data().baud_index, now))
+                            radio_message_ = coretx::ui::tr::bad_request;
+                    }
                     (void)models_.save();
                     break;
                 case MenuCommand::calibrate:
@@ -590,17 +771,43 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
                 case MenuCommand::input_setup:
                     input_menu_.open();
                     break;
-                case MenuCommand::crsf_config:
-#if CORETX_CRSF
-                    if (output_ != RadioOutput::external)
-                        radio_message_ = coretx::ui::tr::crsf_select_external;
-                    else if (Transmitter::error() != CrsfError::none)
-                        radio_message_ = coretx::ui::tr::crsf_link;
+                case MenuCommand::trim_beep: {
+                    auto setup = diagnostics_.input_setup();
+                    setup.trim_beep = !setup.trim_beep;
+                    if (input_storage_.save(setup))
+                        diagnostics_.set_trim_beep(setup.trim_beep);
                     else
-                        crsf_menu_.open(Transmitter::config(), now);
-#else
-                    radio_message_ = coretx::ui::tr::radio_not_built;
-#endif
+                        radio_message_ = input_storage_.message() != nullptr
+                                             ? input_storage_.message()
+                                             : coretx::ui::tr::bad_request;
+                    break;
+                }
+                case MenuCommand::external_module: {
+                    auto setup = diagnostics_.input_setup();
+                    setup.external_module = !setup.external_module;
+                    if (diagnostics_.phase() != CalibrationPhase::idle)
+                        radio_message_ = coretx::ui::tr::bad_request;
+                    else if (!input_storage_.save(setup))
+                        radio_message_ = input_storage_.message() != nullptr
+                                             ? input_storage_.message()
+                                             : coretx::ui::tr::bad_request;
+                    else if (!diagnostics_.set_input_setup(setup))
+                        radio_message_ = coretx::ui::tr::bad_request;
+                    else
+                        apply_inputs();
+                    break;
+                }
+                case MenuCommand::crsf_config:
+                    if constexpr (has_external_rf) {
+                        if (output_ != RadioOutput::external)
+                            radio_message_ = coretx::ui::tr::crsf_select_external;
+                        else if (ExternalRFModule::error() != CrsfError::none)
+                            radio_message_ = coretx::ui::tr::crsf_link;
+                        else
+                            crsf_.menu.open(ExternalRFModule::config(), now);
+                    } else {
+                        radio_message_ = coretx::ui::tr::radio_not_built;
+                    }
                     break;
                 case MenuCommand::initialize_models:
                     if (features::secure_ui && (output_ != RadioOutput::off))
@@ -622,13 +829,13 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
                 return;
             }
         }
-#if CORETX_A7105
-        if ((key == Key::cancel) && internal_.session().binding()) {
-            (void)internal_.bind(now);
-            telemetry_.clear(telemetry::Source::afhds2a);
-            return;
+        if constexpr (has_internal_rf) {
+            if ((key == Key::cancel) && internal_.session().binding()) {
+                (void)internal_.bind(now);
+                telemetry_.clear(telemetry::Source::afhds2a);
+                return;
+            }
         }
-#endif
         if ((key == Key::ok) && (radio_storage_.owns_memory() || input_storage_.owns_memory()))
             return;
         const auto phase = diagnostics_.phase();
@@ -653,45 +860,59 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         }
     }
     constexpr void render() noexcept {
+        if (shutting_down()) {
+            framebuffer_.clear();
+            framebuffer_.compact();
+            framebuffer_.text(0, 0, coretx::ui::tr::power_off);
+            const auto error = shutdown_error();
+            framebuffer_.text(0, 20, error != nullptr ? error : coretx::ui::tr::saving);
+            if ((error != nullptr) && (error != coretx::ui::tr::power_off_error))
+                framebuffer_.text(0, 48, coretx::ui::tr::power_off_error);
+            framebuffer_.compact(false);
+            overview_phase_ = 0;
+            Display::begin_frame();
+            return;
+        }
         const char *message = radio_message_;
         bool binding{};
-#if CORETX_A7105
-        binding = internal_.session().binding();
-        if (const auto error = internal_.error(); error != Afhds2aError::none) {
-            const auto bus_error = Radio::info().error;
-            message = (error == Afhds2aError::bus) && (bus_error != A7105Error::none)
-                          ? error_message(bus_error)
-                          : error_message(error);
-        }
-#endif
-#if CORETX_CRSF
-        if constexpr (has_menu) {
-            if (crsf_menu_.visible() || crsf_dashboard_page()) {
-                begin_menu_band();
-                const bool dashboard = crsf_dashboard_page();
-                const char *const navigation_help =
-                    !dashboard                     ? nullptr
-                    : !crsf_dashboard_interacting_ ? coretx::ui::tr::crsf_dashboard_help
-                    : Input::touch                 ? coretx::ui::tr::crsf_dashboard_touch_help
-                                                   : coretx::ui::tr::crsf_dashboard_active_help;
-                crsf_menu_.render(Transmitter::config(), framebuffer_, Board::now_us(),
-                                  dashboard && crsf_dashboard_interacting_, navigation_help);
-                const auto input_error = input_.message();
-                const auto adc_error = error_message(Adc::error());
-                const auto notice = crsf_dashboard_page() && (output_ != RadioOutput::external)
-                                        ? coretx::ui::tr::crsf_select_external
-                                    : input_error != nullptr ? input_error
-                                    : adc_error != nullptr   ? adc_error
-                                                             : radio_message_;
-                if (notice != nullptr) {
-                    framebuffer_.rectangle(0, 58, 128, 6, false);
-                    framebuffer_.small_text(0, 58, notice);
-                }
-                finish_menu_band();
-                return;
+        if constexpr (has_internal_rf) {
+            binding = internal_.session().binding();
+            if (const auto error = internal_.error(); error != Afhds2aError::none) {
+                const auto bus_error = Radio::info().error;
+                message = (error == Afhds2aError::bus) && (bus_error != A7105Error::none)
+                              ? error_message(bus_error)
+                              : error_message(error);
             }
         }
-#endif
+        if constexpr (has_external_rf) {
+            if constexpr (has_menu) {
+                if (crsf_.menu.visible() || crsf_dashboard_page()) {
+                    begin_menu_band();
+                    const bool dashboard = crsf_dashboard_page();
+                    const char *const navigation_help =
+                        !dashboard                     ? nullptr
+                        : Input::touch                 ? coretx::ui::tr::crsf_dashboard_touch_help
+                        : !crsf_.dashboard_interacting ? coretx::ui::tr::crsf_dashboard_help
+                                                       : coretx::ui::tr::crsf_dashboard_active_help;
+                    crsf_.menu.render(ExternalRFModule::config(), framebuffer_, Board::now_us(),
+                                      dashboard && crsf_.dashboard_interacting, navigation_help,
+                                      dashboard && Input::touch);
+                    const auto input_error = input_.message();
+                    const auto adc_error = error_message(Adc::error());
+                    const auto notice = crsf_dashboard_page() && (output_ != RadioOutput::external)
+                                            ? coretx::ui::tr::crsf_select_external
+                                        : input_error != nullptr ? input_error
+                                        : adc_error != nullptr   ? adc_error
+                                                                 : radio_message_;
+                    if (notice != nullptr) {
+                        framebuffer_.rectangle(0, 58, 128, 6, false);
+                        framebuffer_.small_text(0, 58, notice);
+                    }
+                    finish_menu_band();
+                    return;
+                }
+            }
+        }
         if (input_menu_.visible()) {
             begin_menu_band();
             input_menu_.render(diagnostics_, framebuffer_, input_storage_.message(),
@@ -722,7 +943,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         }
         const bool model_saving = [&] constexpr {
             if constexpr (has_menu)
-                return models_.loaded() && models_.busy();
+                return models_.loaded() && models_.busy() && !models_.background_loading();
             else
                 return false;
         }();
@@ -738,44 +959,45 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             else
                 return nullptr;
         }();
-#if CORETX_MULTISWITCH
-        if constexpr (has_menu) {
-            if (const auto slot = multiswitch_slot()) {
-                begin_menu_band();
-                framebuffer_.clear();
-                render_multiswitch(
-                    diagnostics_.model().multiswitch[*slot], *slot, multiswitch_.switches(*slot),
-                    multiswitch_select_ ? std::optional<std::size_t>{multiswitch_selected_}
-                                        : std::nullopt,
-                    framebuffer_, Input::touch && multiswitch_operable());
-                framebuffer_.small_text(0, 52, model_name);
-                const auto notice = input_.message() != nullptr ? input_.message()
-                                    : error_message(Adc::error()) != nullptr
-                                        ? error_message(Adc::error())
-                                    : model_error != nullptr ? model_error
-                                    : (output_ == RadioOutput::external) &&
-                                            (Transmitter::error() != CrsfError::none)
-                                        ? coretx::ui::tr::crsf_link
-                                    : message != nullptr           ? message
-                                    : !diagnostics_.calibrated()   ? coretx::ui::tr::need_cal
-                                    : !diagnostics_.valid()        ? coretx::ui::tr::wait_for_adc
-                                    : !diagnostics_.output_valid() ? coretx::ui::tr::control_error
-                                    : !multiswitch_operable() ? coretx::ui::tr::crsf_select_external
-                                    : Input::touch ? coretx::ui::tr::multiswitch_touch_help
-                                    : multiswitch_select_ && diagnostics_.model()
-                                                                 .multiswitch[*slot]
-                                                                 .controls[multiswitch_selected_]
-                                                                 .condition()
-                                                                 .enabled
-                                        ? coretx::ui::tr::multiswitch_bound_help
-                                    : multiswitch_select_ ? coretx::ui::tr::multiswitch_select_help
-                                                          : coretx::ui::tr::multiswitch_help;
-                framebuffer_.small_text(0, 58, notice);
-                finish_menu_band();
-                return;
+        if constexpr (has_multiswitch) {
+            if constexpr (has_menu) {
+                if (const auto slot = multiswitch_slot()) {
+                    begin_menu_band();
+                    framebuffer_.clear();
+                    render_multiswitch(diagnostics_.model().multiswitch[*slot], *slot,
+                                       crsf_.multiswitch.pages.switches(*slot),
+                                       crsf_.multiswitch.select
+                                           ? std::optional<std::size_t>{crsf_.multiswitch.selected}
+                                           : std::nullopt,
+                                       framebuffer_, Input::touch && multiswitch_operable());
+                    framebuffer_.small_text(0, 52, model_name);
+                    const auto notice =
+                        input_.message() != nullptr              ? input_.message()
+                        : error_message(Adc::error()) != nullptr ? error_message(Adc::error())
+                        : model_error != nullptr                 ? model_error
+                        : (output_ == RadioOutput::external) &&
+                                (ExternalRFModule::error() != CrsfError::none)
+                            ? coretx::ui::tr::crsf_link
+                        : message != nullptr           ? message
+                        : !diagnostics_.calibrated()   ? coretx::ui::tr::need_cal
+                        : !diagnostics_.valid()        ? coretx::ui::tr::wait_for_adc
+                        : !diagnostics_.output_valid() ? coretx::ui::tr::control_error
+                        : !multiswitch_operable()      ? coretx::ui::tr::crsf_select_external
+                        : Input::touch                 ? coretx::ui::tr::multiswitch_touch_help
+                        : crsf_.multiswitch.select && diagnostics_.model()
+                                                          .multiswitch[*slot]
+                                                          .controls[crsf_.multiswitch.selected]
+                                                          .condition()
+                                                          .enabled
+                            ? coretx::ui::tr::multiswitch_bound_help
+                        : crsf_.multiswitch.select ? coretx::ui::tr::multiswitch_select_help
+                                                   : coretx::ui::tr::multiswitch_help;
+                    framebuffer_.small_text(0, 58, notice);
+                    finish_menu_band();
+                    return;
+                }
             }
         }
-#endif
         if ((diagnostics_.page() == Diagnostics::overview_page) &&
             (diagnostics_.phase() == CalibrationPhase::idle) &&
             (error_message(Adc::error()) == nullptr) && (input_.message() == nullptr) &&
@@ -846,25 +1068,13 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     InputMenu input_menu_{};
     [[no_unique_address]] std::conditional_t<has_menu, ModelStorage<Memory>, NoMenu> models_{};
     [[no_unique_address]] std::conditional_t<has_menu, Menu, NoMenu> menu_{};
-#if CORETX_CRSF
-    [[no_unique_address]] std::conditional_t<has_menu, CrsfMenu, NoMenu> crsf_menu_{};
     [[no_unique_address]]
-    std::conditional_t<has_menu && features::multiswitch, coretx::multiswitch::Pages, NoMenu>
-        multiswitch_{};
-#if CORETX_MULTISWITCH
-    std::optional<std::size_t> multiswitch_tapped_{};
-    std::uint8_t multiswitch_selected_{};
-    bool multiswitch_select_{};
-#endif
-    bool crsf_dashboard_active_{};
-    bool crsf_dashboard_saved_{};
-    bool crsf_dashboard_interacting_{};
-#endif
+    std::conditional_t<has_external_rf, application_detail::CrsfUiState<has_menu, has_multiswitch>,
+                       DisabledFeature> crsf_{};
     RadioSettings settings_{};
     telemetry::Pool telemetry_{};
-#if CORETX_A7105
-    Internal internal_{};
-#endif
+    [[no_unique_address]]
+    std::conditional_t<has_internal_rf, InternalRFModule, DisabledFeature> internal_{};
     coretx::ui::Framebuffer framebuffer_{};
     TimestampUs drawn_at_{};
     TimestampUs sampled_at_{};
@@ -877,6 +1087,8 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     bool model_applied_{};
     bool input_applied_{};
     bool adc_extended_{};
+    [[no_unique_address]]
+    std::conditional_t<has_power, i6s::PowerButton, DisabledFeature> power_{};
     [[nodiscard]] constexpr bool model_owns_memory() const noexcept {
         if constexpr (has_menu)
             return models_.owns_memory();
@@ -885,4 +1097,4 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     }
 };
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

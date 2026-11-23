@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "boards/common/application.hpp"
+#include "boards/i6s/setup_controls.hpp"
 #include "platform/stm32f072/crsf.hpp"
 #include "static_fixture.hpp"
 
@@ -9,7 +10,8 @@
 namespace {
 
 namespace s = coretx::firmware::i6s;
-namespace x = coretx::firmware::i6x;
+namespace fw = coretx::firmware;
+using coretx::firmware::CrsfError;
 using coretx::firmware::Key;
 using coretx::firmware::LcdError;
 using coretx::firmware::stm32f072::HardwareError;
@@ -33,9 +35,12 @@ struct Context {
     s::TouchError touch_error{};
     s::TouchEvent touch_event{};
     s::TouchSample touch_sample{};
-    x::AdcError adc_error{};
-    x::ScanEvent adc_event{x::ScanEvent::pending};
-    std::array<std::uint16_t, x::sender_inputs.size()> samples{};
+    std::uint8_t rear_pressed{};
+    bool setup_leds{true};
+    bool setup_active{};
+    fw::AdcError adc_error{};
+    fw::ScanEvent adc_event{fw::ScanEvent::pending};
+    std::array<std::uint16_t, fw::sender_inputs.size()> samples{};
     Key key{};
     bool ok_held{};
     std::uint8_t trim_buttons{};
@@ -52,17 +57,24 @@ struct Context {
     bool powered{};
     bool internal_active{};
     bool internal_binding{};
+    bool power_button{};
+    unsigned power_releases{};
+    unsigned memory_delay{};
+    unsigned memory_remaining{};
+    bool memory_fail_writes{};
+    fw::I2cError memory_error{};
     bool receiver_changed{};
     bool tx_valid{};
     bool extra_analog{};
-    bool extra_digital{};
+    std::uint8_t extra_digital{};
     std::uint8_t digital_pressed{};
     unsigned center_clicks{};
+    unsigned multiswitch_clicks{};
     std::uint32_t sampled_at{};
     coretx::afhds2a::Channels radio_channels{};
     coretx::TimestampUs radio_sampled_at{};
     bool radio_valid{};
-    x::StorageProbeState probe_state{x::StorageProbeState::not_found};
+    fw::StorageProbeState probe_state{fw::StorageProbeState::not_found};
     coretx::crsf::Telemetry telemetry{};
     coretx::crsf::config::Client crsf_config{};
     coretx::crsf::Channels tx_channels{};
@@ -101,7 +113,7 @@ template <typename Test> struct Display {
 
 template <typename Test> struct InputHardware {
     static void initialize() {}
-    static void configure(bool enabled) {
+    static void configure(std::uint8_t enabled) {
         auto &c = Test::context;
         c.extra_digital = enabled;
     }
@@ -109,10 +121,15 @@ template <typename Test> struct InputHardware {
         auto &c = Test::context;
         return c.digital_pressed;
     }
-    static void service(coretx::TimestampUs, bool click) {
+    static void service(coretx::TimestampUs, bool click,
+                        fw::ClickTone tone = fw::ClickTone::control) {
         auto &c = Test::context;
-        if (click)
-            ++c.center_clicks;
+        if (click) {
+            if (tone == fw::ClickTone::multiswitch)
+                ++c.multiswitch_clicks;
+            else
+                ++c.center_clicks;
+        }
     }
     static void stop() {}
 };
@@ -242,26 +259,26 @@ template <typename Test> struct Touch {
 };
 
 template <typename Test> struct Adc {
-    static x::AdcError initialize() {
+    static fw::AdcError initialize() {
         auto &c = Test::context;
         return c.adc_error;
     }
-    static x::AdcError error() {
+    static fw::AdcError error() {
         auto &c = Test::context;
         return c.adc_error;
     }
-    static x::ScanEvent service(coretx::TimestampUs now) {
+    static fw::ScanEvent service(coretx::TimestampUs now) {
         auto &c = Test::context;
         ++c.adc_calls;
         if (c.adc_enabling) {
             const auto elapsed = now - coretx::TimestampUs{c.adc_started_at};
             if (elapsed >= coretx::DurationUs{10'000}) {
-                c.adc_error = x::AdcError::ready;
-                return x::ScanEvent::failed;
+                c.adc_error = fw::AdcError::ready;
+                return fw::ScanEvent::failed;
             }
             if (elapsed >= coretx::DurationUs{2})
                 c.adc_enabling = false;
-            return x::ScanEvent::pending;
+            return fw::ScanEvent::pending;
         }
         return c.adc_event;
     }
@@ -269,7 +286,7 @@ template <typename Test> struct Adc {
         auto &c = Test::context;
         return c.samples;
     }
-    static x::AdcError set_extended(bool enabled) {
+    static fw::AdcError set_extended(bool enabled) {
         auto &c = Test::context;
         c.extra_analog = enabled;
         if (c.adc_reconfigure_delay != 0) {
@@ -298,19 +315,20 @@ template <typename Test> struct Probe {
         auto &c = Test::context;
         ++c.probe_calls;
     }
-    static x::StorageProbeState state() {
+    static fw::StorageProbeState state() {
         auto &c = Test::context;
         return c.probe_state;
     }
-    static x::I2cError error() {
+    static fw::I2cError error() {
         auto &c = Test::context;
-        return c.probe_state == x::StorageProbeState::failed ? x::I2cError::bus : x::I2cError::none;
+        return c.probe_state == fw::StorageProbeState::failed ? fw::I2cError::bus
+                                                              : fw::I2cError::none;
     }
     static std::uint8_t acknowledged() { return 0; }
-    static x::StorageProbeResult result() {
+    static fw::StorageProbeResult result() {
         auto &c = Test::context;
         return {state(), error(),
-                static_cast<std::uint8_t>(c.probe_state == x::StorageProbeState::found ? 1 : 0)};
+                static_cast<std::uint8_t>(c.probe_state == fw::StorageProbeState::found ? 1 : 0)};
     }
 };
 
@@ -320,11 +338,17 @@ template <typename Test> struct Memory {
         if (address != 0x50)
             std::abort();
     }
-    static void service(coretx::TimestampUs) {}
-    static bool busy() { return false; }
-    static x::I2cError error() { return x::I2cError::none; }
+    static void service(coretx::TimestampUs) {
+        auto &c = Test::context;
+        if (c.memory_remaining != 0)
+            --c.memory_remaining;
+    }
+    static bool busy() { return Test::context.memory_remaining != 0; }
+    static fw::I2cError error() { return Test::context.memory_error; }
     static bool read(std::uint16_t address, std::span<std::uint8_t> bytes) {
         auto &c = Test::context;
+        c.memory_error = fw::I2cError::none;
+        c.memory_remaining = c.memory_delay;
         if ((address + bytes.size()) > c.eeprom.size())
             std::abort();
         std::copy_n(c.eeprom.begin() + address, bytes.size(), bytes.begin());
@@ -332,6 +356,10 @@ template <typename Test> struct Memory {
     }
     static bool write(std::uint16_t address, std::span<const std::uint8_t> bytes) {
         auto &c = Test::context;
+        c.memory_remaining = c.memory_delay;
+        c.memory_error = c.memory_fail_writes ? fw::I2cError::timeout : fw::I2cError::none;
+        if (c.memory_fail_writes)
+            return true;
         if ((address + bytes.size()) > c.eeprom.size())
             std::abort();
         std::copy(bytes.begin(), bytes.end(), c.eeprom.begin() + address);
@@ -339,7 +367,7 @@ template <typename Test> struct Memory {
     }
 };
 
-template <typename Test> struct Transmitter {
+template <typename Test> struct ExternalRFModule {
     static void power_off() {
         auto &c = Test::context;
         c.powered = false;
@@ -356,14 +384,14 @@ template <typename Test> struct Transmitter {
     }
     static bool set_baud(const std::size_t index, coretx::TimestampUs) {
         auto &c = Test::context;
-        if (index >= x::crsf_baudrates.size())
+        if (index >= coretx::firmware::crsf_baudrates.size())
             return false;
         c.baud_index = index;
         return true;
     }
-    static x::CrsfError service(coretx::TimestampUs now, const coretx::crsf::Channels &channels,
-                                bool valid, coretx::TimestampUs sampled_at,
-                                coretx::multiswitch::Pages *const pages = nullptr) {
+    static CrsfError service(coretx::TimestampUs now, const coretx::crsf::Channels &channels,
+                             bool valid, coretx::TimestampUs sampled_at,
+                             coretx::multiswitch::Pages *const pages = nullptr) {
         auto &c = Test::context;
         ++c.tx_calls;
         c.tx_valid = valid;
@@ -373,14 +401,14 @@ template <typename Test> struct Transmitter {
         if (pages != nullptr)
             for (std::size_t i = 0; i < c.multiswitch_states.size(); ++i)
                 c.multiswitch_states[i] = pages->switches(i);
-        return x::CrsfError::none;
+        return CrsfError::none;
     }
     static const coretx::crsf::Telemetry &telemetry() {
         auto &c = Test::context;
         return c.telemetry;
     }
     static coretx::crsf::config::Client &config() { return Test::context.crsf_config; }
-    static x::CrsfError error() { return x::CrsfError::none; }
+    static CrsfError error() { return CrsfError::none; }
     static std::uint32_t baudrate() { return 400'000; }
     static std::uint32_t actual_baudrate() { return 400'000; }
     static std::uint32_t frames() { return 0; }
@@ -394,7 +422,10 @@ template <typename Test> struct SenderBoard : Platform<Test> {
     using Keys = ::Keys<Test>;
     using Probe = ::Probe<Test>;
     using Memory = ::Memory<Test>;
-    using Transmitter = ::Transmitter<Test>;
+    using ExternalRFModule = std::conditional_t<fw::features::crsf, ::ExternalRFModule<Test>, void>;
+    using InternalRFModule =
+        std::conditional_t<fw::features::a7105, typename Platform<Test>::Internal, void>;
+    using Radio = std::conditional_t<fw::features::a7105, typename Platform<Test>::Radio, void>;
     using Input = coretx::firmware::PhysicalInput<Keys>;
     static void reset() noexcept {}
 };
@@ -402,6 +433,38 @@ template <typename Test> struct TouchSenderBoard : SenderBoard<Test> {
     using Input = coretx::firmware::TouchInput<::Touch<Test>>;
     inline static constexpr std::string_view name = "I6S";
     inline static constexpr bool sb_three_position = true;
+    static bool power_button_pressed() { return Test::context.power_button; }
+    static void release_power() { ++Test::context.power_releases; }
+};
+
+template <typename Test> struct SetupControls : s::SetupNavigation {
+    void initialize() {
+        static_cast<s::SetupNavigation &>(*this) = {};
+        Test::context.setup_leds = true;
+        Test::context.setup_active = false;
+    }
+    void set_mode(const coretx::TimestampUs now, const bool active) {
+        s::SetupNavigation::set_mode(now, active);
+        Test::context.setup_leds = led_on();
+        Test::context.setup_active = active;
+    }
+    Key service(const coretx::TimestampUs now, const bool enabled, const std::int16_t vra,
+                const std::int16_t vrb, const bool jog) {
+        const auto key =
+            s::SetupNavigation::service(now, Test::context.rear_pressed, enabled, vra, vrb, jog);
+        Test::context.setup_leds = led_on();
+        return key;
+    }
+};
+
+template <typename Test> struct SetupSenderBoard : TouchSenderBoard<Test> {
+    using Input = fw::TouchInput<::Touch<Test>, ::SetupControls<Test>>;
+};
+
+template <typename Test> struct DisabledModuleBoard : SenderBoard<Test> {
+    using InternalRFModule = void;
+    using ExternalRFModule = void;
+    using Radio = void;
 };
 
 template <typename App> auto step(App &application, Context &context, const std::uint32_t now) {
@@ -471,6 +534,30 @@ template <typename App> void bind_receiver(App &app, Context &c) {
     press_key(app, c, Key::ok);
 }
 
+bool disabled_module_types() {
+    struct Scenario {};
+    using Test = coretx::test::FakeApplication<Scenario, Context, DisabledModuleBoard>;
+    Test::reset();
+    auto &c = Test::context;
+    c.eeprom.fill(0xFF);
+    c.samples.fill(2000);
+    c.adc_event = fw::ScanEvent::complete;
+    fw::Application<Test::Board> app{};
+    if (app.initialize() != fw::ApplicationState::starting)
+        return false;
+    for (unsigned i = 0; i < 600; ++i)
+        if (step(app, c, c.now + 1000U) != fw::ApplicationState::running)
+            return false;
+    if (!app.models().loaded())
+        return false;
+    if constexpr (fw::features::a7105)
+        set_output(app, c, fw::RadioOutput::internal);
+    if constexpr (fw::features::crsf)
+        set_output(app, c, fw::RadioOutput::external);
+    return (app.output() == fw::RadioOutput::off) && !c.powered && !c.internal_active &&
+           (c.radio_initializations == 0) && (c.radio_calls == 0) && (c.tx_calls == 0);
+}
+
 bool touch_lifecycle() {
     for (const std::uint32_t base : {0U, 0xFFFFF000U}) {
         struct TestScenario {};
@@ -480,21 +567,21 @@ bool touch_lifecycle() {
         c.now = base;
         c.busy = true;
         c.finish_frame = false;
-        c.adc_event = x::ScanEvent::complete;
+        c.adc_event = fw::ScanEvent::complete;
         c.samples.fill(2000);
-        x::Application<Test::Board, Test::Board::Input> app{};
-        if ((app.initialize() != x::ApplicationState::starting) || (c.touch_initializations != 1))
+        fw::Application<Test::Board, Test::Board::Input> app{};
+        if ((app.initialize() != fw::ApplicationState::starting) || (c.touch_initializations != 1))
             return false;
         c.touch_ready = true;
         c.touch_event = s::TouchEvent::sample;
-        if ((step(app, c, base) != x::ApplicationState::running) ||
-            (app.diagnostics().phase() != x::CalibrationPhase::idle) || (c.touch_calls != 1) ||
+        if ((step(app, c, base) != fw::ApplicationState::running) ||
+            (app.diagnostics().phase() != fw::CalibrationPhase::idle) || (c.touch_calls != 1) ||
             (c.display_calls != 1))
             return false;
         c.finish_frame = true;
         // Touch received while the first display frame was busy must not arm a gesture.
         c.touch_event = s::TouchEvent::none;
-        if (step(app, c, base + 1U) != x::ApplicationState::running)
+        if (step(app, c, base + 1U) != fw::ApplicationState::running)
             return false;
         c.touch_event = s::TouchEvent::sample;
         c.touch_sample = {0, 0, 64, 32, 0, s::Gesture::none};
@@ -511,10 +598,10 @@ bool touch_lifecycle() {
         (void)step(app, c, base + 2U);
         c.touch_sample.x = 80;
         (void)step(app, c, base + 3U);
-        if ((app.diagnostics().phase() != x::CalibrationPhase::idle) || app.menu().visible())
+        if ((app.diagnostics().phase() != fw::CalibrationPhase::idle) || app.menu().visible())
             return false;
         (void)step(app, c, base + 4U);
-        if (app.diagnostics().phase() != x::CalibrationPhase::idle)
+        if (app.diagnostics().phase() != fw::CalibrationPhase::idle)
             return false;
         const auto swipe = [&](const s::Gesture gesture) {
             c.touch_sample = {0, 0, 64, 32, 0, s::Gesture::none};
@@ -540,16 +627,16 @@ bool touch_lifecycle() {
         swipe(s::Gesture::right);
         swipe(s::Gesture::down);
         swipe(s::Gesture::right);
-        if ((app.diagnostics().phase() != x::CalibrationPhase::center) || app.menu().visible())
+        if ((app.diagnostics().phase() != fw::CalibrationPhase::center) || app.menu().visible())
             return false;
         const auto draws = c.draws;
         c.touch_error = s::TouchError::nack;
         c.touch_ready = false;
         c.touch_event = s::TouchEvent::failed;
-        if (step(app, c, c.now + 1U) != x::ApplicationState::running)
+        if (step(app, c, c.now + 1U) != fw::ApplicationState::running)
             return false;
         (void)step(app, c, c.now + 50'000U);
-        if ((app.diagnostics().phase() != x::CalibrationPhase::center) ||
+        if ((app.diagnostics().phase() != fw::CalibrationPhase::center) ||
             (c.draws != (draws + 1)) || (c.touch_calls != c.display_calls) || (c.key_calls != 0) ||
             c.powered || c.internal_active)
             return false;
@@ -559,7 +646,7 @@ bool touch_lifecycle() {
         c.touch_event = s::TouchEvent::sample;
         c.touch_sample.gesture = s::Gesture::right;
         (void)step(app, c, c.now + 1U);
-        if (app.diagnostics().phase() != x::CalibrationPhase::center)
+        if (app.diagnostics().phase() != fw::CalibrationPhase::center)
             return false;
         c.touch_sample.contacts = 0;
         c.touch_sample.gesture = s::Gesture::none;
@@ -568,7 +655,7 @@ bool touch_lifecycle() {
         (void)step(app, c, c.now + 1U);
         c.touch_sample.x = 80;
         (void)step(app, c, c.now + 1U);
-        if ((app.diagnostics().phase() != x::CalibrationPhase::range) || (c.key_calls != 0))
+        if ((app.diagnostics().phase() != fw::CalibrationPhase::range) || (c.key_calls != 0))
             return false;
     }
     return true;
@@ -581,21 +668,21 @@ bool startup_errors() {
     auto &touch = TouchTest::context;
     touch.busy = true;
     touch.finish_frame = false;
-    touch.adc_event = x::ScanEvent::complete;
+    touch.adc_event = fw::ScanEvent::complete;
     touch.samples.fill(2000);
-    x::Application<TouchTest::Board, TouchTest::Board::Input> touch_app{};
-    if (touch_app.initialize() != x::ApplicationState::starting)
+    fw::Application<TouchTest::Board, TouchTest::Board::Input> touch_app{};
+    if (touch_app.initialize() != fw::ApplicationState::starting)
         return false;
     const auto initial_draws = touch.draws;
     touch.touch_error = s::TouchError::timeout;
     touch.touch_event = s::TouchEvent::failed;
-    if ((step(touch_app, touch, 1) != x::ApplicationState::running) ||
+    if ((step(touch_app, touch, 1) != fw::ApplicationState::running) ||
         (touch.draws != initial_draws))
         return false;
     touch.finish_frame = true;
-    if ((step(touch_app, touch, 50'001) != x::ApplicationState::running) ||
+    if ((step(touch_app, touch, 50'001) != fw::ApplicationState::running) ||
         (touch.draws != (initial_draws + 1)) ||
-        (touch_app.diagnostics().phase() != x::CalibrationPhase::idle) || (touch.key_calls != 0) ||
+        (touch_app.diagnostics().phase() != fw::CalibrationPhase::idle) || (touch.key_calls != 0) ||
         touch.powered || touch.internal_active)
         return false;
 
@@ -603,12 +690,12 @@ bool startup_errors() {
     using SenderTest = coretx::test::FakeApplication<SenderTestScenario, Context, SenderBoard>;
     SenderTest::reset();
     auto &sender = SenderTest::context;
-    sender.adc_error = x::AdcError::calibration;
-    x::Application<SenderTest::Board> sender_app{};
-    if (sender_app.initialize() != x::ApplicationState::input_error)
+    sender.adc_error = fw::AdcError::calibration;
+    fw::Application<SenderTest::Board> sender_app{};
+    if (sender_app.initialize() != fw::ApplicationState::input_error)
         return false;
     sender.key = Key::down;
-    return (step(sender_app, sender, 1) == x::ApplicationState::input_error) && !sender.powered &&
+    return (step(sender_app, sender, 1) == fw::ApplicationState::input_error) && !sender.powered &&
            !sender.tx_valid && (sender.tx_calls == 0) && (sender_app.diagnostics().page() == 1);
 }
 
@@ -617,19 +704,19 @@ bool sender_lifecycle() {
     using Test = coretx::test::FakeApplication<TestScenario, Context, SenderBoard>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
     c.samples.fill(2000);
-    for (const auto index : x::switch_indices)
+    for (const auto index : fw::switch_indices)
         c.samples[index] = 0;
-    x::Application<typename Test::Board> app{};
-    if (app.initialize() != x::ApplicationState::starting)
+    fw::Application<typename Test::Board> app{};
+    if (app.initialize() != fw::ApplicationState::starting)
         return false;
     (void)step(app, c, 0);
-    if ((app.state() != x::ApplicationState::starting) || c.tx_valid)
+    if ((app.state() != fw::ApplicationState::starting) || c.tx_valid)
         return false;
-    c.adc_event = x::ScanEvent::complete;
-    if ((step(app, c, 5'000) != x::ApplicationState::running) || c.tx_valid)
+    c.adc_event = fw::ScanEvent::complete;
+    if ((step(app, c, 5'000) != fw::ApplicationState::running) || c.tx_valid)
         return false;
     settle_menu(app, c);
     open_sender_setup(app, c);
@@ -639,10 +726,10 @@ bool sender_lifecycle() {
     (void)step(app, c, 10'000);
     (void)step(app, c, 15'000);
     c.key = Key::none;
-    for (const auto index : x::analog_indices)
+    for (const auto index : fw::analog_indices)
         c.samples[index] = 400;
     (void)step(app, c, 20'000);
-    for (const auto index : x::analog_indices)
+    for (const auto index : fw::analog_indices)
         c.samples[index] = 3600;
     (void)step(app, c, 25'000);
     c.key = Key::ok;
@@ -656,10 +743,10 @@ bool sender_lifecycle() {
         if (!c.tx_valid || (c.sampled_at != 32'000) || !c.powered || c.internal_active)
             return false;
     }
-    c.adc_error = x::AdcError::overrun;
-    c.adc_event = x::ScanEvent::failed;
+    c.adc_error = fw::AdcError::overrun;
+    c.adc_event = fw::ScanEvent::failed;
     c.key = Key::down;
-    if ((step(app, c, 35'000) != x::ApplicationState::input_error) || c.tx_valid ||
+    if ((step(app, c, 35'000) != fw::ApplicationState::input_error) || c.tx_valid ||
         (c.powered != coretx::firmware::features::crsf))
         return false;
     if constexpr (coretx::firmware::features::crsf) {
@@ -689,17 +776,17 @@ template <template <typename> typename BoardPolicy> bool sender_fatal_priority()
         using Test = coretx::test::FakeApplication<TestScenario, Context, BoardPolicy>;
         Test::reset();
         auto &c = Test::context;
-        x::Application<typename Test::Board, typename Test::Board::Input> app{};
+        fw::Application<typename Test::Board, typename Test::Board::Input> app{};
         if (kind == 0)
             c.hardware_error = HardwareError::pll_ready;
         if (kind == 1)
             c.lcd_init_error = LcdError::frame_busy;
         const auto initialized = app.initialize();
         if (kind < 2) {
-            if ((initialized != x::ApplicationState::fatal) || c.powered ||
+            if ((initialized != fw::ApplicationState::fatal) || c.powered ||
                 (c.touch_initializations != 0) ||
                 (app.failure() !=
-                 (kind == 0 ? x::ApplicationFailure::hardware : x::ApplicationFailure::lcd)))
+                 (kind == 0 ? fw::ApplicationFailure::hardware : fw::ApplicationFailure::lcd)))
                 return false;
             continue;
         }
@@ -707,18 +794,18 @@ template <template <typename> typename BoardPolicy> bool sender_fatal_priority()
         c.touch_ready = true;
         c.touch_event = s::TouchEvent::sample;
         c.touch_sample = {0, 0, 80, 32, 1, s::Gesture::right};
-        c.adc_event = x::ScanEvent::complete;
+        c.adc_event = fw::ScanEvent::complete;
         if (kind == 2)
             c.lcd_error = LcdError::frame_busy;
         if (kind == 3)
             c.stack_ok = false;
         if (kind == 4)
             c.break_stack_on_display = true;
-        if ((step(app, c, 1) != x::ApplicationState::fatal) || c.powered || c.internal_active ||
+        if ((step(app, c, 1) != fw::ApplicationState::fatal) || c.powered || c.internal_active ||
             (c.key_calls != 0) || (c.touch_calls != 0) || (c.adc_calls != 0) || (c.tx_calls != 0) ||
-            (app.diagnostics().phase() != x::CalibrationPhase::idle) ||
+            (app.diagnostics().phase() != fw::CalibrationPhase::idle) ||
             (app.failure() !=
-             (kind == 2 ? x::ApplicationFailure::lcd : x::ApplicationFailure::stack)))
+             (kind == 2 ? fw::ApplicationFailure::lcd : fw::ApplicationFailure::stack)))
             return false;
         (void)step(app, c, 2);
         if ((c.tx_calls != 0) || (c.touch_calls != 0) || (c.key_calls != 0) || (c.adc_calls != 0))
@@ -733,11 +820,11 @@ bool shared_touch_sender() {
     Test::reset();
     auto &c = Test::context;
     c.touch_ready = true;
-    c.adc_event = x::ScanEvent::complete;
+    c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2000);
-    x::Application<Test::Board, Test::Board::Input> app{};
-    if ((app.initialize() == x::ApplicationState::fatal) ||
-        (step(app, c, 0) != x::ApplicationState::running) ||
+    fw::Application<Test::Board, Test::Board::Input> app{};
+    if ((app.initialize() == fw::ApplicationState::fatal) ||
+        (step(app, c, 0) != fw::ApplicationState::running) ||
         (app.diagnostics().raw().switches[1] != coretx::SwitchPosition::middle))
         return false;
     c.touch_event = s::TouchEvent::sample;
@@ -754,14 +841,14 @@ bool shared_touch_sender() {
     (void)step(app, c, 1);
     c.touch_sample.x = 80;
     (void)step(app, c, 2);
-    if ((app.diagnostics().phase() != x::CalibrationPhase::idle) ||
-        (app.diagnostics().page() != x::Diagnostics::system_page))
+    if ((app.diagnostics().phase() != fw::CalibrationPhase::idle) ||
+        (app.diagnostics().page() != fw::Diagnostics::system_page))
         return false;
     c.touch_error = s::TouchError::nack;
     c.touch_ready = false;
     (void)step(app, c, 50'001);
     return (c.key_calls == 0) && (c.touch_calls == 8) && (c.adc_calls == 8) && !c.powered &&
-           (app.diagnostics().phase() == x::CalibrationPhase::idle);
+           (app.diagnostics().phase() == fw::CalibrationPhase::idle);
 }
 
 bool shared_touch_menus() {
@@ -772,14 +859,17 @@ bool shared_touch_menus() {
     c.touch_ready = true;
     c.touch_event = s::TouchEvent::sample;
     c.touch_sample = {0, 0, 64, 32, 1, s::Gesture::none};
-    x::Application<Test::Board, Test::Board::Input> app{};
+    fw::Application<Test::Board, Test::Board::Input> app{};
     (void)app.initialize();
-    for (unsigned now = 0; now <= 800000; now += 20000)
+    for (unsigned now = 0; now <= 800000; now += 2000) {
+        c.touch_event = now % 242000 == 0 ? s::TouchEvent::sample : s::TouchEvent::none;
         (void)step(app, c, now);
-    if (!app.menu().visible() || (app.menu().screen() != x::MenuScreen::root) ||
-        (app.diagnostics().phase() != x::CalibrationPhase::idle))
+    }
+    if (!app.menu().visible() || (app.menu().screen() != fw::MenuScreen::root) ||
+        (app.diagnostics().phase() != fw::CalibrationPhase::idle))
         return false;
     c.touch_sample.contacts = 0;
+    c.touch_event = s::TouchEvent::sample;
     (void)step(app, c, 820000);
     c.touch_sample.contacts = 1;
     c.touch_sample.x = 80;
@@ -789,17 +879,161 @@ bool shared_touch_menus() {
     return !app.menu().visible() && (c.key_calls == 0);
 }
 
+bool safe_power_off() {
+    for (const bool failure : {false, true}) {
+        struct Scenario {};
+        using Test = coretx::test::FakeApplication<Scenario, Context, TouchSenderBoard>;
+        Test::reset();
+        auto &c = Test::context;
+        c.eeprom.fill(0xFF);
+        c.probe_state = fw::StorageProbeState::found;
+        c.power_button = true;
+        c.adc_event = fw::ScanEvent::complete;
+        c.samples.fill(2000);
+        fw::Application<typename Test::Board> app{};
+        if (app.initialize() == fw::ApplicationState::fatal)
+            return false;
+        settle_menu(app, c);
+        if (app.models().busy() || !app.models().editable())
+            return false;
+        if constexpr (fw::features::crsf)
+            set_output(app, c, fw::RadioOutput::external);
+        else if constexpr (fw::features::a7105)
+            set_output(app, c, fw::RadioOutput::internal);
+        (void)step(app, c, c.now + 2'000'000U);
+        if (c.power_releases != 0)
+            return false;
+        c.power_button = false;
+        (void)step(app, c, c.now + 1U);
+        (void)step(app, c, c.now + 30'000U);
+        if constexpr (!fw::features::secure_ui) {
+            press_key(app, c, Key::ok_long);
+            press_key(app, c, Key::down);
+            press_key(app, c, Key::ok);
+            press_key(app, c, Key::ok);
+            press_key(app, c, Key::ok);
+            press_key(app, c, Key::down);
+            press_key(app, c, Key::ok);
+            press_key(app, c, Key::down);
+            c.key = Key::none;
+            if (!app.menu().pending_model_edit() ||
+                (app.models().data().model.inputs[0].weight_percent.value() != 99))
+                return false;
+        }
+        c.power_button = true;
+        (void)step(app, c, c.now + 1U);
+        (void)step(app, c, c.now + 1'499'999U);
+        if (c.power_releases != 0)
+            return false;
+        c.trim_buttons = 1;
+        (void)step(app, c, c.now);
+        c.trim_buttons = 0;
+        if (!app.models().busy() || (app.models().data().model.trims[0].value() != 1))
+            return false;
+        c.memory_delay = 2;
+        c.memory_fail_writes = failure;
+        (void)step(app, c, c.now + 1U);
+        if ((c.power_releases != 0) || c.powered || c.internal_active ||
+            (app.output() != fw::RadioOutput::off) || app.menu().pending_model_edit() ||
+            (app.models().data().model.inputs[0].weight_percent.value() != 100))
+            return false;
+        for (unsigned i = 0; i < 1000; ++i)
+            (void)step(app, c, c.now + 1000U);
+        if (failure) {
+            if ((c.power_releases != 0) || (app.state() == fw::ApplicationState::powered_off) ||
+                (app.output() != fw::RadioOutput::off))
+                return false;
+        } else {
+            if ((c.power_releases != 1) || (app.state() != fw::ApplicationState::powered_off) ||
+                app.models().busy())
+                return false;
+            const auto index = app.models().active();
+            const auto bank = app.models().entries()[index].bank;
+            fw::models::Record record{};
+            std::copy_n(c.eeprom.begin() + fw::models::base +
+                            (index * 2 + bank) * fw::models::record_size,
+                        record.size(), record.begin());
+            fw::models::Data restored{};
+            fw::models::Info info{};
+            if ((fw::models::decode(record, index, Test::Board::transmitter_id(), restored, info) !=
+                 1) ||
+                (restored.model.trims[0].value() != 1) ||
+                (restored.model.inputs[0].weight_percent.value() != 100))
+                return false;
+            const auto saved_output = fw::features::crsf    ? fw::RadioOutput::external
+                                      : fw::features::a7105 ? fw::RadioOutput::internal
+                                                            : fw::RadioOutput::off;
+            if (restored.radio.output != saved_output)
+                return false;
+            const auto adc_calls = c.adc_calls;
+            (void)step(app, c, c.now + 2'000'000U);
+            if ((c.power_releases != 1) || (c.adc_calls != adc_calls))
+                return false;
+        }
+    }
+    return true;
+}
+
+bool power_off_during_load() {
+    struct Scenario {};
+    using Test = coretx::test::FakeApplication<Scenario, Context, TouchSenderBoard>;
+    Test::reset();
+    auto &c = Test::context;
+    c.eeprom.fill(0xFF);
+    c.probe_state = fw::StorageProbeState::scanning;
+    c.adc_event = fw::ScanEvent::complete;
+    c.samples.fill(2048);
+    c.touch_ready = true;
+    c.touch_event = s::TouchEvent::sample;
+    coretx::storage::State calibration{fw::diagnostic_model, {}};
+    calibration.setup.calibration.fill({0, 2048, 4095});
+    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
+    coretx::storage::Record calibration_record{};
+    if (!coretx::storage::encode(calibration, 0, calibration_record))
+        return false;
+    std::copy(calibration_record.begin(), calibration_record.end(), c.eeprom.begin());
+    fw::models::Data data{};
+    data.radio.transmitter = {0x12345678};
+    data.radio.output = fw::features::crsf    ? fw::RadioOutput::external
+                        : fw::features::a7105 ? fw::RadioOutput::internal
+                                              : fw::RadioOutput::off;
+    fw::models::Record record{};
+    if (!fw::models::encode(data, 0, true, 0, record))
+        return false;
+    std::copy(record.begin(), record.end(), c.eeprom.begin() + fw::models::base);
+    fw::Application<typename Test::Board, typename Test::Board::Input> app{};
+    (void)app.initialize();
+    (void)step(app, c, 1);
+    (void)step(app, c, 30'001);
+    c.power_button = true;
+    (void)step(app, c, 30'002);
+    (void)step(app, c, 1'530'002);
+    if (c.power_releases != 0)
+        return false;
+    c.probe_state = fw::StorageProbeState::found;
+    for (unsigned i = 0; i < 1000; ++i) {
+        (void)step(app, c, c.now + 1000U);
+        if (c.powered || c.internal_active || (app.output() != fw::RadioOutput::off)) {
+            std::fprintf(stderr, "Shutdown load RF: iteration=%u output=%u\n", i,
+                         static_cast<unsigned>(app.output()));
+            return false;
+        }
+    }
+    return (c.power_releases == 1) && (app.state() == fw::ApplicationState::powered_off) &&
+           (app.models().data().radio.output == data.radio.output);
+}
+
 template <template <typename> typename BoardPolicy> bool input_setup_recovery() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, BoardPolicy>;
     using Board = typename Test::Board;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
     const auto base = coretx::firmware::input_storage::base_address;
     std::fill_n(c.eeprom.begin() + base, 256, 0);
-    coretx::storage::State legacy{x::diagnostic_model, {}};
+    coretx::storage::State legacy{fw::diagnostic_model, {}};
     for (auto &axis : legacy.setup.calibration)
         axis = {0, 2048, 4095};
     legacy.setup.calibration[4] = {100, 1000, 3500};
@@ -808,7 +1042,7 @@ template <template <typename> typename BoardPolicy> bool input_setup_recovery() 
     if (!coretx::storage::encode(legacy, 0, calibration))
         return false;
     std::copy(calibration.begin(), calibration.end(), c.eeprom.begin());
-    x::Application<Board> app{};
+    fw::Application<Board> app{};
     (void)app.initialize();
     const auto press = [&](const Key key) {
         c.key = key;
@@ -843,7 +1077,7 @@ template <template <typename> typename BoardPolicy> bool input_setup_recovery() 
     for (unsigned i = 0; i < 100; ++i)
         press(Key::none);
     return coretx::firmware::features::extended_inputs
-               ? app.diagnostics().input_setup().extra_digital
+               ? app.diagnostics().input_setup().extra_analog
                : app.diagnostics().input_setup().modes[0] == coretx::InputMode::three_position;
 }
 
@@ -852,7 +1086,7 @@ bool display_refresh_interval() {
     using Test = coretx::test::FakeApplication<Scenario, Context, SenderBoard>;
     Test::reset();
     auto &c = Test::context;
-    x::Application<typename Test::Board> app{};
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     const auto initial = c.draws;
     (void)step(app, c, 19999);
@@ -877,26 +1111,26 @@ bool overview_keeps_channels_live() {
     using Test = coretx::test::FakeApplication<Scenario, Context, SenderBoard>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
-    c.adc_event = x::ScanEvent::complete;
+    c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
-    coretx::storage::State calibration{x::diagnostic_model, {}};
+    coretx::storage::State calibration{fw::diagnostic_model, {}};
     calibration.setup.calibration.fill({0, 2048, 4095});
     calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
     coretx::storage::Record record{};
     if (!coretx::storage::encode(calibration, 0, record))
         return false;
     std::copy(record.begin(), record.end(), c.eeprom.begin());
-    x::models::Data model{};
+    fw::models::Data model{};
     model.radio.transmitter = {0x12345678};
     model.radio.receiver = {0x87654321};
     model.radio.output = coretx::firmware::RadioOutput::internal;
-    x::models::Record model_record{};
-    if (!x::models::encode(model, 0, true, 0, model_record))
+    fw::models::Record model_record{};
+    if (!fw::models::encode(model, 0, true, 0, model_record))
         return false;
-    std::copy(model_record.begin(), model_record.end(), c.eeprom.begin() + x::models::base);
-    x::Application<typename Test::Board> app{};
+    std::copy(model_record.begin(), model_record.end(), c.eeprom.begin() + fw::models::base);
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     for (unsigned i = 0; i < 300; ++i)
         (void)step(app, c, c.now + 1000U);
@@ -905,12 +1139,12 @@ bool overview_keeps_channels_live() {
     for (unsigned i = 0; i < 2; ++i) {
         press_key(app, c, Key::ok);
         if ((app.output() != coretx::firmware::RadioOutput::internal) || c.internal_binding ||
-            (app.diagnostics().phase() != x::CalibrationPhase::idle) ||
+            (app.diagnostics().phase() != fw::CalibrationPhase::idle) ||
             (c.internal_mode != coretx::afhds2a::ChannelMode::standard14) || (c.baud_index != 1))
             return false;
         press_key(app, c, Key::down);
     }
-    if (app.diagnostics().page() != x::Diagnostics::overview_page)
+    if (app.diagnostics().page() != fw::Diagnostics::overview_page)
         return false;
     c.key = Key::none;
     c.finish_frame = false;
@@ -1034,8 +1268,8 @@ bool failed_input_storage_blocks_rf() {
     using Test = coretx::test::FakeApplication<TestScenario, Context, SenderBoard>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::failed;
-    x::Application<typename Test::Board> app{};
+    c.probe_state = fw::StorageProbeState::failed;
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     (void)step(app, c, 0);
     if constexpr (coretx::firmware::features::a7105)
@@ -1050,9 +1284,9 @@ bool exclusive_outputs() {
     using Test = coretx::test::FakeApplication<TestScenario, Context, SenderBoard>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
-    x::Application<typename Test::Board> app{};
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     (void)step(app, c, 0);
     if ((app.output() != coretx::firmware::RadioOutput::off) || c.powered || c.internal_active)
@@ -1086,9 +1320,9 @@ bool channel_mode_persistence() {
     using Test = coretx::test::FakeApplication<TestScenario, Context, SenderBoard>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
-    x::Application<typename Test::Board> app{};
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     for (unsigned i = 0; i < 1000; ++i)
         (void)step(app, c, i);
@@ -1103,9 +1337,9 @@ bool channel_mode_persistence() {
     using RebootTest = coretx::test::FakeApplication<RebootTestScenario, Context, SenderBoard>;
     RebootTest::reset();
     auto &reboot = RebootTest::context;
-    reboot.probe_state = x::StorageProbeState::found;
+    reboot.probe_state = fw::StorageProbeState::found;
     reboot.eeprom = c.eeprom;
-    x::Application<RebootTest::Board> restored{};
+    fw::Application<RebootTest::Board> restored{};
     (void)restored.initialize();
     for (unsigned i = 0; i < 1000; ++i)
         (void)step(restored, reboot, i);
@@ -1139,11 +1373,11 @@ bool channel_mode_persistence() {
     reboot.key = Key::none;
     for (unsigned i = 0; i < 100; ++i)
         (void)step(restored, reboot, 3000 + i);
-    x::ModelStorage<RebootTest::Board::Memory> journal{};
+    fw::ModelStorage<RebootTest::Board::Memory> journal{};
     journal.initialize({0x12345678});
     for (unsigned i = 0; i < 1000; ++i)
         journal.service(coretx::TimestampUs{i}, RebootTest::Board::Probe::result(),
-                        x::diagnostic_model, coretx::firmware::RadioSettings{{0x12345678}});
+                        fw::diagnostic_model, coretx::firmware::RadioSettings{{0x12345678}});
     return journal.loaded() && (journal.data().radio.channel_mode == Mode::standard14) &&
            std::all_of(reboot.eeprom.begin(), reboot.eeprom.begin() + 2048,
                        [](const auto byte) { return byte == 0xFF; });
@@ -1155,19 +1389,19 @@ bool unified_sender_telemetry() {
     using Test = coretx::test::FakeApplication<TestScenario, Context, SenderBoard>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
     c.samples.fill(2000);
-    c.samples[x::battery_index] = 2526;
-    c.adc_event = x::ScanEvent::complete;
-    x::Application<typename Test::Board> app{};
+    c.samples[fw::battery_index] = 2526;
+    c.adc_event = fw::ScanEvent::complete;
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     (void)step(app, c, 100);
     const auto *battery = app.telemetry().find(tm::transmitter_battery);
     if ((battery == nullptr) || (battery->value != 6200) ||
         (battery->updated_at != coretx::TimestampUs{100}))
         return false;
-    c.adc_event = x::ScanEvent::pending;
+    c.adc_event = fw::ScanEvent::pending;
     if constexpr (coretx::firmware::features::crsf) {
         set_output(app, c, coretx::firmware::RadioOutput::external);
         const auto received_at = c.now + 100U;
@@ -1191,10 +1425,10 @@ bool unified_sender_telemetry() {
         return false;
     press_key(app, c, Key::down);
     press_key(app, c, Key::ok);
-    if (app.diagnostics().phase() != x::CalibrationPhase::idle)
+    if (app.diagnostics().phase() != fw::CalibrationPhase::idle)
         return false;
-    c.adc_error = x::AdcError::overrun;
-    c.adc_event = x::ScanEvent::failed;
+    c.adc_error = fw::AdcError::overrun;
+    c.adc_event = fw::ScanEvent::failed;
     c.key = Key::none;
     (void)step(app, c, c.now + 1U);
     return !app.telemetry().find(tm::transmitter_battery)->valid;
@@ -1206,12 +1440,12 @@ template <template <typename> typename BoardPolicy> bool transmitter_menu_models
     using Board = typename Test::Board;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
-    c.adc_event = x::ScanEvent::complete;
+    c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
     c.samples[0] = 0;
-    coretx::storage::State legacy{x::diagnostic_model, {}};
+    coretx::storage::State legacy{fw::diagnostic_model, {}};
     for (auto &axis : legacy.setup.calibration)
         axis = {0, 2048, 4095};
     legacy.setup.mapping[0].reversed = legacy.setup.mapping[1].reversed = true;
@@ -1219,7 +1453,7 @@ template <template <typename> typename BoardPolicy> bool transmitter_menu_models
     if (!coretx::storage::encode(legacy, 0, calibration))
         return false;
     std::copy(calibration.begin(), calibration.end(), c.eeprom.begin());
-    x::models::Data first{}, second{};
+    fw::models::Data first{}, second{};
     first.radio = {{0x12345678},
                    {0x87654321},
                    coretx::firmware::RadioOutput::off,
@@ -1235,23 +1469,23 @@ template <template <typename> typename BoardPolicy> bool transmitter_menu_models
                   c.eeprom.begin() + coretx::firmware::input_storage::base_address);
     }
     second = first;
-    second.model = x::models::four_channel_model();
+    second.model = fw::models::four_channel_model();
     second.radio.receiver = {0x10203040};
     second.radio.channel_mode = coretx::afhds2a::ChannelMode::extended16;
     second.radio.output =
         coretx::firmware::features::a7105  ? coretx::firmware::RadioOutput::internal
         : coretx::firmware::features::crsf ? coretx::firmware::RadioOutput::external
                                            : coretx::firmware::RadioOutput::off;
-    x::models::default_name(second.name, 1);
-    x::models::Record record{};
-    if (!x::models::encode(first, 0, true, 0, record))
+    fw::models::default_name(second.name, 1);
+    fw::models::Record record{};
+    if (!fw::models::encode(first, 0, true, 0, record))
         return false;
-    std::copy(record.begin(), record.end(), c.eeprom.begin() + x::models::base);
-    if (!x::models::encode(second, 1, true, 0, record))
+    std::copy(record.begin(), record.end(), c.eeprom.begin() + fw::models::base);
+    if (!fw::models::encode(second, 1, true, 0, record))
         return false;
     std::copy(record.begin(), record.end(),
-              c.eeprom.begin() + x::models::base + 2 * x::models::record_size);
-    x::Application<Board> app{};
+              c.eeprom.begin() + fw::models::base + 2 * fw::models::record_size);
+    fw::Application<Board> app{};
     (void)app.initialize();
     const auto press = [&](const Key key) {
         c.key = key;
@@ -1265,7 +1499,7 @@ template <template <typename> typename BoardPolicy> bool transmitter_menu_models
     settle();
     const auto initial = app.diagnostics().evaluation().frame.channels[0];
     press(Key::ok_long);
-    if (!app.menu().visible() || (app.diagnostics().phase() != x::CalibrationPhase::idle))
+    if (!app.menu().visible() || (app.diagnostics().phase() != fw::CalibrationPhase::idle))
         return false;
     press(Key::down);
     press(Key::ok);
@@ -1301,10 +1535,10 @@ template <template <typename> typename BoardPolicy> bool transmitter_menu_models
     press(Key::ok_long);
     press(Key::down);
     press(Key::ok);
-    for (std::size_t i = 0; i < x::menu_detail::trim_row; ++i)
+    for (std::size_t i = 0; i < fw::menu_detail::trim_row; ++i)
         press(Key::down);
     press(Key::ok);
-    if (app.menu().screen() != x::MenuScreen::trims)
+    if (app.menu().screen() != fw::MenuScreen::trims)
         return false;
     if constexpr (!coretx::firmware::features::i6s)
         press(Key::down);
@@ -1370,9 +1604,9 @@ template <template <typename> typename BoardPolicy> bool transmitter_menu_models
     using RebootTest = coretx::test::FakeApplication<RebootTestScenario, Context, BoardPolicy>;
     RebootTest::reset();
     auto &reboot = RebootTest::context;
-    reboot.probe_state = x::StorageProbeState::found;
+    reboot.probe_state = fw::StorageProbeState::found;
     reboot.eeprom = c.eeprom;
-    x::Application<typename RebootTest::Board> restored{};
+    fw::Application<typename RebootTest::Board> restored{};
     (void)restored.initialize();
     for (unsigned i = 0; i < 1000; ++i)
         (void)step(restored, reboot, i);
@@ -1388,11 +1622,11 @@ template <template <typename> typename BoardPolicy> bool calibration_reboot() {
     using Test = coretx::test::FakeApplication<Scenario, Context, BoardPolicy>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
-    c.adc_event = x::ScanEvent::complete;
+    c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
-    x::Application<typename Test::Board> app{};
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     settle_menu(app, c);
     press_key(app, c, Key::ok_long);
@@ -1401,32 +1635,32 @@ template <template <typename> typename BoardPolicy> bool calibration_reboot() {
     press_key(app, c, Key::ok);
     press_key(app, c, Key::down);
     press_key(app, c, Key::ok);
-    if (app.diagnostics().phase() != x::CalibrationPhase::center)
+    if (app.diagnostics().phase() != fw::CalibrationPhase::center)
         return false;
     press_key(app, c, Key::ok);
-    if (app.diagnostics().phase() != x::CalibrationPhase::range)
+    if (app.diagnostics().phase() != fw::CalibrationPhase::range)
         return false;
     c.key = Key::none;
-    for (const auto index : x::analog_indices)
+    for (const auto index : fw::analog_indices)
         c.samples[index] = 400;
     (void)step(app, c, c.now + 1000U);
-    for (const auto index : x::analog_indices)
+    for (const auto index : fw::analog_indices)
         c.samples[index] = 3600;
     (void)step(app, c, c.now + 1000U);
     press_key(app, c, Key::ok);
     if (!app.diagnostics().calibrated() || !app.diagnostics().output_valid() ||
-        (app.diagnostics().phase() != x::CalibrationPhase::idle))
+        (app.diagnostics().phase() != fw::CalibrationPhase::idle))
         return false;
     settle_menu(app, c);
     struct RebootScenario {};
     using Reboot = coretx::test::FakeApplication<RebootScenario, Context, BoardPolicy>;
     Reboot::reset();
     auto &reboot = Reboot::context;
-    reboot.probe_state = x::StorageProbeState::found;
+    reboot.probe_state = fw::StorageProbeState::found;
     reboot.eeprom = c.eeprom;
-    reboot.adc_event = x::ScanEvent::complete;
+    reboot.adc_event = fw::ScanEvent::complete;
     reboot.samples.fill(2048);
-    x::Application<typename Reboot::Board> restored{};
+    fw::Application<typename Reboot::Board> restored{};
     (void)restored.initialize();
     settle_menu(restored, reboot);
     return restored.diagnostics().calibrated() && restored.diagnostics().output_valid() &&
@@ -1443,8 +1677,8 @@ template <template <typename> typename BoardPolicy> bool stored_adc_extension_st
     Test::reset();
     auto &c = Test::context;
     c.eeprom.fill(0xFF);
-    c.probe_state = x::StorageProbeState::found;
-    c.adc_event = x::ScanEvent::complete;
+    c.probe_state = fw::StorageProbeState::found;
+    c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
     c.adc_reconfigure_delay = 3;
     coretx::InputSetup setup{};
@@ -1453,12 +1687,12 @@ template <template <typename> typename BoardPolicy> bool stored_adc_extension_st
     const auto record = coretx::firmware::input_storage::encode(setup, 3);
     std::copy(record.begin(), record.end(),
               c.eeprom.begin() + coretx::firmware::input_storage::base_address);
-    x::Application<typename Test::Board> app{};
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     for (unsigned i = 0; i < 1000; ++i)
         (void)step(app, c, c.now + 10U);
-    return c.extra_analog && (c.adc_error == x::AdcError::none) &&
-           (app.state() == x::ApplicationState::running) && app.diagnostics().valid() &&
+    return c.extra_analog && (c.adc_error == fw::AdcError::none) &&
+           (app.state() == fw::ApplicationState::running) && app.diagnostics().valid() &&
            (app.diagnostics().input_setup() == setup);
 }
 
@@ -1469,9 +1703,11 @@ bool expanded_input_reboot() {
     Test::reset();
     auto &c = Test::context;
     c.eeprom.fill(0xFF);
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     coretx::InputSetup setup{true};
-    setup.extra_analog = setup.extra_digital = true;
+    setup.extra_analog = true;
+    setup.set_digital_mode(0, coretx::DigitalInputMode::two_position);
+    setup.set_digital_mode(1, coretx::DigitalInputMode::two_position);
     setup.modes[6] = coretx::InputMode::six_position;
     const auto record = fw::input_storage::encode(setup, 3);
     std::copy(record.begin(), record.end(), c.eeprom.begin() + fw::input_storage::base_address);
@@ -1479,17 +1715,14 @@ bool expanded_input_reboot() {
     radio.output = fw::RadioOutput::external;
     const auto rf = fw::radio_storage::encode(radio, 3);
     std::copy(rf.begin(), rf.end(), c.eeprom.begin() + fw::radio_storage::base_address);
-    x::Application<typename Test::Board> app{};
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     for (unsigned i = 0; i < 1000; ++i)
         (void)step(app, c, i);
     if ((app.diagnostics().input_setup() != setup) ||
         (c.extra_analog != fw::features::extended_inputs) ||
-        (c.extra_digital != fw::features::extended_inputs))
+        (c.extra_digital != (fw::features::extended_inputs ? 3 : 0)))
         return false;
-    if constexpr (fw::features::i6s && fw::features::extended_inputs && fw::features::crsf)
-        if ((app.output() != fw::RadioOutput::off) || c.powered)
-            return false;
     std::uint32_t now = 1000;
     const auto press = [&](const Key key) {
         c.key = key;
@@ -1509,7 +1742,7 @@ bool expanded_input_reboot() {
         press(Key::down);
         press(Key::ok);
         if (app.output() == fw::RadioOutput::off) {
-            if (c.extra_digital)
+            if (c.extra_analog)
                 return false;
             c.key = Key::none;
             for (unsigned i = 0; i < 100; ++i)
@@ -1520,12 +1753,12 @@ bool expanded_input_reboot() {
             RebootTest::reset();
             auto &reboot = RebootTest::context;
             reboot.eeprom = c.eeprom;
-            reboot.probe_state = x::StorageProbeState::found;
-            x::Application<RebootTest::Board> restored{};
+            reboot.probe_state = fw::StorageProbeState::found;
+            fw::Application<RebootTest::Board> restored{};
             (void)restored.initialize();
             for (unsigned i = 0; i < 1000; ++i)
                 (void)step(restored, reboot, i);
-            if (reboot.extra_digital || !reboot.extra_analog)
+            if (reboot.extra_analog || (reboot.extra_digital != 3))
                 return false;
         }
     }
@@ -1537,18 +1770,18 @@ template <template <typename> typename BoardPolicy> bool logical_model_lifecycle
     using Test = coretx::test::FakeApplication<Scenario, Context, BoardPolicy>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
-    c.adc_event = x::ScanEvent::complete;
+    c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(0);
-    coretx::storage::State calibration{x::diagnostic_model, {}};
+    coretx::storage::State calibration{fw::diagnostic_model, {}};
     calibration.setup.calibration.fill({0, 2048, 4095});
     calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
     coretx::storage::Record record{};
     if (!coretx::storage::encode(calibration, 0, record))
         return false;
     std::copy(record.begin(), record.end(), c.eeprom.begin());
-    x::models::Data data{};
+    fw::models::Data data{};
     data.radio.transmitter = {0x12345678};
     data.radio.output = coretx::firmware::RadioOutput::off;
     auto &latch = data.model.logical_switches[0];
@@ -1556,17 +1789,17 @@ template <template <typename> typename BoardPolicy> bool logical_model_lifecycle
     latch.a = 0;
     latch.b = 3;
     latch.position_a = latch.position_b = coretx::SwitchPosition::down;
-    x::models::Record model_record{};
+    fw::models::Record model_record{};
     for (std::size_t i = 0; i < 2; ++i) {
-        x::models::default_name(data.name, i);
+        fw::models::default_name(data.name, i);
         data.model.dashboard_channels[0] = i == 0 ? 16 : 9;
-        if (!x::models::encode(data, i, true, 0, model_record))
+        if (!fw::models::encode(data, i, true, 0, model_record))
             return false;
         std::copy(model_record.begin(), model_record.end(),
-                  c.eeprom.begin() + x::models::base +
-                      static_cast<std::ptrdiff_t>(i * 2 * x::models::record_size));
+                  c.eeprom.begin() + fw::models::base +
+                      static_cast<std::ptrdiff_t>(i * 2 * fw::models::record_size));
     }
-    x::Application<typename Test::Board> app{};
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     const auto settle = [&] {
         c.key = Key::none;
@@ -1644,10 +1877,10 @@ template <template <typename> typename BoardPolicy> bool logical_model_lifecycle
     Reboot::reset();
     auto &reboot = Reboot::context;
     reboot.eeprom = c.eeprom;
-    reboot.probe_state = x::StorageProbeState::found;
+    reboot.probe_state = fw::StorageProbeState::found;
     reboot.samples.fill(0);
-    reboot.adc_event = x::ScanEvent::complete;
-    x::Application<typename Reboot::Board> restarted{};
+    reboot.adc_event = fw::ScanEvent::complete;
+    fw::Application<typename Reboot::Board> restarted{};
     (void)restarted.initialize();
     for (int i = 0; i < 1000; ++i)
         (void)step(restarted, reboot, reboot.now + 1000);
@@ -1661,11 +1894,11 @@ bool dashboard_touch_configuration() {
     using Test = coretx::test::FakeApplication<Scenario, Context, TouchSenderBoard>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
     c.touch_ready = true;
     c.touch_event = s::TouchEvent::sample;
-    x::Application<Test::Board, Test::Board::Input> app{};
+    fw::Application<Test::Board, Test::Board::Input> app{};
     (void)app.initialize();
     const auto packet = [&] { (void)step(app, c, c.now + 20'000); };
     for (int i = 0; i < 1000; ++i)
@@ -1695,7 +1928,7 @@ bool dashboard_touch_configuration() {
     for (int i = 0; i < 4; ++i)
         press(Key::down);
     press(Key::ok);
-    if (app.menu().screen() != x::MenuScreen::dashboard_channels)
+    if (app.menu().screen() != fw::MenuScreen::dashboard_channels)
         return false;
     press(Key::ok);
     press(Key::down);
@@ -1714,7 +1947,7 @@ bool dashboard_touch_configuration() {
     press(Key::ok_long);
     for (int i = 0; i < 100; ++i)
         packet();
-    return (app.menu().screen() == x::MenuScreen::logical_switches) &&
+    return (app.menu().screen() == fw::MenuScreen::logical_switches) &&
            (app.models().data().model.logical_switches[0].function ==
             coretx::LogicalFunction::greater) &&
            (c.key_calls == 0);
@@ -1729,38 +1962,39 @@ bool static_sender_isolation_and_reset() {
     Second::reset();
     auto &first = First::context;
     auto &second = Second::context;
-    first.adc_event = second.adc_event = x::ScanEvent::complete;
+    first.adc_event = second.adc_event = fw::ScanEvent::complete;
     first.samples.fill(2000);
     second.samples.fill(2500);
     first.key = Key::down;
     first.eeprom[0] = 0x5A;
-    x::Application<First::Board> first_app{};
-    x::Application<Second::Board> second_app{};
-    if ((first_app.initialize() != x::ApplicationState::starting) ||
-        (second_app.initialize() != x::ApplicationState::starting) ||
-        (step(first_app, first, 1) != x::ApplicationState::running) || (first.adc_calls != 1) ||
+    fw::Application<First::Board> first_app{};
+    fw::Application<Second::Board> second_app{};
+    if ((first_app.initialize() != fw::ApplicationState::starting) ||
+        (second_app.initialize() != fw::ApplicationState::starting) ||
+        (step(first_app, first, 1) != fw::ApplicationState::running) || (first.adc_calls != 1) ||
         (first.key_calls != 1) || (second.adc_calls != 0) || (second.key_calls != 0))
         return false;
-    if ((step(second_app, second, 2) != x::ApplicationState::running) || (first.adc_calls != 1) ||
+    if ((step(second_app, second, 2) != fw::ApplicationState::running) || (first.adc_calls != 1) ||
         (second.adc_calls != 1) || (first_app.diagnostics().page() != 1) ||
         (second_app.diagnostics().page() != 0))
         return false;
     first.stack_ok = false;
-    if ((step(first_app, first, 3) != x::ApplicationState::fatal) ||
-        (step(second_app, second, 3) != x::ApplicationState::running) || (first.adc_calls != 1) ||
+    if ((step(first_app, first, 3) != fw::ApplicationState::fatal) ||
+        (step(second_app, second, 3) != fw::ApplicationState::running) || (first.adc_calls != 1) ||
         (second.adc_calls != 2))
         return false;
-    first.extra_analog = first.extra_digital = true;
+    first.extra_analog = true;
+    first.extra_digital = 1;
     First::reset();
     if (!first.stack_ok || (first.adc_calls != 0) || (first.key_calls != 0) ||
         (first.display_initializations != 0) || first.extra_analog || first.extra_digital ||
         (first.eeprom[0] != 0) || (second.adc_calls != 2))
         return false;
-    x::Application<First::Board> restarted{};
-    return (restarted.initialize() == x::ApplicationState::starting) &&
-           (step(restarted, first, 4) == x::ApplicationState::starting) &&
+    fw::Application<First::Board> restarted{};
+    return (restarted.initialize() == fw::ApplicationState::starting) &&
+           (step(restarted, first, 4) == fw::ApplicationState::starting) &&
            (first.display_initializations == 1) && (first.adc_calls == 1) &&
-           (second.adc_calls == 2) && (second_app.state() == x::ApplicationState::running);
+           (second.adc_calls == 2) && (second_app.state() == fw::ApplicationState::running);
 }
 
 #if CORETX_CRSF
@@ -1770,25 +2004,25 @@ bool crsf_configuration_menu(const bool dashboard = false) {
     using Test = coretx::test::FakeApplication<ConfigurationMenuScenario, Context, BoardPolicy>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
-    c.adc_event = x::ScanEvent::complete;
+    c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
-    coretx::storage::State calibration{x::diagnostic_model, {}};
+    coretx::storage::State calibration{fw::diagnostic_model, {}};
     calibration.setup.calibration.fill({0, 2048, 4095});
     calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
     coretx::storage::Record record{};
     if (!coretx::storage::encode(calibration, 0, record))
         return false;
     std::copy(record.begin(), record.end(), c.eeprom.begin());
-    x::models::Data data{};
+    fw::models::Data data{};
     data.radio.transmitter = {0x12345678};
     data.model.crsf_dashboard = dashboard;
-    x::models::Record model{};
-    if (!x::models::encode(data, 0, true, 0, model))
+    fw::models::Record model{};
+    if (!fw::models::encode(data, 0, true, 0, model))
         return false;
-    std::copy(model.begin(), model.end(), c.eeprom.begin() + x::models::base);
-    x::Application<typename Test::Board> app{};
+    std::copy(model.begin(), model.end(), c.eeprom.begin() + fw::models::base);
+    fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     for (unsigned i = 0; i < 300; ++i)
         (void)step(app, c, c.now + 1000U);
@@ -1796,7 +2030,7 @@ bool crsf_configuration_menu(const bool dashboard = false) {
         set_output(app, c, coretx::firmware::RadioOutput::external);
         press_key(app, c, Key::down);
         press_key(app, c, Key::down);
-        if ((app.diagnostics().page() != x::Diagnostics::page_count) || !app.crsf_menu().visible())
+        if ((app.diagnostics().page() != fw::Diagnostics::page_count) || !app.crsf_menu().visible())
             return false;
         press_key(app, c, Key::ok);
     } else {
@@ -1899,20 +2133,20 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
     using Test = coretx::test::FakeApplication<Scenario, Context, BoardPolicy>;
     Test::reset();
     auto &c = Test::context;
-    c.probe_state = x::StorageProbeState::found;
+    c.probe_state = fw::StorageProbeState::found;
     c.eeprom.fill(0xFF);
-    c.adc_event = x::ScanEvent::complete;
+    c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
     c.touch_ready = true;
     c.touch_event = s::TouchEvent::sample;
-    coretx::storage::State calibration{x::diagnostic_model, {}};
+    coretx::storage::State calibration{fw::diagnostic_model, {}};
     calibration.setup.calibration.fill({0, 2048, 4095});
     calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
     coretx::storage::Record record{};
     if (!coretx::storage::encode(calibration, 0, record))
         return false;
     std::copy(record.begin(), record.end(), c.eeprom.begin());
-    x::models::Data model{};
+    fw::models::Data model{};
     model.radio.transmitter = {0x12345678};
     model.radio.output = coretx::firmware::RadioOutput::external;
     model.model.multiswitch[1].address = 42;
@@ -1922,11 +2156,11 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
     model.model.multiswitch[1].controls[6].set_condition(
         {true, coretx::switch_count, coretx::SwitchPosition::down});
     model.model.crsf_dashboard = true;
-    x::models::Record model_record{};
-    if (!x::models::encode(model, 0, true, 0, model_record))
+    fw::models::Record model_record{};
+    if (!fw::models::encode(model, 0, true, 0, model_record))
         return false;
-    std::copy(model_record.begin(), model_record.end(), c.eeprom.begin() + x::models::base);
-    x::Application<typename Test::Board, typename Test::Board::Input> app{};
+    std::copy(model_record.begin(), model_record.end(), c.eeprom.begin() + fw::models::base);
+    fw::Application<typename Test::Board, typename Test::Board::Input> app{};
     (void)app.initialize();
     for (unsigned i = 0; i < 300; ++i)
         (void)step(app, c, c.now + 1000U);
@@ -1946,7 +2180,7 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
     const auto next = [&] {
         if constexpr (Test::Board::Input::touch) {
             touch(64, 32, true);
-            touch(64, 32, true, s::Gesture::down);
+            touch(64, 32, true, s::Gesture::left);
             touch(64, 32, false);
         } else
             press_key(app, c, Key::down);
@@ -2013,13 +2247,65 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
         return false;
     if constexpr (Test::Board::Input::touch) {
         touch(64, 32, true);
-        touch(64, 32, true, s::Gesture::right);
+        touch(64, 32, true, s::Gesture::down);
         touch(64, 32, false);
-    } else
+    } else {
         press_key(app, c, Key::ok);
-    next();
+        next();
+    }
     if (app.diagnostics().page() != 4)
         return false; // UP/DOWN now belongs to the CRSF list.
+    if constexpr (Test::Board::Input::touch) {
+        const auto tap = [&](const unsigned x, const unsigned y) {
+            touch(x, y, true);
+            touch(x, y, false);
+        };
+        const auto feed = [&](auto &frame) {
+            frame.back() = coretx::crsf::crc8(std::span{frame}.subspan(2, frame.size() - 3));
+            for (const auto byte : frame)
+                c.telemetry.push(byte, coretx::TimestampUs{c.now}, c.crsf_config);
+        };
+        std::array<std::uint8_t, 23> info{0xEA, 21, 0x29, 0xEA, 0xEE, 'T', 'X', 0};
+        info[20] = 2;
+        feed(info);
+        tap(12, 16);
+        if (c.crsf_config.mode() != coretx::crsf::config::Mode::parameters)
+            return false;
+        coretx::crsf::config::Frame outbound{};
+        if (c.crsf_config.next_frame(coretx::TimestampUs{c.now}, outbound) != 8)
+            return false;
+        std::array<std::uint8_t, 15> root{0xEA, 13, 0x2B, 0xEA, 0xEE, 0, 0,
+                                          0,    11, 'R',  0,    1,    2, 255};
+        feed(root);
+        std::array<std::uint8_t, 17> value{0xEA, 15,  0x2B, 0xEA, 0xEE, 1,   0, 0,
+                                           0,    'V', 0,    25,   0,    100, 0, 0};
+        for (std::uint8_t id = 1; id <= 2; ++id) {
+            if (c.crsf_config.next_frame(coretx::TimestampUs{c.now}, outbound) != 8)
+                return false;
+            value[5] = id;
+            feed(value);
+        }
+        const auto change = [&] {
+            tap(90, 24);
+            touch(90, 24, true);
+            touch(90, 24, true, s::Gesture::up);
+            touch(90, 24, false);
+        };
+        change();
+        if (!app.crsf_menu().editing() || (app.diagnostics().page() != 4))
+            return false;
+        tap(12, 4);
+        if (app.crsf_menu().editing() || c.crsf_config.pending_write())
+            return false;
+        change();
+        tap(90, 24);
+        if (!c.crsf_config.pending_write() || app.crsf_menu().editing() || !c.tx_valid ||
+            (c.crsf_config.next_frame(coretx::TimestampUs{c.now}, outbound) != 8) ||
+            (outbound[5] != 2) || (outbound[6] != 26))
+            return false;
+        std::array<std::uint8_t, 8> ack{0xEA, 6, 0x2D, 0xEA, 0xEE, 2, 26};
+        feed(ack);
+    }
     const auto hold = [&] {
         if constexpr (Test::Board::Input::touch) {
             touch(60, 56, true);
@@ -2029,14 +2315,15 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
         } else
             press_key(app, c, Key::cancel_long);
     };
-    hold();
+    if constexpr (!Test::Board::Input::touch)
+        hold();
     next();
     if ((app.diagnostics().page() != 0) || app.crsf_menu().visible() ||
         (c.crsf_config.mode() != coretx::crsf::config::Mode::closed))
         return false;
     if constexpr (Test::Board::Input::touch) {
         touch(64, 32, true);
-        touch(64, 32, true, s::Gesture::up);
+        touch(64, 32, true, s::Gesture::right);
         touch(64, 32, false);
     } else
         press_key(app, c, Key::up);
@@ -2048,6 +2335,22 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
         press_key(app, c, Key::ok_long);
     if (!app.menu().visible() || (c.multiswitch_states[1] != 1) || !c.tx_valid)
         return false;
+    if constexpr (Test::Board::Input::touch) {
+        const auto swipe = [&](const s::Gesture gesture) {
+            touch(64, 32, true);
+            touch(64, 32, true, gesture);
+            touch(64, 32, false);
+        };
+        swipe(s::Gesture::down);
+        swipe(s::Gesture::down);
+        swipe(s::Gesture::right);
+        for (unsigned i = 0; i < 3; ++i)
+            swipe(s::Gesture::down);
+        swipe(s::Gesture::right);
+        if (!app.crsf_menu().visible() ||
+            (c.crsf_config.mode() != coretx::crsf::config::Mode::devices))
+            return false;
+    }
     c.key = Key::none;
     c.samples[0] = 0;
     (void)step(app, c, c.now + 1000U);
@@ -2115,26 +2418,116 @@ bool trim_controls() {
            (model.trims[0].value() == 127);
 }
 
+template <template <typename> typename BoardPolicy> bool active_model_background_loading() {
+    if constexpr (!fw::features::a7105 && !fw::features::crsf)
+        return true;
+    for (int failure = 0; failure < 3; ++failure) {
+        struct Scenario {};
+        using Test = coretx::test::FakeApplication<Scenario, Context, BoardPolicy>;
+        Test::reset();
+        auto &c = Test::context;
+        c.probe_state = fw::StorageProbeState::found;
+        c.eeprom.fill(0xFF);
+        c.adc_event = fw::ScanEvent::complete;
+        c.samples.fill(2048);
+        c.samples[0] = 0;
+        c.touch_ready = true;
+        c.touch_event = s::TouchEvent::sample;
+        coretx::storage::State calibration{fw::diagnostic_model, {}};
+        calibration.setup.calibration.fill({0, 2048, 4095});
+        calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
+        coretx::storage::Record calibration_record{};
+        if (!coretx::storage::encode(calibration, 0, calibration_record))
+            return false;
+        std::copy(calibration_record.begin(), calibration_record.end(), c.eeprom.begin());
+        fw::models::Data data{};
+        data.radio.transmitter = {0x12345678};
+        data.radio.output =
+            fw::features::crsf ? fw::RadioOutput::external : fw::RadioOutput::internal;
+        data.model.mixes[0].weight_percent = coretx::MixWeight::constant<37>();
+        fw::models::Record record{};
+        if (!fw::models::encode(data, 0, true, 9, record))
+            return false;
+        std::copy(record.begin(), record.end(), c.eeprom.begin() + fw::models::base);
+        data.model.mixes[0].weight_percent = coretx::MixWeight::constant<61>();
+        if (!fw::models::encode(data, 0, true, 10, record))
+            return false;
+        std::copy(record.begin(), record.end(),
+                  c.eeprom.begin() + fw::models::base + fw::models::record_size);
+        if (failure != 0) {
+            if (!fw::models::encode(data, 7, true, 0, record))
+                return false;
+            if (failure == 1)
+                record[700] ^= 1;
+            else {
+                record[4] = fw::models::format_version + 1;
+                coretx::storage::detail::Writer crc{std::span{record}.last(4)};
+                crc.word(
+                    coretx::storage::crc32(std::span{record}.first(fw::models::record_size - 4)));
+            }
+            std::copy(record.begin(), record.end(),
+                      c.eeprom.begin() + fw::models::base + 14 * fw::models::record_size);
+        }
+        fw::Application<typename Test::Board, typename Test::Board::Input> app{};
+        (void)app.initialize();
+        for (unsigned i = 0; !app.models().background_loading() && (i < 1000); ++i)
+            (void)step(app, c, c.now + 1000U);
+        if (!app.models().background_loading() || (app.output() != data.radio.output) ||
+            !app.diagnostics().output_valid() ||
+            (app.models().data().model.mixes[0].weight_percent.value() != 61))
+            return false;
+        const auto channels = app.diagnostics().evaluation().frame.channels;
+        const auto before = c.eeprom;
+        for (unsigned i = 0; app.models().background_loading() && (i < 1000); ++i) {
+            (void)step(app, c, c.now + 1000U);
+            if ((app.output() != data.radio.output) || !app.diagnostics().output_valid() ||
+                (app.diagnostics().evaluation().frame.channels != channels))
+                return false;
+        }
+        if (app.models().busy() || (c.eeprom != before) ||
+            (app.models().editable() != (failure == 0)) || (c.powered != fw::features::crsf) ||
+            (c.internal_active != !fw::features::crsf))
+            return false;
+        if ((failure == 1) && (app.models().message() != coretx::ui::tr::models_error))
+            return false;
+        if ((failure == 2) && (app.models().message() != coretx::ui::tr::models_version))
+            return false;
+    }
+    return true;
+}
+
 bool trim_application() {
     if constexpr (coretx::firmware::features::i6s)
         return true;
-    for (const bool switches : {false, true}) {
+    for (int mode = 0; mode < 12; ++mode) {
+        const bool trim_sound = ((mode / 3) % 2) == 0;
+        const bool multiswitch_sound = mode < 6;
+        const bool switches = (mode % 3) != 0;
+        const bool bound = (mode % 3) == 2;
+        if (bound && !fw::features::multiswitch)
+            continue;
         struct Scenario {};
         using Test = coretx::test::FakeApplication<Scenario, Context, SenderBoard>;
         Test::reset();
         auto &c = Test::context;
-        c.probe_state = x::StorageProbeState::found;
+        c.probe_state = fw::StorageProbeState::found;
         c.eeprom.fill(0xFF);
-        c.adc_event = x::ScanEvent::complete;
+        c.adc_event = fw::ScanEvent::complete;
         c.samples.fill(2048);
-        coretx::storage::State calibration{x::diagnostic_model, {}};
+        coretx::storage::State calibration{fw::diagnostic_model, {}};
         calibration.setup.calibration.fill({0, 2048, 4095});
         calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
         coretx::storage::Record record{};
         if (!coretx::storage::encode(calibration, 0, record))
             return false;
         std::copy(record.begin(), record.end(), c.eeprom.begin());
-        x::models::Data data{};
+        coretx::InputSetup inputs{};
+        inputs.trim_beep = trim_sound;
+        const auto input_record = fw::input_storage::encode(inputs, 0);
+        std::copy(input_record.begin(), input_record.end(),
+                  c.eeprom.begin() + fw::input_storage::base_address);
+        fw::models::Data data{};
+        data.model.multiswitch_beep = multiswitch_sound;
         data.radio.transmitter = {0x12345678};
         data.model.inputs.resize<1>();
         data.model.inputs[0].source = switches ? coretx::Source{coretx::SourceKind::maximum, 0}
@@ -2150,11 +2543,16 @@ bool trim_application() {
             data.model.mixes[0].condition = {true, coretx::physical_switch_count,
                                              coretx::SwitchPosition::down};
         }
-        x::models::Record model_record{};
-        if (!x::models::encode(data, 0, true, 0, model_record))
+        if (bound) {
+            data.model.multiswitch[0].address = 42;
+            data.model.multiswitch[0].controls[0].set_condition(
+                {true, coretx::physical_switch_count, coretx::SwitchPosition::down});
+        }
+        fw::models::Record model_record{};
+        if (!fw::models::encode(data, 0, true, 0, model_record))
             return false;
-        std::copy(model_record.begin(), model_record.end(), c.eeprom.begin() + x::models::base);
-        x::Application<Test::Board> app{};
+        std::copy(model_record.begin(), model_record.end(), c.eeprom.begin() + fw::models::base);
+        fw::Application<Test::Board> app{};
         (void)app.initialize();
         for (unsigned i = 0; i < 300; ++i)
             (void)step(app, c, c.now + 1000U);
@@ -2164,42 +2562,87 @@ bool trim_application() {
             if (switches && (app.output() != coretx::firmware::RadioOutput::external))
                 return false;
         const auto before = c.eeprom;
+        const auto control_clicks = c.center_clicks;
+        const auto multiswitch_clicks = c.multiswitch_clicks;
         c.trim_buttons = 1;
         (void)step(app, c, c.now + 1000U);
         if ((app.diagnostics().evaluation().frame.channels[7] != (switches ? 1024 : 2)) ||
-            (c.eeprom != before))
+            (c.eeprom != before) ||
+            (c.center_clicks != (control_clicks + (!switches && trim_sound ? 1U : 0U))) ||
+            (c.multiswitch_clicks !=
+             (multiswitch_clicks + (bound && multiswitch_sound ? 1U : 0U))) ||
+            (c.multiswitch_states[0] != (bound ? 1 : 0)))
             return false;
         c.trim_buttons = 0;
         (void)step(app, c, c.now + 1000U);
         for (unsigned i = 0; i < 300; ++i)
             (void)step(app, c, c.now + 1000U);
         if ((c.eeprom != before) ||
-            (app.diagnostics().evaluation().frame.channels[7] != (switches ? 0 : 2)))
+            (app.diagnostics().evaluation().frame.channels[7] != (switches ? 0 : 2)) ||
+            (c.center_clicks != (control_clicks + (!switches && trim_sound ? 1U : 0U))) ||
+            (c.multiswitch_clicks !=
+             (multiswitch_clicks + (bound && multiswitch_sound ? 2U : 0U))) ||
+            (c.multiswitch_states[0] != 0))
             return false;
         for (unsigned i = 0; i < 400; ++i)
             (void)step(app, c, c.now + 1000U);
         const auto offset =
-            x::models::base + app.models().entries()[0].bank * x::models::record_size;
+            fw::models::base + app.models().entries()[0].bank * fw::models::record_size;
         std::copy_n(c.eeprom.begin() + static_cast<std::ptrdiff_t>(offset), model_record.size(),
                     model_record.begin());
-        x::models::Info info{};
-        if ((x::models::decode(model_record, 0, data.radio.transmitter, data, info) != 1) ||
+        fw::models::Info info{};
+        if ((fw::models::decode(model_record, 0, data.radio.transmitter, data, info) != 1) ||
             (data.model.trims[0].value() != (switches ? 10 : 1)) ||
             (switches && (c.eeprom != before)))
             return false;
         if (!switches) {
-            const auto saved = c.eeprom;
             const auto press = [&](const Key key) {
                 c.key = key;
                 (void)step(app, c, c.now + 1000U);
+                c.key = Key::none;
             };
+            const auto channels = app.diagnostics().evaluation().frame.channels;
+            const auto adc_started_at = c.adc_started_at;
+            press(Key::ok_long);
+            press(Key::down);
+            press(Key::down);
+            press(Key::ok);
+            for (unsigned i = 0; i < fw::menu_detail::trim_beep_row; ++i)
+                press(Key::down);
+            press(Key::ok);
+            if ((app.diagnostics().input_setup().trim_beep == trim_sound) ||
+                !app.diagnostics().output_valid() ||
+                (app.diagnostics().evaluation().frame.channels != channels) ||
+                (c.adc_started_at != adc_started_at))
+                return false;
+            press(Key::ok); // Input journal is busy; leave the setting unchanged.
+            if (app.diagnostics().input_setup().trim_beep == trim_sound)
+                return false;
+            for (unsigned i = 0; i < 300; ++i)
+                (void)step(app, c, c.now + 1000U);
+            fw::input_storage::Record saved_inputs{};
+            std::copy_n(c.eeprom.begin() + fw::input_storage::base_address +
+                            fw::input_storage::record_size,
+                        saved_inputs.size(), saved_inputs.begin());
+            auto expected_inputs = inputs;
+            expected_inputs.trim_beep = !trim_sound;
+            const auto decoded_inputs = fw::input_storage::decode(saved_inputs);
+            if (!decoded_inputs.valid() || (decoded_inputs.setup != expected_inputs))
+                return false;
+            press(Key::ok);
+            if (app.diagnostics().input_setup().trim_beep != trim_sound)
+                return false;
+            for (unsigned i = 0; i < 300; ++i)
+                (void)step(app, c, c.now + 1000U);
+            press(Key::cancel_long);
+            const auto saved = c.eeprom;
             press(Key::ok_long);
             press(Key::down);
             press(Key::down);
             press(Key::ok);
             press(Key::down);
             press(Key::ok);
-            if (app.diagnostics().phase() == x::CalibrationPhase::idle)
+            if (app.diagnostics().phase() == fw::CalibrationPhase::idle)
                 return false;
             c.trim_buttons = 1;
             for (unsigned i = 0; i < 6; ++i)
@@ -2207,7 +2650,7 @@ bool trim_application() {
             if ((app.models().data().model.trims[0].value() != 1) || (c.eeprom != saved))
                 return false;
             press(Key::cancel);
-            if ((app.diagnostics().phase() != x::CalibrationPhase::idle) ||
+            if ((app.diagnostics().phase() != fw::CalibrationPhase::idle) ||
                 (app.models().data().model.trims[0].value() != 1))
                 return false;
             c.trim_buttons = 0;
@@ -2217,6 +2660,212 @@ bool trim_application() {
             if (app.models().data().model.trims[0].value() != 2)
                 return false;
         }
+    }
+    return true;
+}
+
+bool external_module_inputs() {
+    if constexpr (!fw::features::i6s || !fw::features::extended_inputs || !fw::features::crsf)
+        return true;
+    struct Scenario {};
+    using Test = coretx::test::FakeApplication<Scenario, Context, TouchSenderBoard>;
+    Test::reset();
+    auto &c = Test::context;
+    c.probe_state = fw::StorageProbeState::found;
+    c.eeprom.fill(0xFF);
+    c.adc_event = fw::ScanEvent::complete;
+    c.samples.fill(2048);
+    coretx::storage::State calibration{fw::diagnostic_model, {}};
+    calibration.setup.calibration.fill({0, 2048, 4095});
+    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
+    coretx::storage::Record calibration_record{};
+    if (!coretx::storage::encode(calibration, 0, calibration_record))
+        return false;
+    std::copy(calibration_record.begin(), calibration_record.end(), c.eeprom.begin());
+    coretx::InputSetup setup{true};
+    setup.external_module = false;
+    setup.set_digital_mode(2, coretx::DigitalInputMode::three_position);
+    setup.set_digital_mode(4, coretx::DigitalInputMode::two_position);
+    const auto inputs = fw::input_storage::encode(setup, 0);
+    std::copy(inputs.begin(), inputs.end(), c.eeprom.begin() + fw::input_storage::base_address);
+    fw::models::Data model{};
+    model.radio.transmitter = {0x12345678};
+    model.radio.output = fw::RadioOutput::external;
+    fw::models::Record record{};
+    if (!fw::models::encode(model, 0, true, 0, record))
+        return false;
+    std::copy(record.begin(), record.end(), c.eeprom.begin() + fw::models::base);
+    fw::Application<Test::Board> app{};
+    (void)app.initialize();
+    for (unsigned i = 0; i < 1000; ++i)
+        (void)step(app, c, c.now + 1000U);
+    if ((app.output() != fw::RadioOutput::off) || c.powered || (c.extra_digital != 0x1C))
+        return false;
+    const auto open_setting = [&](auto &application, auto &context) {
+        const auto press = [&](const Key key) {
+            context.key = key;
+            (void)step(application, context, context.now + 1000U);
+        };
+        press(Key::ok_long);
+        press(Key::down);
+        press(Key::down);
+        press(Key::ok);
+        for (std::size_t i = 0; i < fw::menu_detail::external_module_row; ++i)
+            press(Key::down);
+        press(Key::ok);
+    };
+    open_setting(app, c);
+    if (!app.diagnostics().input_setup().external_module || (c.extra_digital != 0x10) ||
+        (app.diagnostics().input_setup().digital_mode(2) !=
+         coretx::DigitalInputMode::three_position))
+        return false;
+    c.key = Key::none;
+    for (unsigned i = 0; i < 1000; ++i)
+        (void)step(app, c, c.now + 1000U);
+    struct RebootScenario {};
+    using Reboot = coretx::test::FakeApplication<RebootScenario, Context, TouchSenderBoard>;
+    Reboot::reset();
+    auto &reboot = Reboot::context;
+    reboot.eeprom = c.eeprom;
+    reboot.probe_state = fw::StorageProbeState::found;
+    fw::Application<Reboot::Board> restored{};
+    (void)restored.initialize();
+    for (unsigned i = 0; i < 1000; ++i)
+        (void)step(restored, reboot, reboot.now + 1000U);
+    if (!restored.diagnostics().input_setup().external_module ||
+        (restored.output() != fw::RadioOutput::external) || !reboot.powered ||
+        (reboot.extra_digital != 0x10))
+        return false;
+    open_setting(restored, reboot);
+    return restored.diagnostics().input_setup().external_module &&
+           (restored.output() == fw::RadioOutput::external) && reboot.powered &&
+           (reboot.extra_digital == 0x10);
+}
+
+bool setup_controls() {
+    struct Scenario {};
+    using Test = coretx::test::FakeApplication<Scenario, Context, SetupSenderBoard>;
+    Test::reset();
+    auto &c = Test::context;
+    c.probe_state = fw::StorageProbeState::found;
+    c.eeprom.fill(0xFF);
+    c.adc_event = fw::ScanEvent::complete;
+    c.samples.fill(2048);
+    c.touch_ready = true;
+    c.touch_event = s::TouchEvent::sample;
+    coretx::storage::State calibration{fw::diagnostic_model, {}};
+    calibration.setup.calibration.fill({0, 2048, 4095});
+    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
+    coretx::storage::Record record{};
+    if (!coretx::storage::encode(calibration, 0, record))
+        return false;
+    std::copy(record.begin(), record.end(), c.eeprom.begin());
+    fw::models::Data model{};
+    model.radio.transmitter = {0x12345678};
+    model.radio.output = fw::features::crsf ? fw::RadioOutput::external : fw::RadioOutput::off;
+    model.model = fw::diagnostic_model;
+    model.model.mixes.resize<12>();
+    for (std::size_t i = 0; i < 2; ++i) {
+        model.model.mixes[10 + i].destination = static_cast<std::uint8_t>(10 + i);
+        model.model.mixes[10 + i].source = {
+            coretx::SourceKind::switch_position,
+            static_cast<std::uint8_t>(coretx::physical_switch_count + i), false};
+    }
+    model.model.crsf_dashboard = fw::features::crsf;
+    fw::models::Record model_record{};
+    if (!fw::models::encode(model, 0, true, 0, model_record))
+        return false;
+    std::copy(model_record.begin(), model_record.end(), c.eeprom.begin() + fw::models::base);
+    fw::Application<Test::Board, Test::Board::Input> app{};
+    (void)app.initialize();
+    for (unsigned i = 0; i < 300; ++i)
+        (void)step(app, c, c.now + 1000U);
+    if (!app.diagnostics().output_valid() || c.setup_active || !c.setup_leds)
+        return false;
+    c.samples[6] = 4095;
+    c.samples[7] = 0;
+    c.rear_pressed = 1;
+    (void)step(app, c, c.now + 1000U);
+    (void)step(app, c, c.now + 20'000U);
+    const auto before = app.diagnostics().evaluation().frame.channels;
+    if ((before[4] != coretx::resolution) || (before[5] != -coretx::resolution) ||
+        (before[10] != coretx::resolution) || (before[11] != -coretx::resolution) ||
+        app.menu().visible())
+        return false;
+    c.touch_sample = {0, 0, 64, 32, 1, s::Gesture::none};
+    (void)step(app, c, c.now + 1000U);
+    for (unsigned i = 0; i < 4; ++i)
+        (void)step(app, c, c.now + 200'000U);
+    if ((app.menu().screen() != fw::MenuScreen::root) || !c.setup_active)
+        return false;
+    c.touch_sample.contacts = 0;
+    c.rear_pressed = 0;
+    c.samples[0] = 0;
+    c.samples[6] = 2048;
+    c.samples[7] = 4095;
+    (void)step(app, c, c.now + 1000U);
+    (void)step(app, c, c.now + 20'000U);
+    const auto held = app.diagnostics().evaluation().frame.channels;
+    if ((held[4] != before[4]) || (held[5] != before[5]) || (held[10] != before[10]) ||
+        (held[11] != before[11]) || (held[0] == before[0]))
+        return false;
+    c.samples[7] = 2048;
+    (void)step(app, c, c.now + 1000U);
+    c.samples[6] = 4095;
+    c.samples[7] = 4095;
+    (void)step(app, c, c.now + 1000U); // VRA selects the next root item.
+    c.touch_error = s::TouchError::bus;
+    c.touch_event = s::TouchEvent::failed;
+    c.rear_pressed = 1;
+    (void)step(app, c, c.now + 1000U);
+    (void)step(app, c, c.now + 20'000U);
+    c.rear_pressed = 0;
+    (void)step(app, c, c.now + 1000U);
+    (void)step(app, c, c.now + 20'000U);
+    if (app.menu().screen() != fw::MenuScreen::setup)
+        return false;
+    (void)step(app, c, c.now + 250'000U);
+    if (c.setup_leds)
+        return false;
+    (void)step(app, c, c.now + 250'000U);
+    if (!c.setup_leds)
+        return false;
+    c.rear_pressed = 2;
+    (void)step(app, c, c.now + 1000U);
+    (void)step(app, c, c.now + 20'000U);
+    (void)step(app, c, c.now + 800'000U);
+    if (app.menu().visible() || c.setup_active || !c.setup_leds ||
+        (app.diagnostics().evaluation().frame.channels[5] != coretx::resolution))
+        return false;
+    c.rear_pressed = 0;
+    (void)step(app, c, c.now + 1000U);
+    (void)step(app, c, c.now + 20'000U);
+    c.samples[6] = 0;
+    (void)step(app, c, c.now + 1000U);
+    if (app.menu().visible() || c.setup_active ||
+        (app.diagnostics().evaluation().frame.channels[4] != -coretx::resolution) ||
+        (app.diagnostics().evaluation().frame.channels[10] != -coretx::resolution))
+        return false;
+    if constexpr (fw::features::crsf) {
+        c.touch_error = s::TouchError::none;
+        c.touch_event = s::TouchEvent::sample;
+        c.touch_sample = {};
+        (void)step(app, c, c.now + 1000U);
+        for (unsigned i = 0; i < 2; ++i) {
+            c.touch_sample = {0, 0, 64, 32, 1, s::Gesture::left};
+            (void)step(app, c, c.now + 1000U);
+            c.touch_sample = {};
+            (void)step(app, c, c.now + 1000U);
+        }
+        c.samples[6] = 4095;
+        c.rear_pressed = 2;
+        (void)step(app, c, c.now + 1000U);
+        (void)step(app, c, c.now + 20'000U);
+        if ((app.diagnostics().page() != fw::Diagnostics::page_count) || c.setup_active ||
+            !c.setup_leds ||
+            (app.diagnostics().evaluation().frame.channels[4] != coretx::resolution) ||
+            (app.diagnostics().evaluation().frame.channels[10] != -coretx::resolution))
+            return false;
     }
     return true;
 }
@@ -2231,7 +2880,10 @@ int main() {
         passed = false;                                                                            \
     }
     RUN(touch_lifecycle());
+    RUN(disabled_module_types());
     RUN(trim_controls());
+    RUN(active_model_background_loading<SenderBoard>());
+    RUN(active_model_background_loading<TouchSenderBoard>());
     RUN(trim_application());
     RUN(calibration_reboot<SenderBoard>());
     RUN(calibration_reboot<TouchSenderBoard>());
@@ -2241,6 +2893,10 @@ int main() {
     RUN(sender_fatal_priority<TouchSenderBoard>());
     RUN(shared_touch_sender());
     RUN(shared_touch_menus());
+    RUN(setup_controls());
+    RUN(external_module_inputs());
+    RUN(safe_power_off());
+    RUN(power_off_during_load());
     RUN(multiswitch_dashboard<SenderBoard>());
     RUN(multiswitch_dashboard<TouchSenderBoard>());
     RUN(input_setup_recovery<SenderBoard>());

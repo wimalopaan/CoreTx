@@ -30,7 +30,8 @@ enum class HardwareError : std::uint8_t {
     pll_switch,
     timer_stopped,
     stack_guard,
-    watchdog
+    watchdog,
+    bootloader
 };
 
 namespace registers {

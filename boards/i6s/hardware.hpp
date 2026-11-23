@@ -11,6 +11,9 @@ struct Hardware {
     static constexpr bool sb_three_position = true;
     static constexpr bool power_latch = true;
     static constexpr Pin hold_power{GPIOB_BASE, 15};
+    static constexpr Pin power_button{GPIOB_BASE, 14};
+    static constexpr std::array power_leds{Pin{GPIOD_BASE, 10}, Pin{GPIOD_BASE, 11}};
+    static constexpr std::array rear_buttons{Pin{GPIOA_BASE, 9}, Pin{GPIOA_BASE, 10}};
     static constexpr unsigned clock_timer = 2;
     static constexpr unsigned buzzer_timer = 1;
     static constexpr Pin buzzer{GPIOA_BASE, 8};

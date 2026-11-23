@@ -69,7 +69,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" firmware/*.bin firmware/*.hex \
-            --verify-tag \
-            --title "CoreTX $RELEASE_TAG - i6X DE/EN" \
-            --notes "Experimental firmware for Flysky FS-i6X (STM32F072). German and English BIN/HEX images. Back up the original firmware and EEPROM before flashing. Flash start address: 0x08000000."
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # The other board workflow may create the shared release concurrently.
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "CoreTX $RELEASE_TAG" \
+              --notes "Experimental firmware for Flysky FS-i6X and FS-i6S (STM32F072). Board-specific German and English BIN/HEX images are attached by the respective build workflows. Use only the image matching your transmitter. Back up the original firmware and EEPROM before flashing. Flash start address: 0x08000000." \
+              || gh release view "$RELEASE_TAG" >/dev/null
+          fi
+          gh release upload "$RELEASE_TAG" firmware/*.bin firmware/*.hex --clobber

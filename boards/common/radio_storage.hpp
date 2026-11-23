@@ -116,19 +116,22 @@ template <typename Memory> class RadioStorage {
         return (stage_ != Stage::wait) && (stage_ != Stage::ready);
     }
     [[nodiscard]] constexpr bool loaded() const noexcept { return loaded_; }
+    [[nodiscard]] constexpr bool busy() const noexcept {
+        return (stage_ != Stage::ready) || dirty_;
+    }
     [[nodiscard]] constexpr RadioStorageStatus status() const noexcept { return status_; }
     [[nodiscard]] constexpr const RadioSettings &settings() const noexcept { return settings_; }
     constexpr void save(const RadioSettings settings) noexcept {
         settings_ = settings;
         dirty_ = true;
     }
-    constexpr void service(const TimestampUs now, const i6x::StorageProbeResult probe) noexcept {
+    constexpr void service(const TimestampUs now, const StorageProbeResult probe) noexcept {
         if (stage_ == Stage::wait) {
-            if ((probe.state == i6x::StorageProbeState::idle) ||
-                (probe.state == i6x::StorageProbeState::scanning))
+            if ((probe.state == StorageProbeState::idle) ||
+                (probe.state == StorageProbeState::scanning))
                 return;
             loaded_ = true;
-            if (probe.state != i6x::StorageProbeState::found) {
+            if (probe.state != StorageProbeState::found) {
                 finish(RadioStorageStatus::missing);
                 return;
             }
@@ -136,7 +139,7 @@ template <typename Memory> class RadioStorage {
                 finish(RadioStorageStatus::multiple);
                 return;
             }
-            Memory::select(static_cast<std::uint8_t>(i6x::StorageProbeResult::first_address +
+            Memory::select(static_cast<std::uint8_t>(StorageProbeResult::first_address +
                                                      std::countr_zero(probe.addresses)));
             loaded_ = false;
             stage_ = Stage::load_first;
@@ -155,7 +158,7 @@ template <typename Memory> class RadioStorage {
             if (Memory::busy())
                 return;
             pending_ = false;
-            if (Memory::error() != i6x::I2cError::none) {
+            if (Memory::error() != I2cError::none) {
                 writable_ = false;
                 finish(RadioStorageStatus::io_error);
                 return;

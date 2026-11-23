@@ -10,9 +10,12 @@ namespace coretx::firmware {
 
 inline constexpr int multiswitch_header_height = 8;
 
-struct MultiSwitchInput {
+struct SenderInputContext {
     bool active{};
     std::uint8_t momentary{};
+    bool taps{};
+    std::int16_t vra{}, vrb{};
+    bool jog_enabled{};
 };
 
 [[nodiscard]] constexpr std::optional<std::size_t> multiswitch_at(const int x,
@@ -118,8 +121,11 @@ class MultiSwitchTouch {
     [[nodiscard]] constexpr Key service(const TimestampUs now, const i6s::TouchSample *sample,
                                         const bool healthy, const std::uint8_t momentary) noexcept {
         tapped_.reset();
-        if (!healthy ||
-            (active_ && ((now - last_packet_) >= i6s::TouchNavigation::release_timeout_us))) {
+        const bool expired =
+            active_ && ((now - last_packet_) >= i6s::TouchNavigation::release_timeout_us);
+        const bool inferred_release =
+            expired && sample && sample->synthetic && (sample->contacts == 0);
+        if (!healthy || (expired && !inferred_release)) {
             active_ = false;
             held_.reset();
             blocked_ = true;
@@ -139,10 +145,17 @@ class MultiSwitchTouch {
         }
         if (sample->contacts == 0) {
             Key key{};
-            if (active_ && !emitted_ && !tap_cancelled_ && !momentary_) {
-                tapped_ = multiswitch_at(start_x_, start_y_);
-                if (start_y_ < 14)
-                    key = Key::down;
+            if (active_ && !emitted_) {
+                key = i6s::swipe_key(*sample, start_x_, start_y_);
+                const bool moved = sample->position_valid &&
+                                   ((int{sample->x} - start_x_ >= i6s::swipe_distance) ||
+                                    (int{sample->x} - start_x_ <= -i6s::swipe_distance) ||
+                                    (int{sample->y} - start_y_ >= i6s::swipe_distance) ||
+                                    (int{sample->y} - start_y_ <= -i6s::swipe_distance));
+                if (!momentary_ && (!sample->synthetic || inferred_release) && (key == Key::none) &&
+                    !tap_cancelled_ && !moved) {
+                    tapped_ = multiswitch_at(start_x_, start_y_);
+                }
             }
             active_ = false;
             held_.reset();
@@ -159,30 +172,30 @@ class MultiSwitchTouch {
             momentary_ = held_ && ((momentary & (1U << *held_)) != 0);
             if (!momentary_)
                 held_.reset();
-            return Key::none;
-        }
-        if (momentary_) {
-            if (held_ != multiswitch_at(sample->x, sample->y))
+            const auto key = i6s::swipe_key(*sample, start_x_, start_y_);
+            emitted_ = key != Key::none;
+            if (emitted_)
                 held_.reset();
-            return Key::none;
+            return key;
         }
         if (emitted_)
             return Key::none;
+        if (momentary_) {
+            if (held_ != multiswitch_at(sample->x, sample->y))
+                held_.reset();
+        }
         const int dx = int{sample->x} - start_x_;
         const int dy = int{sample->y} - start_y_;
-        Key key{};
-        if ((sample->gesture == i6s::Gesture::up) || (sample->gesture == i6s::Gesture::right) ||
-            (dx >= 12) || (dy <= -12))
-            key = Key::up;
-        else if ((sample->gesture == i6s::Gesture::down) ||
-                 (sample->gesture == i6s::Gesture::left) || (dx <= -12) || (dy >= 12))
-            key = Key::down;
-        else if (!tap_cancelled_ && !multiswitch_at(start_x_, start_y_) &&
-                 ((now - pressed_at_) >= DurationUs{800'000}))
+        auto key = i6s::swipe_key(*sample, start_x_, start_y_);
+        if ((key == Key::none) && !tap_cancelled_ && !multiswitch_at(start_x_, start_y_) &&
+            ((now - pressed_at_) >= DurationUs{800'000}))
             key = Key::ok_long;
-        if (key != Key::none)
+        if (key != Key::none) {
             emitted_ = true;
-        if ((dx >= 6) || (dx <= -6) || (dy >= 6) || (dy <= -6))
+            held_.reset();
+        }
+        if ((dx >= i6s::swipe_distance) || (dx <= -i6s::swipe_distance) ||
+            (dy >= i6s::swipe_distance) || (dy <= -i6s::swipe_distance))
             tap_cancelled_ = true;
         return key;
     }

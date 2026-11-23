@@ -15,7 +15,6 @@ namespace {
 using namespace coretx;
 namespace fw = coretx::firmware;
 namespace features = fw::features;
-namespace x = fw::i6x;
 #define CHECK(expression)                                                                          \
     do {                                                                                           \
         if (!(expression)) {                                                                       \
@@ -38,7 +37,7 @@ template <typename Test> struct Memory {
     static void select(std::uint8_t) {}
     static void service(TimestampUs) {}
     static bool busy() { return false; }
-    static x::I2cError error() { return x::I2cError::none; }
+    static fw::I2cError error() { return fw::I2cError::none; }
     static bool read(std::uint16_t address, std::span<std::uint8_t> result) {
         auto &memory = Test::context;
         CHECK((result.size() <= page_size) && ((address + result.size()) <= memory.bytes.size()));
@@ -58,7 +57,8 @@ template <typename Test> struct Memory {
 };
 template <typename Store> void service(Store &store) {
     for (unsigned i = 0; i < 32; ++i)
-        store.service(TimestampUs{i * 1000U}, {x::StorageProbeState::found, x::I2cError::none, 1});
+        store.service(TimestampUs{i * 1000U},
+                      {fw::StorageProbeState::found, fw::I2cError::none, 1});
 }
 void journal() {
     struct Scenario {};
@@ -67,7 +67,7 @@ void journal() {
     Test::reset();
     auto &memory = Test::context;
     Store failed;
-    failed.service(TimestampUs{0}, {x::StorageProbeState::failed, x::I2cError::bus, 0});
+    failed.service(TimestampUs{0}, {fw::StorageProbeState::failed, fw::I2cError::bus, 0});
     CHECK(failed.loaded() && (failed.status() == fw::RadioStorageStatus::io_error) &&
           !failed.writable() && (failed.message() != nullptr));
     Store store{features::i6s};
@@ -82,7 +82,9 @@ void journal() {
     const auto snapshot = memory;
     InputSetup second = first;
     second.extra_analog = true;
-    second.extra_digital = true;
+    second.set_digital_mode(0, DigitalInputMode::two_position);
+    second.set_digital_mode(1, DigitalInputMode::two_position);
+    second.trim_beep = false;
     second.modes[6] = InputMode::six_position;
     for (int prefix = 0; prefix <= 4; ++prefix) {
         memory = snapshot;
@@ -108,10 +110,27 @@ void journal() {
     }
     auto record = fw::input_storage::encode(first, 7);
     CHECK(fw::input_storage::decode(record).valid());
+    const auto reseal = [](fw::input_storage::Record &bytes) {
+        storage::detail::Writer checksum{std::span{bytes}.last(4)};
+        checksum.word(storage::crc32(std::span{bytes}.first(124)));
+    };
+    record[4] = 1;
+    reseal(record);
+    CHECK(fw::input_storage::decode(record).setup == first);
+    CHECK(fw::input_storage::decode(record).valid());
+    record[7] = 1;
+    reseal(record);
+    CHECK(!fw::input_storage::decode(record).valid());
+    record = fw::input_storage::encode(second, 7);
+    CHECK(fw::input_storage::decode(record).setup == second);
+    record[7] = 16;
+    reseal(record);
+    CHECK(!fw::input_storage::decode(record).valid());
+    record = fw::input_storage::encode(first, 7);
     record[25] ^= 1;
     CHECK(!fw::input_storage::decode(record).valid());
     record = fw::input_storage::encode(first, 7);
-    record[4] = 2;
+    record[4] = fw::input_storage::format_version + 1;
     storage::detail::Writer checksum{std::span{record}.last(4)};
     checksum.word(storage::crc32(std::span{record}.first(124)));
     memory = snapshot;
@@ -154,7 +173,8 @@ void recovery() {
     Test::reset();
     auto &memory = Test::context;
     InputSetup old{features::i6s};
-    old.extra_digital = true;
+    old.set_digital_mode(0, DigitalInputMode::two_position);
+    old.set_digital_mode(1, DigitalInputMode::two_position);
     old.modes[4] = InputMode::pot_detent;
     auto conflicting = old;
     conflicting.extra_analog = true;
@@ -204,13 +224,13 @@ void recovery() {
     CHECK(verification.recover());
     for (unsigned i = 0; (i < 32) && (memory.writes_left > 95); ++i)
         verification.service(TimestampUs{i * 1000U},
-                             {x::StorageProbeState::found, x::I2cError::none, 1});
+                             {fw::StorageProbeState::found, fw::I2cError::none, 1});
     CHECK(memory.writes_left == 95);
     memory.bytes[base + 14] ^= 1;
     service(verification);
     CHECK((verification.status() == fw::RadioStorageStatus::verify) && !verification.writable());
 
-    x::Diagnostics diagnostics{features::i6s};
+    fw::Diagnostics diagnostics{features::i6s};
     fw::InputMenu menu;
     menu.open();
     const auto key = [&](const fw::Key value, const fw::RadioOutput output = fw::RadioOutput::off,
@@ -243,7 +263,7 @@ void input_rf_ui_interlocks() {
     for (const auto output :
          {fw::RadioOutput::off, fw::RadioOutput::internal, fw::RadioOutput::external}) {
         const bool allowed = !features::secure_ui || (output == fw::RadioOutput::off);
-        x::Diagnostics diagnostics{features::i6s};
+        fw::Diagnostics diagnostics{features::i6s};
         fw::InputMenu menu;
         menu.open();
         const auto before = diagnostics.input_setup();
@@ -272,7 +292,7 @@ void decoding() {
     }
     {
         ui::Framebuffer display, expected;
-        x::menu_detail::condition(display, 0, 0, {true, 255, SwitchPosition::up, false}, true);
+        fw::menu_detail::condition(display, 0, 0, {true, 255, SwitchPosition::up, false}, true);
         expected.text(0, 0, "?");
         CHECK(display.bytes() == expected.bytes());
     }
@@ -286,7 +306,7 @@ void decoding() {
         CHECK(static_cast<int>(value) == (position + 2));
         CHECK((switch_value(value) >= (-resolution)) && (switch_value(value) <= resolution));
     }
-    x::Diagnostics diagnostics{features::i6s};
+    fw::Diagnostics diagnostics{features::i6s};
     auto calibration = diagnostics.setup();
     calibration.calibration.fill({0, 2048, 4095});
     CHECK(diagnostics.restore_calibration(calibration));
@@ -308,7 +328,7 @@ void decoding() {
     CHECK(!diagnostics.take_click());
     if constexpr (features::extended_inputs) {
         auto digital_setup = diagnostics.input_setup();
-        digital_setup.extra_digital = true;
+        digital_setup.set_digital_mode(0, DigitalInputMode::two_position);
         CHECK(diagnostics.set_input_setup(digital_setup));
         diagnostics.observe(samples, TimestampUs{400000});
         diagnostics.observe_digital(0, TimestampUs{400000});
@@ -395,7 +415,7 @@ void hardware() {
     auto &registers = Hardware::registers;
     using Inputs = fw::ExtendedInputs<Hardware::Io, fw::Hardware>;
     Inputs::initialize();
-    Inputs::configure(true);
+    Inputs::configure(features::i6s ? 31 : 3);
     if constexpr (features::extended_inputs) {
         const auto check_pin = [&](const fw::Pin pin) {
             CHECK((registers.read(pin.port + offsetof(GPIO_TypeDef, MODER)) &
@@ -414,7 +434,14 @@ void hardware() {
     CHECK((registers.read(control) & TIM_CR1_CEN) != 0);
     Inputs::service(TimestampUs{110000}, false);
     CHECK(registers.read(control) == 0);
-    Inputs::configure(false);
+    Inputs::service(TimestampUs{200000}, true, fw::ClickTone::multiswitch);
+    CHECK(registers.read(TIM1_BASE + offsetof(TIM_TypeDef, ARR)) == ((1'000'000U / 1100U) - 1U));
+    CHECK(registers.read(TIM1_BASE + offsetof(TIM_TypeDef, CCR1)) == ((1'000'000U / 1100U) / 2U));
+    Inputs::service(TimestampUs{209999}, false);
+    CHECK((registers.read(control) & TIM_CR1_CEN) != 0);
+    Inputs::service(TimestampUs{210000}, false);
+    CHECK(registers.read(control) == 0);
+    Inputs::configure(0);
     CHECK(Inputs::read() == 0);
     if constexpr (features::extended_inputs)
         for (const auto input : fw::Hardware::digital_inputs) {
@@ -429,6 +456,23 @@ void hardware() {
                            : input.released == fw::DigitalInput::Released::swdio ? 1U
                                                                                  : 2U));
         }
+    if constexpr (features::extended_inputs && features::i6s) {
+        const auto uart_mode = GPIOB_BASE + offsetof(GPIO_TypeDef, MODER);
+        const auto uart_pulls = GPIOB_BASE + offsetof(GPIO_TypeDef, PUPDR);
+        registers.cell(uart_mode) = 2U << 12 | 2U << 14;
+        registers.cell(uart_pulls) = 1U << 12;
+        Inputs::configure(0x13);
+        CHECK(registers.read(uart_mode) == (2U << 12 | 2U << 14));
+        CHECK(registers.read(uart_pulls) == (1U << 12));
+        CHECK(Inputs::read() == 0x13);
+        Inputs::configure(0x10);
+        CHECK(registers.read(uart_mode) == (2U << 12 | 2U << 14));
+        CHECK(Inputs::read() == 0x10);
+        Inputs::configure(0x1C);
+        CHECK((registers.read(uart_mode) & (15U << 12)) == 0);
+        CHECK(Inputs::read() == 0x1C);
+        Inputs::configure(0);
+    }
 }
 struct FirstBuzzerScenario {};
 struct SecondBuzzerScenario {};
@@ -472,6 +516,15 @@ void buzzer_lifecycle() {
     Buzzer::service(start + DurationUs{9999});
     CHECK(registers.read(control) != 0);
     Buzzer::service(start + DurationUs{10000});
+    CHECK((registers.read(control) == 0) && (registers.read(enable) == TIM_CCER_CC1P));
+    Buzzer::click(start + DurationUs{20000}, fw::ClickTone::multiswitch);
+    CHECK(registers.read(TIM1_BASE + offsetof(TIM_TypeDef, ARR)) == ((1'000'000U / 1100U) - 1U));
+    CHECK(registers.read(TIM1_BASE + offsetof(TIM_TypeDef, CCR1)) == ((1'000'000U / 1100U) / 2U));
+    Buzzer::click(start + DurationUs{25000});
+    CHECK(registers.read(TIM1_BASE + offsetof(TIM_TypeDef, ARR)) == ((1'000'000U / 2200U) - 1U));
+    Buzzer::service(start + DurationUs{34999});
+    CHECK(registers.read(control) != 0);
+    Buzzer::service(start + DurationUs{35000});
     CHECK((registers.read(control) == 0) && (registers.read(enable) == TIM_CCER_CC1P));
     CHECK(other.read(control) != 0);
     Other::service(TimestampUs{10099});
@@ -551,8 +604,8 @@ struct RemappedHardware : fw::i6x::Hardware {
 struct RemappedBusScenario {};
 void remapped_storage_and_display() {
     using Fixture = test::RegisterFixture<RemappedBusScenario, Registers>;
-    using Probe = x::StorageProbe<Fixture::Io, RemappedHardware>;
-    using Memory = x::Eeprom<Fixture::Io, RemappedHardware>;
+    using Probe = fw::StorageProbe<Fixture::Io, RemappedHardware>;
+    using Memory = fw::Eeprom<Fixture::Io, RemappedHardware>;
     using Display = fw::Lcd<Fixture::Io, RemappedHardware>;
     Fixture::reset_registers();
     auto &registers = Fixture::registers;
@@ -564,7 +617,7 @@ void remapped_storage_and_display() {
     const auto request = (0x50U << 1U) | I2C_CR2_AUTOEND | I2C_CR2_START;
     CHECK(registers.read(I2C1_BASE + offsetof(I2C_TypeDef, CR2)) == request);
     Probe::service(TimestampUs{10'000});
-    CHECK(Probe::error() == x::I2cError::timeout);
+    CHECK(Probe::error() == fw::I2cError::timeout);
     CHECK(registers.read(I2C1_BASE + offsetof(I2C_TypeDef, CR1)) == 0);
     Memory::select(0x50);
     std::array<std::uint8_t, 1> byte{0x42};
@@ -579,6 +632,264 @@ void remapped_storage_and_display() {
     CHECK((registers.read(GPIOA_BASE + offsetof(GPIO_TypeDef, MODER)) & 0xFFFFU) == 0x5555);
     CHECK(registers.read(GPIOE_BASE + offsetof(GPIO_TypeDef, MODER)) == 0);
 }
+void setup_rc_hold() {
+    fw::Diagnostics diagnostics{true};
+    auto calibration = diagnostics.setup();
+    calibration.calibration.fill({0, 2048, 4095});
+    CHECK(diagnostics.restore_calibration(calibration));
+    std::array<std::uint16_t, 16> samples{};
+    samples.fill(2048);
+    samples[6] = 1000;
+    samples[7] = 3000;
+    diagnostics.observe(samples, TimestampUs{100'000});
+    diagnostics.observe_setup_controls(false, 1);
+    const auto before = diagnostics.prepared().controls;
+    CHECK((diagnostics.switch_mask() & (3U << physical_switch_count)) ==
+          (3U << physical_switch_count));
+    CHECK(!diagnostics.extra_digital_enabled());
+    CHECK(before.switches[physical_switch_count] == SwitchPosition::down);
+    CHECK(before.switches[physical_switch_count + 1] == SwitchPosition::up);
+    diagnostics.observe_setup_controls(true, 1);
+    samples[0] = 0;
+    samples[6] = 4095;
+    samples[7] = 0;
+    diagnostics.observe(samples, TimestampUs{200'000});
+    diagnostics.observe_setup_controls(true, 2);
+    const auto held = diagnostics.prepared().controls;
+    CHECK((held.analogs[4] == before.analogs[4]) && (held.analogs[5] == before.analogs[5]));
+    CHECK(held.analogs[0] != before.analogs[0]);
+    CHECK(held.switches[physical_switch_count] == SwitchPosition::down);
+    CHECK(held.switches[physical_switch_count + 1] == SwitchPosition::up);
+    CHECK((diagnostics.samples()[6] == 4095) && (diagnostics.samples()[7] == 0));
+    diagnostics.observe_setup_controls(false, 2);
+    const auto released = diagnostics.prepared().controls;
+    CHECK((released.analogs[4] == resolution) && (released.analogs[5] == -resolution));
+    CHECK(released.switches[physical_switch_count] == SwitchPosition::up);
+    CHECK(released.switches[physical_switch_count + 1] == SwitchPosition::down);
+}
+
+void digital_configuration() {
+    fw::Diagnostics diagnostics{features::i6s};
+    auto calibration = diagnostics.setup();
+    calibration.calibration.fill({0, 2048, 4095});
+    CHECK(diagnostics.restore_calibration(calibration));
+    std::array<std::uint16_t, 16> samples{};
+    samples.fill(2048);
+    InputSetup setup{features::i6s};
+    setup.external_module = false;
+    setup.modes.fill(InputMode::off);
+    for (std::size_t i = 0; i < (features::i6s ? digital_input_count : 2U); ++i) {
+        setup.digital_modes = 0;
+        setup.set_digital_mode(i, DigitalInputMode::two_position);
+        CHECK(diagnostics.set_input_setup(setup));
+        diagnostics.observe(samples, TimestampUs{100'000});
+        diagnostics.observe_digital(static_cast<std::uint8_t>(1U << i), TimestampUs{100'000});
+        const auto mask = features::extended_inputs ? 1U << (auxiliary_count + i) : 0U;
+        CHECK((diagnostics.switch_mask() & 0xF800U) == mask);
+        CHECK((diagnostics.prepared().controls.active_switches & 0xF800U) == mask);
+        CHECK(diagnostics.digital_pin_mask() == (features::extended_inputs ? 1U << i : 0U));
+        if constexpr (features::extended_inputs)
+            CHECK(diagnostics.prepared().controls.switches[auxiliary_count + i] ==
+                  SwitchPosition::down);
+        Model model{};
+        model.inputs.resize<1>();
+        model.inputs[0].source = {SourceKind::analog, 3, false};
+        ui::Interface editor;
+        editor.open(ui::Page::inputs);
+        editor.set_sources(diagnostics.analog_mask(), diagnostics.switch_mask(), 0);
+        Controls controls{};
+        editor.handle(ui::Key::enter, model, controls);
+        editor.handle(ui::Key::right, model, controls);
+        CHECK(model.inputs[0].source.kind ==
+              (features::extended_inputs ? SourceKind::switch_position : SourceKind::maximum));
+        if constexpr (features::extended_inputs)
+            CHECK(model.inputs[0].source.index == auxiliary_count + i);
+        setup.set_digital_mode(i, DigitalInputMode::off);
+        CHECK(diagnostics.set_input_setup(setup));
+        CHECK((diagnostics.switch_mask() & 0xF800U) == 0);
+        model.inputs[0].source = {SourceKind::analog, 3, false};
+        editor.open(ui::Page::inputs);
+        editor.set_sources(diagnostics.analog_mask(), diagnostics.switch_mask(), 0);
+        editor.handle(ui::Key::enter, model, controls);
+        editor.handle(ui::Key::right, model, controls);
+        CHECK(model.inputs[0].source.kind == SourceKind::maximum);
+    }
+    if constexpr (!features::extended_inputs)
+        return;
+    for (const std::size_t pair : {0U, 2U}) {
+        if (!features::i6s && (pair == 2))
+            continue;
+        setup.digital_modes = 0;
+        setup.set_digital_mode(pair, DigitalInputMode::three_position);
+        CHECK(diagnostics.set_input_setup(setup));
+        diagnostics.observe(samples, TimestampUs{100'000});
+        diagnostics.observe_digital(0, TimestampUs{100'000});
+        CHECK(diagnostics.output_valid());
+        CHECK(diagnostics.digital_pin_mask() == (3U << pair));
+        CHECK((diagnostics.switch_mask() & 0xF800U) == (1U << (auxiliary_count + pair)));
+        CHECK(diagnostics.prepared().controls.switches[auxiliary_count + pair] ==
+              SwitchPosition::middle);
+        const auto choice = fw::menu_detail::condition_choice(
+            {true, static_cast<std::uint8_t>(auxiliary_count + pair), SwitchPosition::up, false});
+        CHECK(fw::menu_detail::select_condition(
+                  fw::menu_detail::change_condition(choice, 1, diagnostics), false)
+                  .position == SwitchPosition::middle);
+        std::uint32_t now = 100'000;
+        for (const auto contacts : {1U, 2U, 0U, 3U, 1U}) {
+            const auto pressed = static_cast<std::uint8_t>(contacts << pair);
+            diagnostics.observe_digital(pressed, TimestampUs{now += 1000});
+            diagnostics.observe_digital(pressed, TimestampUs{now += 20'000});
+            if (contacts == 3) {
+                CHECK(!diagnostics.output_valid());
+                CHECK(diagnostics.prepared().status.code == PreparationError::switch_position);
+            } else {
+                CHECK(diagnostics.output_valid());
+                const auto position = contacts == 1   ? SwitchPosition::up
+                                      : contacts == 2 ? SwitchPosition::down
+                                                      : SwitchPosition::middle;
+                CHECK(diagnostics.prepared().controls.switches[auxiliary_count + pair] == position);
+            }
+        }
+    }
+    if constexpr (features::i6s) {
+        setup.digital_modes = 0;
+        setup.set_digital_mode(2, DigitalInputMode::three_position);
+        setup.set_digital_mode(4, DigitalInputMode::two_position);
+        setup.external_module = true;
+        CHECK(diagnostics.set_input_setup(setup));
+        CHECK(diagnostics.digital_pin_mask() == 0x10);
+        CHECK((diagnostics.switch_mask() & 0xF800U) == (1U << 15));
+        setup.external_module = false;
+        CHECK(diagnostics.set_input_setup(setup));
+        CHECK(diagnostics.digital_pin_mask() == 0x1C);
+    }
+}
+
+void extended_analog_sources() {
+    if constexpr (!features::extended_inputs)
+        return;
+    fw::Diagnostics diagnostics{features::i6s};
+    auto calibration = diagnostics.setup();
+    calibration.calibration.fill({0, 2048, 4095});
+    CHECK(diagnostics.restore_calibration(calibration));
+    std::array<std::uint16_t, 16> samples{};
+    samples.fill(2048);
+    InputSetup setup{features::i6s};
+    setup.extra_analog = true;
+    setup.modes.fill(InputMode::off);
+    for (std::size_t extra = 0; extra < fw::extra_adc_count; ++extra) {
+        const auto index = 6 + extra;
+        for (const auto mode : {InputMode::pot, InputMode::three_position, InputMode::off}) {
+            setup.modes[index] = mode;
+            CHECK(diagnostics.set_input_setup(setup));
+            samples[11 + extra] = 4095;
+            diagnostics.observe(samples, TimestampUs{100'000});
+            Model model{};
+            model.inputs.resize<1>();
+            model.inputs[0].source = {SourceKind::analog, 3, false};
+            ui::Interface editor;
+            editor.open(ui::Page::inputs);
+            editor.set_sources(diagnostics.analog_mask(), diagnostics.switch_mask(), 0);
+            Controls controls{};
+            editor.handle(ui::Key::enter, model, controls);
+            editor.handle(ui::Key::right, model, controls);
+            if (mode == InputMode::off)
+                CHECK(model.inputs[0].source.kind == SourceKind::maximum);
+            else if (mode == InputMode::pot) {
+                CHECK(model.inputs[0].source.kind == SourceKind::analog);
+                CHECK(model.inputs[0].source.index == auxiliary_analog_indices[index]);
+                CHECK(diagnostics.prepared().controls.analogs[auxiliary_analog_indices[index]] ==
+                      resolution);
+            } else {
+                CHECK(model.inputs[0].source.kind == SourceKind::switch_position);
+                CHECK(model.inputs[0].source.index == index);
+                CHECK(diagnostics.prepared().controls.switches[index] == SwitchPosition::down);
+                if constexpr (features::i6s) {
+                    constexpr std::array<std::string_view, 5> names{"SWI", "SWJ", "SWK", "SWL",
+                                                                    "SWM"};
+                    ui::Framebuffer actual, expected;
+                    ui::detail::draw_source(actual, 0, 0, model.inputs[0].source, true);
+                    expected.text(0, 0, names[extra]);
+                    CHECK(actual.bytes() == expected.bytes());
+                }
+            }
+        }
+    }
+}
+
+void digital_menu() {
+    if constexpr (!features::extended_inputs)
+        return;
+    fw::Diagnostics diagnostics{features::i6s};
+    fw::InputMenu menu;
+    menu.open();
+    const auto key = [&](const fw::Key pressed) {
+        return menu.handle(pressed, diagnostics, fw::RadioOutput::off, true, false, nullptr);
+    };
+    for (unsigned i = 0; i < 7; ++i)
+        (void)key(fw::Key::down);
+    (void)key(fw::Key::ok);
+    (void)key(fw::Key::up);
+    CHECK(key(fw::Key::ok) == fw::InputMenuCommand::save);
+    CHECK(diagnostics.input_setup().digital_mode(0) == DigitalInputMode::two_position);
+    (void)key(fw::Key::ok);
+    (void)key(fw::Key::up);
+    CHECK(key(fw::Key::ok) == fw::InputMenuCommand::save);
+    CHECK(diagnostics.input_setup().digital_mode(0) == DigitalInputMode::three_position);
+    CHECK(diagnostics.input_setup().digital_mode(1) == DigitalInputMode::off);
+    if constexpr (features::i6s) {
+        (void)key(fw::Key::down);
+        (void)key(fw::Key::ok);
+        (void)key(fw::Key::up);
+        CHECK(key(fw::Key::ok) == fw::InputMenuCommand::save);
+        CHECK(diagnostics.input_setup().digital_mode(4) == DigitalInputMode::two_position);
+        CHECK(diagnostics.input_setup().digital_mode(2) == DigitalInputMode::off);
+        CHECK(diagnostics.input_setup().digital_mode(3) == DigitalInputMode::off);
+        (void)key(fw::Key::up);
+    }
+    (void)key(fw::Key::ok);
+    (void)key(fw::Key::up);
+    CHECK(key(fw::Key::ok) == fw::InputMenuCommand::save);
+    CHECK(diagnostics.input_setup().digital_mode(0) == DigitalInputMode::off);
+}
+
+void digital_journal() {
+    InputSetup setup{features::i6s};
+    setup.external_module = false;
+    setup.trim_beep = false;
+    setup.set_digital_mode(0, DigitalInputMode::three_position);
+    setup.set_digital_mode(2, DigitalInputMode::three_position);
+    setup.set_digital_mode(4, DigitalInputMode::two_position);
+    const auto encoded = fw::input_storage::encode(setup, 19);
+    const auto decoded = fw::input_storage::decode(encoded);
+    CHECK(decoded.valid() && (decoded.setup == setup) && (decoded.generation == 19));
+    for (const auto version : {1U, 2U}) {
+        auto legacy = encoded;
+        legacy[4] = static_cast<std::uint8_t>(version);
+        legacy[6] = 1;
+        legacy[7] = static_cast<std::uint8_t>(version == 2 ? 1 : 0);
+        storage::detail::Writer checksum{std::span{legacy}.last(4)};
+        checksum.word(storage::crc32(std::span{legacy}.first(124)));
+        const auto old = fw::input_storage::decode(legacy);
+        CHECK(old.valid());
+        CHECK(old.setup.external_module == !features::i6s);
+        CHECK(old.setup.trim_beep == (version == 1));
+        for (std::size_t i = 0; i < digital_input_count; ++i)
+            CHECK(old.setup.digital_mode(i) == ((features::i6s || (i < 2))
+                                                    ? DigitalInputMode::two_position
+                                                    : DigitalInputMode::off));
+    }
+    setup.set_digital_mode(1, DigitalInputMode::two_position);
+    CHECK(!valid_input_setup(setup));
+    setup.digital_modes = 3;
+    CHECK(!valid_input_setup(setup));
+    setup.digital_modes = 1U << 10;
+    CHECK(!valid_input_setup(setup));
+    setup.digital_modes = 0;
+    setup.set_digital_mode(4, DigitalInputMode::three_position);
+    CHECK(!valid_input_setup(setup));
+}
+
 void touch_hold() {
     fw::i6s::TouchNavigation navigation;
     fw::i6s::TouchSample sample{};
@@ -593,6 +904,11 @@ void touch_hold() {
 }
 } // namespace
 int main() {
+    digital_configuration();
+    extended_analog_sources();
+    digital_menu();
+    digital_journal();
+    setup_rc_hold();
     journal();
     recovery();
     input_rf_ui_interlocks();

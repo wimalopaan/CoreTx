@@ -14,7 +14,7 @@ namespace {
 
 namespace hw = coretx::firmware;
 using Board = hw::SenderBoard<hw::stm32f072::Mmio>;
-using Sender = hw::i6x::Application<Board, Board::Input>;
+using Sender = hw::Application<Board, Board::Input>;
 
 // Construct in place in main so zero-filled framebuffers do not occupy flash.
 constinit std::optional<Sender> application_storage{};
@@ -30,33 +30,27 @@ constinit std::optional<Sender> application_storage{};
 
 } // namespace
 
-#if CORETX_A7105
-static_assert(Board::Hardware::clock_timer == 2);
-static_assert(hw::stm32f072::ExtiTraits<Board::Hardware::radio.status>::irq == EXTI2_3_IRQn);
-extern "C" void TIM2_IRQHandler() noexcept { Board::RadioTimer::interrupt(); }
-extern "C" void EXTI2_3_IRQHandler() noexcept { Board::RadioTimer::gio2_interrupt(); }
-#endif
-
 extern "C" [[noreturn]] int main() noexcept {
     Board::prepare_power();
     Board::power_off();
-    if (Board::Watchdog::initialize() != hw::WatchdogError::none) {
+    const auto boot_ready = Board::bootloader_startup();
+    if ((Board::Watchdog::initialize() != hw::WatchdogError::none) || !boot_ready) {
         halt();
     }
     auto &application = application_storage.emplace();
-    if (application.initialize() == hw::i6x::ApplicationState::fatal) {
+    if (application.initialize() == hw::ApplicationState::fatal) {
         halt();
     }
     if (Board::Watchdog::start_runtime(Board::now_us()) != hw::WatchdogError::none) {
         halt();
     }
     for (;;) {
-        if (application.service(Board::now_us()) == hw::i6x::ApplicationState::fatal) {
+        if (application.service(Board::now_us()) == hw::ApplicationState::fatal) {
             halt(static_cast<std::uint8_t>(0x80U | static_cast<unsigned>(application.failure())));
         }
         if (!Board::stack_intact())
-            halt(static_cast<std::uint8_t>(
-                0x80U | static_cast<unsigned>(hw::i6x::ApplicationFailure::stack)));
+            halt(static_cast<std::uint8_t>(0x80U |
+                                           static_cast<unsigned>(hw::ApplicationFailure::stack)));
         if (Board::Watchdog::service(Board::now_us()) != hw::WatchdogError::none) {
             halt();
         }

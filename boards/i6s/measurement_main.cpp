@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#include "boards/common/radio_board.hpp"
+#include "boards/common/board.hpp"
 #include "boards/i6s/power.hpp"
 #include "boards/i6s/workload.hpp"
 #include "platform/stm32f072/measurements.hpp"
@@ -43,6 +43,7 @@ struct Mmio : coretx::firmware::stm32f072::Mmio {
 
 using Watchdog = coretx::firmware::Watchdog<Mmio>;
 using Hardware = coretx::firmware::i6s::Hardware;
+using Board = coretx::firmware::SenderBoard<Mmio, Hardware>;
 using Clock = coretx::firmware::Clock<Mmio, Hardware::clock_timer>;
 
 // Keep a generic runtime entry point instead of specializing for the fixed demo model.
@@ -64,8 +65,14 @@ extern "C" [[noreturn]] int main() noexcept {
     coretx::firmware::i6s::hold_power<Mmio, Hardware>();
     coretx::firmware::external_module_off<Mmio, Hardware>();
     coretx::firmware::internal_front_end_off<Mmio, Hardware::radio>();
+    const auto boot_ready = Board::bootloader_startup();
     if (Watchdog::initialize() != coretx::firmware::WatchdogError::none) {
         coretx_hardware_error = coretx::firmware::i6s::HardwareError::watchdog;
+        halt();
+    }
+    if (!boot_ready) {
+        coretx_hardware_error = coretx::firmware::i6s::HardwareError::bootloader;
+        Watchdog::record_failure(0x80);
         halt();
     }
     coretx_hardware_error = Clock::initialize();

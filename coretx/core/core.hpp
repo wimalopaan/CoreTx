@@ -269,7 +269,8 @@ struct Model {
     // 0 disables a slot; 1..16 select a channel.
     std::array<std::uint8_t, 8> dashboard_channels{1, 2, 3, 4, 5, 6, 7, 8};
     std::array<MultiSwitchPage, multiswitch_page_count> multiswitch{};
-    bool crsf_dashboard{};
+    bool crsf_dashboard : 1 {};
+    bool multiswitch_beep : 1 {true};
     std::array<TrimSteps, trim_count> trims{};
     std::uint8_t trim_switches{};
 };

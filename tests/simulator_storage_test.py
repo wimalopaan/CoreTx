@@ -60,7 +60,7 @@ def main():
         assert path.read_bytes() == corrupted
 
         future = bytearray(committed)
-        future[4:6] = (7).to_bytes(2, "little")
+        future[4:6] = (int.from_bytes(committed[4:6], "little") + 1).to_bytes(2, "little")
         future[12:16] = zlib.crc32(future[:12] + future[16:]).to_bytes(4, "little")
         newer = bytes(future) + committed
         path.write_bytes(newer)

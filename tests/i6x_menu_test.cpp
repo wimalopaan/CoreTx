@@ -7,8 +7,8 @@
 #include <utility>
 
 namespace {
-namespace x = coretx::firmware::i6x;
-namespace md = x::models;
+namespace fw = coretx::firmware;
+namespace md = fw::models;
 using coretx::afhds2a::ChannelMode;
 using coretx::firmware::Key;
 using coretx::firmware::RadioOutput;
@@ -16,10 +16,11 @@ constexpr coretx::afhds2a::TxId tx{0x12345678};
 
 struct Context {
     std::array<std::uint8_t, 16384> bytes{};
-    x::I2cError error{};
+    fw::I2cError error{};
     bool fail_read{};
     bool corrupt_verify{};
     unsigned writes{};
+    unsigned reads{};
     constexpr Context() { bytes.fill(0xFF); }
 };
 template <typename Test> struct Memory {
@@ -31,14 +32,15 @@ template <typename Test> struct Memory {
     }
     static void service(coretx::TimestampUs) {}
     static bool busy() { return false; }
-    static x::I2cError error() {
+    static fw::I2cError error() {
         auto &c = Test::context;
         return c.error;
     }
     static bool read(std::uint16_t address, std::span<std::uint8_t> bytes) {
         auto &c = Test::context;
+        ++c.reads;
         if (c.fail_read) {
-            c.error = x::I2cError::timeout;
+            c.error = fw::I2cError::timeout;
             return false;
         }
         if (((address + bytes.size()) > c.bytes.size()) || (bytes.size() > page_size))
@@ -58,15 +60,15 @@ template <typename Test> struct Memory {
         return true;
     }
 };
-constexpr x::StorageProbeResult probe{x::StorageProbeState::found, {}, 1};
+constexpr fw::StorageProbeResult probe{fw::StorageProbeState::found, {}, 1};
 constexpr coretx::firmware::RadioSettings legacy_radio{
     tx, {0x87654321}, RadioOutput::internal, ChannelMode::standard14};
 template <typename Store>
-void tick(Store &store, const coretx::Model &legacy = x::diagnostic_model) {
+void tick(Store &store, const coretx::Model &legacy = fw::diagnostic_model) {
     store.service(coretx::TimestampUs{1000}, probe, legacy, legacy_radio);
 }
 template <typename Store>
-bool settle(Store &store, const coretx::Model &legacy = x::diagnostic_model) {
+bool settle(Store &store, const coretx::Model &legacy = fw::diagnostic_model) {
     for (int i = 0; i < 1500; ++i) {
         tick(store, legacy);
         if (store.loaded() && !store.busy())
@@ -75,7 +77,7 @@ bool settle(Store &store, const coretx::Model &legacy = x::diagnostic_model) {
     return false;
 }
 template <typename Store>
-bool boot(Store &store, const coretx::Model &legacy = x::diagnostic_model) {
+bool boot(Store &store, const coretx::Model &legacy = fw::diagnostic_model) {
     store.initialize(tx);
     return settle(store, legacy);
 }
@@ -118,6 +120,7 @@ bool codec() {
     }
     data.baud_index = 7;
     data.model.crsf_dashboard = true;
+    data.model.multiswitch_beep = false;
     for (std::size_t i = 0; i < data.model.multiswitch.size(); ++i) {
         auto &page = data.model.multiswitch[i];
         page.address = static_cast<std::int16_t>(i == 3 ? 255 : i);
@@ -141,8 +144,30 @@ bool codec() {
         !restored.model.logical_switches[7].inverted_b ||
         (restored.model.logical_switches[7].threshold != -1024))
         return false;
-    if ((restored.model.multiswitch != data.model.multiswitch) || !restored.model.crsf_dashboard)
+    if ((restored.model.multiswitch != data.model.multiswitch) || !restored.model.crsf_dashboard ||
+        restored.model.multiswitch_beep)
         return false;
+    record[4] = 6;
+    {
+        coretx::storage::detail::Writer checksum{std::span{record}.last(4)};
+        checksum.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
+    }
+    if (md::decode(record, 7, tx, restored, info) != 2)
+        return false;
+    data.model.multiswitch_beep = true;
+    if (!md::encode(data, 7, true, 0xFFFFFFFF, record))
+        return false;
+    record[4] = 6;
+    {
+        coretx::storage::detail::Writer checksum{std::span{record}.last(4)};
+        checksum.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
+    }
+    restored.model.multiswitch_beep = false;
+    if ((md::decode(record, 7, tx, restored, info) != 1) || !restored.model.multiswitch_beep ||
+        !md::encode(restored, 7, true, info.generation, record) ||
+        (restored.model.multiswitch != data.model.multiswitch))
+        return false;
+    record = again;
     if ((md::decode(record, 6, tx, restored, info) != 2) ||
         (md::decode(record, 7, {0x87654321}, restored, info) != 2))
         return false;
@@ -154,7 +179,7 @@ bool codec() {
     if (md::decode(record, 7, tx, restored, info) != 2)
         return false;
     record = again;
-    record[4] = 7;
+    record[4] = md::format_version + 1;
     coretx::storage::detail::Writer checksum{std::span{record}.last(4)};
     checksum.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
     return md::decode(record, 7, tx, restored, info) == 3;
@@ -166,7 +191,7 @@ bool obsolete_models_can_be_recreated() {
     md::Record current{};
     if (!md::encode(data, 0, true, 7, current))
         return false;
-    for (std::uint8_t version = 1; version < md::format_version; ++version) {
+    for (std::uint8_t version = 1; version < coretx::storage::oldest_format_version; ++version) {
         auto obsolete = current;
         obsolete[4] = version;
         coretx::storage::detail::Writer checksum{std::span{obsolete}.last(4)};
@@ -182,12 +207,136 @@ bool obsolete_models_can_be_recreated() {
     coretx::storage::detail::Writer checksum{std::span{current}.last(4)};
     checksum.word(coretx::storage::crc32(std::span{current}.first(md::record_size - 4)));
     std::copy(current.begin(), current.end(), Test::context.bytes.begin() + md::base);
-    x::ModelStorage<Test::Board> store{};
+    fw::ModelStorage<Test::Board> store{};
     store.initialize(tx);
     (void)settle(store);
     return !store.editable() && store.can_initialize() &&
-           store.initialize_models(x::diagnostic_model, legacy_radio) && settle(store) &&
+           store.initialize_models(fw::diagnostic_model, legacy_radio) && settle(store) &&
            store.editable() && (store.data().radio.output == RadioOutput::off);
+}
+
+bool active_first_loading() {
+    for (const std::size_t active : {0U, 3U, 7U}) {
+        struct Scenario {};
+        using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
+        using Store = fw::ModelStorage<Test::Board>;
+        Test::reset();
+        auto &c = Test::context;
+        md::Data data{};
+        data.radio = legacy_radio;
+        md::Record record{};
+        for (std::size_t index = 0; index < md::count; ++index) {
+            md::default_name(data.name, index);
+            data.model.inputs[0].weight_percent = coretx::InputWeight::constant<61>();
+            if (!md::encode(data, index, true, 0xFFFFFFFFU, record))
+                return false;
+            std::copy(record.begin(), record.end(),
+                      c.bytes.begin() + md::base + index * 2 * md::record_size);
+            if (index == active) {
+                data.model.inputs[0].weight_percent = coretx::InputWeight::constant<73>();
+                if (!md::encode(data, index, true, 0, record))
+                    return false;
+                std::copy(record.begin(), record.end(),
+                          c.bytes.begin() + md::base + (index * 2 + 1) * md::record_size);
+            }
+        }
+        std::array<std::uint8_t, 64> directory{};
+        directory.fill(0xFF);
+        coretx::storage::detail::Writer out{directory};
+        out.word(md::directory_magic);
+        out.field(std::uint8_t{1});
+        out.field(static_cast<std::uint8_t>(active));
+        out.word(std::uint32_t{0});
+        coretx::storage::detail::Writer crc{std::span{directory}.last(4)};
+        crc.word(coretx::storage::crc32(std::span{directory}.first(60)));
+        std::copy(directory.begin(), directory.end(), c.bytes.begin() + md::directory_base);
+        Store store{};
+        store.initialize(tx);
+        for (unsigned i = 0; !store.loaded() && (i < 100); ++i)
+            tick(store);
+        if (!store.loaded() || !store.background_loading() || !store.busy() || !store.editable() ||
+            !store.take_changed() || (c.reads < 26) || (c.reads > 28) ||
+            (store.active() != active) || (store.entries()[active].bank != 1) ||
+            (store.data().model.inputs[0].weight_percent.value() != 73))
+            return false;
+        if (store.select((active + 1) % md::count) || store.create(false))
+            return false;
+        fw::Diagnostics diagnostics{};
+        diagnostics.use_model(store.data().model);
+        fw::Menu menu{};
+        menu.open();
+        const auto press = [&](const Key key) {
+            return menu.handle(key, store, diagnostics, RadioOutput::off);
+        };
+        (void)press(Key::down);
+        (void)press(Key::ok);
+        for (unsigned i = 0; i < 3; ++i)
+            (void)press(Key::down);
+        (void)press(Key::ok);
+        (void)press(Key::ok);
+        (void)press(Key::up);
+        if ((press(Key::ok) != fw::MenuCommand::output) ||
+            (menu.requested_output() !=
+             (fw::features::crsf ? RadioOutput::external : RadioOutput::off)))
+            return false;
+        for (unsigned i = 0; store.background_loading() && (i < 300); ++i) {
+            tick(store);
+            if (store.take_changed() || (store.data().model.inputs[0].weight_percent.value() != 73))
+                return false;
+        }
+        if (!store.editable() || store.busy() || (c.reads != 194) || (c.writes != 0))
+            return false;
+        for (const auto &entry : store.entries())
+            if (!entry.valid || !entry.present)
+                return false;
+    }
+    return true;
+}
+
+bool background_loading_errors() {
+    for (const bool future : {false, true}) {
+        struct Scenario {};
+        using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
+        using Store = fw::ModelStorage<Test::Board>;
+        Test::reset();
+        auto &c = Test::context;
+        md::Data data{};
+        data.radio = legacy_radio;
+        data.model.inputs[0].weight_percent = coretx::InputWeight::constant<73>();
+        md::Record record{};
+        if (!md::encode(data, 0, true, 1, record))
+            return false;
+        std::copy(record.begin(), record.end(), c.bytes.begin() + md::base);
+        if (!md::encode(data, 7, true, 1, record))
+            return false;
+        if (future) {
+            record[4] = md::format_version + 1;
+            coretx::storage::detail::Writer crc{std::span{record}.last(4)};
+            crc.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
+        } else
+            record[700] ^= 1;
+        std::copy(record.begin(), record.end(), c.bytes.begin() + md::base + 14 * md::record_size);
+        const auto before = c.bytes;
+        Store store{};
+        store.initialize(tx);
+        for (unsigned i = 0; !store.loaded() && (i < 100); ++i)
+            tick(store);
+        if (!store.background_loading() || !store.take_changed())
+            return false;
+        store.data().radio.receiver = {0x11223344};
+        if (!store.save())
+            return false;
+        for (unsigned i = 0; store.background_loading() && (i < 300); ++i)
+            tick(store);
+        if (!store.loaded() || store.editable() || store.busy() || store.take_changed() ||
+            store.save() || store.create(false) || (c.bytes != before) || (c.writes != 0) ||
+            (store.data().model.inputs[0].weight_percent.value() != 73) ||
+            (store.data().radio.receiver.value != 0x11223344) ||
+            (store.message() !=
+             (future ? coretx::ui::tr::models_version : coretx::ui::tr::models_error)))
+            return false;
+    }
+    return true;
 }
 
 bool multiswitch_menu_persistence() {
@@ -195,14 +344,14 @@ bool multiswitch_menu_persistence() {
         return true;
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     Store store{};
     if (!boot(store))
         return false;
-    x::Diagnostics diagnostics{};
+    fw::Diagnostics diagnostics{};
     diagnostics.use_model(store.data().model);
-    x::Menu menu{};
+    fw::Menu menu{};
     menu.open();
     const auto press = [&](const Key key) {
         (void)menu.handle(key, store, diagnostics, RadioOutput::off);
@@ -212,11 +361,17 @@ bool multiswitch_menu_persistence() {
     for (unsigned i = 0; i < 6; ++i)
         press(Key::down);
     press(Key::ok);
-    if (menu.screen() != x::MenuScreen::multiswitch)
+    if (menu.screen() != fw::MenuScreen::multiswitch)
         return false;
-    press(Key::down);
-    press(Key::down);
-    press(Key::down);
+    for (unsigned i = 0; i < coretx::multiswitch_page_count; ++i)
+        press(Key::down);
+    press(Key::ok);
+    if (store.data().model.multiswitch_beep || (menu.screen() != fw::MenuScreen::multiswitch))
+        return false;
+    press(Key::ok); // Saving must not toggle again.
+    if (!settle(store) || store.data().model.multiswitch_beep)
+        return false;
+    press(Key::up);
     press(Key::ok);
     press(Key::ok);
     press(Key::up);
@@ -289,8 +444,8 @@ bool multiswitch_menu_persistence() {
     {
         coretx::ui::Framebuffer display{}, expected{};
         menu.render(store, diagnostics, RadioOutput::off, display);
-        const int y = x::menu_detail::list_y + 3 * x::menu_detail::row_height;
-        expected.rectangle(0, y - 1, 128, x::menu_detail::row_height);
+        const int y = fw::menu_detail::list_y + 3 * fw::menu_detail::row_height;
+        expected.rectangle(0, y - 1, 128, fw::menu_detail::row_height);
         expected.text(101, y, "SA^", false);
         for (int row = y; row < (y + 8); ++row)
             for (int column = 101; column < 119; ++column)
@@ -310,7 +465,7 @@ bool multiswitch_menu_persistence() {
     if (!settle(store) || (control.condition().position != coretx::SwitchPosition::down))
         return false;
     press(Key::ok);
-    for (unsigned i = 0; i < (coretx::switch_count * x::menu_detail::condition_positions); ++i)
+    for (unsigned i = 0; i < (coretx::switch_count * fw::menu_detail::condition_positions); ++i)
         press(Key::up);
     press(Key::cancel);
     if ((control.condition().index != 0) ||
@@ -320,7 +475,7 @@ bool multiswitch_menu_persistence() {
     if (!store.save() || !settle(store))
         return false;
     press(Key::ok);
-    for (unsigned i = 0; i < (coretx::switch_count * x::menu_detail::condition_positions); ++i)
+    for (unsigned i = 0; i < (coretx::switch_count * fw::menu_detail::condition_positions); ++i)
         press(Key::up);
     press(Key::ok);
     if (!settle(store) || (control.condition().index != coretx::switch_count))
@@ -335,8 +490,8 @@ bool multiswitch_menu_persistence() {
         (void)overview.handle(Key::cancel, store, diagnostics, RadioOutput::off);
         coretx::ui::Framebuffer display{}, expected{};
         overview.render(store, diagnostics, RadioOutput::off, display);
-        const auto y = x::menu_detail::list_y + x::menu_detail::row_height;
-        expected.rectangle(0, y - 1, 128, x::menu_detail::row_height);
+        const auto y = fw::menu_detail::list_y + fw::menu_detail::row_height;
+        expected.rectangle(0, y - 1, 128, fw::menu_detail::row_height);
         expected.text(1, y, "2@1", false);
         for (int row = y; row < (y + 8); ++row)
             for (int column = 1; column < 19; ++column)
@@ -361,18 +516,19 @@ bool multiswitch_menu_persistence() {
         return false;
     Store reboot{};
     if (!boot(reboot) || (reboot.data().model.multiswitch != store.data().model.multiswitch) ||
-        !reboot.data().model.crsf_dashboard)
+        !reboot.data().model.crsf_dashboard || reboot.data().model.multiswitch_beep)
         return false;
     if (!reboot.create(true) || !settle(reboot) ||
-        (reboot.data().model.multiswitch[3].momentary != 1))
+        (reboot.data().model.multiswitch[3].momentary != 1) || reboot.data().model.multiswitch_beep)
         return false;
     return reboot.create(false) && settle(reboot) && !reboot.data().model.crsf_dashboard &&
+           reboot.data().model.multiswitch_beep &&
            (reboot.data().model.multiswitch == std::array<coretx::MultiSwitchPage, 4>{});
 }
 
 constexpr bool multiswitch_condition_choices() {
-    x::Diagnostics diagnostics{};
-    auto model = x::diagnostic_model;
+    fw::Diagnostics diagnostics{};
+    auto model = fw::diagnostic_model;
     model.logical_switches[0].function = coretx::LogicalFunction::greater;
     diagnostics.use_model(model);
     coretx::InputSetup setup{};
@@ -383,8 +539,8 @@ constexpr bool multiswitch_condition_choices() {
         return false;
     int choice = -1;
     const auto step = [&](const int direction) constexpr {
-        choice = x::menu_detail::change_condition(choice, direction, diagnostics);
-        return x::menu_detail::select_condition(choice, false);
+        choice = fw::menu_detail::change_condition(choice, direction, diagnostics);
+        return fw::menu_detail::select_condition(choice, false);
     };
     for (int position = 2; position <= 7; ++position) {
         const auto condition = step(1);
@@ -403,7 +559,7 @@ constexpr bool multiswitch_condition_choices() {
         (logical_false.position != coretx::SwitchPosition::up) ||
         (logical_true.index != coretx::switch_count) ||
         (logical_true.position != coretx::SwitchPosition::down) ||
-        !x::menu_detail::select_condition(choice, true).inverted)
+        !fw::menu_detail::select_condition(choice, true).inverted)
         return false;
     const auto last = choice;
     (void)step(1);
@@ -416,27 +572,27 @@ constexpr bool multiswitch_condition_choices() {
     setup.modes.fill(coretx::InputMode::off);
     model.logical_switches[0].function = coretx::LogicalFunction::disabled;
     return diagnostics.set_input_setup(setup) &&
-           (x::menu_detail::change_condition(-1, 1, diagnostics) == -1);
+           (fw::menu_detail::change_condition(-1, 1, diagnostics) == -1);
 }
 
 bool dashboard_feature_gates() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     Store store{};
     if (!boot(store))
         return false;
     store.data().model.crsf_dashboard = true;
     store.data().model.multiswitch[0].address = 42;
-    x::Diagnostics diagnostics{};
+    fw::Diagnostics diagnostics{};
     diagnostics.use_model(store.data().model);
-    const auto expected = x::Diagnostics::page_count +
+    const auto expected = fw::Diagnostics::page_count +
                           (coretx::firmware::features::crsf ? 1U : 0U) +
                           (coretx::firmware::features::multiswitch ? 1U : 0U);
     if (diagnostics.dashboard_pages() != expected)
         return false;
-    x::Menu menu{};
+    fw::Menu menu{};
     menu.open();
     const auto press = [&](const Key key) {
         (void)menu.handle(key, store, diagnostics, RadioOutput::off);
@@ -446,33 +602,33 @@ bool dashboard_feature_gates() {
     for (unsigned i = 0; i < 10; ++i)
         press(Key::down);
     press(Key::ok);
-    if (menu.screen() != x::MenuScreen::trims)
+    if (menu.screen() != fw::MenuScreen::trims)
         return false;
     press(Key::cancel);
     const auto destination =
-        coretx::firmware::features::crsf ? x::menu_detail::crsf_dashboard_row : 5U;
+        coretx::firmware::features::crsf ? fw::menu_detail::crsf_dashboard_row : 5U;
     for (std::size_t i = 0; i < destination; ++i)
         press(Key::down);
     press(Key::ok);
     if constexpr (coretx::firmware::features::crsf)
-        return (menu.screen() == x::MenuScreen::setup) && !store.data().model.crsf_dashboard &&
+        return (menu.screen() == fw::MenuScreen::setup) && !store.data().model.crsf_dashboard &&
                settle(store);
     else
-        return (menu.screen() == x::MenuScreen::logical_switches) &&
+        return (menu.screen() == fw::MenuScreen::logical_switches) &&
                store.data().model.crsf_dashboard;
 }
 
 bool dashboard_and_logical_menu_persistence() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     Store store{};
     if (!boot(store))
         return false;
-    x::Diagnostics diagnostics{};
+    fw::Diagnostics diagnostics{};
     diagnostics.use_model(store.data().model);
-    x::Menu menu{};
+    fw::Menu menu{};
     menu.open();
     const auto press = [&](const Key key) {
         (void)menu.handle(key, store, diagnostics, RadioOutput::off);
@@ -482,7 +638,7 @@ bool dashboard_and_logical_menu_persistence() {
     for (int i = 0; i < 4; ++i)
         press(Key::down);
     press(Key::ok);
-    if (menu.screen() != x::MenuScreen::dashboard_channels)
+    if (menu.screen() != fw::MenuScreen::dashboard_channels)
         return false;
     press(Key::ok);
     for (int i = 0; i < 15; ++i)
@@ -508,7 +664,7 @@ bool dashboard_and_logical_menu_persistence() {
         press(Key::down);
     press(Key::ok);
     press(Key::ok);
-    if (menu.screen() != x::MenuScreen::logical_editor)
+    if (menu.screen() != fw::MenuScreen::logical_editor)
         return false;
     press(Key::ok);
     for (int i = 0; i < 10; ++i)
@@ -530,7 +686,7 @@ bool dashboard_and_logical_menu_persistence() {
     press(Key::up);
     press(Key::up); // B down.
     press(Key::ok_long);
-    if (!settle(store) || (menu.screen() != x::MenuScreen::logical_switches) ||
+    if (!settle(store) || (menu.screen() != fw::MenuScreen::logical_switches) ||
         (store.data().model.logical_switches[0].function != coretx::LogicalFunction::srff))
         return false;
     // Draft cycles must not enter the model or EEPROM.
@@ -540,7 +696,7 @@ bool dashboard_and_logical_menu_persistence() {
     for (std::size_t i = 0; i < coretx::switch_count; ++i)
         press(Key::up);
     press(Key::ok_long);
-    if ((menu.screen() != x::MenuScreen::logical_editor) ||
+    if ((menu.screen() != fw::MenuScreen::logical_editor) ||
         (store.data().model.logical_switches[0].a != 0) || store.busy())
         return false;
     press(Key::cancel_long);
@@ -571,11 +727,11 @@ bool dashboard_and_logical_menu_persistence() {
 bool model_management() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     auto &c = Test::context;
     std::fill_n(c.bytes.begin(), 2176, 0x5A);
-    auto legacy = x::diagnostic_model;
+    auto legacy = fw::diagnostic_model;
     legacy.inputs[0].weight_percent = coretx::InputWeight::constant<73>();
     Store store{};
     if (!boot(store, legacy) || (store.active() != 0) || !store.entries()[0].present ||
@@ -611,7 +767,7 @@ bool model_management() {
     using rebootTest = coretx::test::FakeApplication<rebootScenario, Context, Memory>;
     rebootTest::reset();
     rebootTest::context.bytes = c.bytes;
-    x::ModelStorage<rebootTest::Board> reboot{};
+    fw::ModelStorage<rebootTest::Board> reboot{};
     if (!boot(reboot) || (reboot.active() != store.active()) ||
         (reboot.entries()[1].name != name) || !reboot.select(1) || !settle(reboot) ||
         (reboot.data().radio.receiver.value != 0x10203040) || (reboot.data().baud_index != 4))
@@ -623,7 +779,7 @@ bool interrupted_journals() {
     for (int operation = 0; operation < 3; ++operation) {
         struct Scenario {};
         using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-        using Store = x::ModelStorage<Test::Board>;
+        using Store = fw::ModelStorage<Test::Board>;
         Test::reset();
         auto &c = Test::context;
         Store store{};
@@ -654,7 +810,7 @@ bool interrupted_journals() {
         using rebootTest = coretx::test::FakeApplication<rebootScenario, Context, Memory>;
         rebootTest::reset();
         rebootTest::context.bytes = c.bytes;
-        x::ModelStorage<rebootTest::Board> reboot{};
+        fw::ModelStorage<rebootTest::Board> reboot{};
         if (!boot(reboot) || (reboot.active() != (operation == 2 ? 1U : 0U)) ||
             ((operation == 0) && (reboot.data().model.inputs[0].weight_percent.value() != 100)) ||
             ((operation == 0) && ((reboot.data().model.dashboard_channels[0] != 1) ||
@@ -669,7 +825,7 @@ bool interrupted_journals() {
 bool failures_and_wrap() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     auto &c = Test::context;
     Store store{};
@@ -685,7 +841,7 @@ bool failures_and_wrap() {
         return false;
     struct WrappedScenario {};
     using WrappedTest = coretx::test::FakeApplication<WrappedScenario, Context, Memory>;
-    using WrappedStore = x::ModelStorage<WrappedTest::Board>;
+    using WrappedStore = fw::ModelStorage<WrappedTest::Board>;
     WrappedTest::reset();
     auto &wrapped = WrappedTest::context;
     md::Data data{};
@@ -701,7 +857,7 @@ bool failures_and_wrap() {
     WrappedStore resumed{};
     if (!boot(resumed) || (resumed.data().baud_index != 5))
         return false;
-    current[4] = 7;
+    current[4] = md::format_version + 1;
     coretx::storage::detail::Writer checksum{std::span{current}.last(4)};
     checksum.word(coretx::storage::crc32(std::span{current}.first(md::record_size - 4)));
     std::copy(current.begin(), current.end(), wrapped.bytes.begin() + md::base + md::record_size);
@@ -715,7 +871,7 @@ bool failures_and_wrap() {
 bool queued_save_and_directory_version() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     auto &c = Test::context;
     Store store{};
@@ -733,7 +889,7 @@ bool queued_save_and_directory_version() {
     using rebootTest = coretx::test::FakeApplication<rebootScenario, Context, Memory>;
     rebootTest::reset();
     rebootTest::context.bytes = c.bytes;
-    x::ModelStorage<rebootTest::Board> reboot{};
+    fw::ModelStorage<rebootTest::Board> reboot{};
     if (!boot(reboot) || (reboot.data().radio.receiver.value != 0x11223344))
         return false;
     // Future directory versions may also increase the number of model slots.
@@ -752,20 +908,20 @@ bool queued_save_and_directory_version() {
     future.initialize(tx);
     (void)settle(future);
     return !future.editable() && !future.save() && !future.can_initialize() &&
-           !future.initialize_models(x::diagnostic_model, legacy_radio) && (before == c.bytes);
+           !future.initialize_models(fw::diagnostic_model, legacy_radio) && (before == c.bytes);
 }
 
 bool trim_menu_persistence() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     Store store{};
     if (!boot(store))
         return false;
-    x::Diagnostics diagnostics{};
+    fw::Diagnostics diagnostics{};
     diagnostics.use_model(store.data().model);
-    x::Menu menu{};
+    fw::Menu menu{};
     menu.open();
     const auto press = [&](Key key, RadioOutput output = coretx::firmware::features::secure_ui
                                                              ? RadioOutput::off
@@ -774,10 +930,10 @@ bool trim_menu_persistence() {
     };
     press(Key::down);
     press(Key::ok);
-    for (std::size_t i = 0; i < x::menu_detail::trim_row; ++i)
+    for (std::size_t i = 0; i < fw::menu_detail::trim_row; ++i)
         press(Key::down);
     press(Key::ok);
-    if (menu.screen() != x::MenuScreen::trims)
+    if (menu.screen() != fw::MenuScreen::trims)
         return false;
     if constexpr (!coretx::firmware::features::i6s) {
         if constexpr (coretx::firmware::features::secure_ui) {
@@ -812,16 +968,16 @@ bool rf_ui_interlocks() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
     Test::reset();
-    x::ModelStorage<Test::Board> store{};
+    fw::ModelStorage<Test::Board> store{};
     if (!boot(store))
         return false;
-    x::Diagnostics diagnostics{};
+    fw::Diagnostics diagnostics{};
     diagnostics.use_model(store.data().model);
     for (const auto output : {RadioOutput::off, RadioOutput::internal, RadioOutput::external}) {
         const bool allowed = !coretx::firmware::features::secure_ui || (output == RadioOutput::off);
-        for (const auto &[row, command] : {std::pair{1U, x::MenuCommand::calibrate},
-                                           std::pair{2U, x::MenuCommand::input_setup}}) {
-            x::Menu menu{};
+        for (const auto &[row, command] : {std::pair{1U, fw::MenuCommand::calibrate},
+                                           std::pair{2U, fw::MenuCommand::input_setup}}) {
+            fw::Menu menu{};
             menu.open();
             const auto press = [&](const Key key) {
                 return menu.handle(key, store, diagnostics, output);
@@ -831,11 +987,11 @@ bool rf_ui_interlocks() {
             (void)press(Key::ok);
             for (unsigned i = 0; i < row; ++i)
                 (void)press(Key::down);
-            if (press(Key::ok) != (allowed ? command : x::MenuCommand::none))
+            if (press(Key::ok) != (allowed ? command : fw::MenuCommand::none))
                 return false;
         }
         {
-            x::Menu menu{};
+            fw::Menu menu{};
             menu.open();
             const auto press = [&](const Key key) {
                 return menu.handle(key, store, diagnostics, output);
@@ -844,11 +1000,11 @@ bool rf_ui_interlocks() {
             (void)press(Key::down);
             (void)press(Key::ok);
             (void)press(Key::ok);
-            if (press(Key::ok) != (allowed ? x::MenuCommand::stick_mode : x::MenuCommand::none))
+            if (press(Key::ok) != (allowed ? fw::MenuCommand::stick_mode : fw::MenuCommand::none))
                 return false;
         }
         if constexpr (coretx::firmware::features::a7105 || coretx::firmware::features::crsf) {
-            x::Menu menu{};
+            fw::Menu menu{};
             menu.open();
             const auto press = [&](const Key key) {
                 return menu.handle(key, store, diagnostics, output);
@@ -861,19 +1017,19 @@ bool rf_ui_interlocks() {
             (void)press(Key::down);
             (void)press(Key::ok);
             const auto command =
-                coretx::firmware::features::a7105 ? x::MenuCommand::format : x::MenuCommand::baud;
-            if (press(Key::ok) != (allowed ? command : x::MenuCommand::none))
+                coretx::firmware::features::a7105 ? fw::MenuCommand::format : fw::MenuCommand::baud;
+            if (press(Key::ok) != (allowed ? command : fw::MenuCommand::none))
                 return false;
             if constexpr (coretx::firmware::features::a7105 && coretx::firmware::features::crsf) {
                 (void)press(Key::down);
                 (void)press(Key::down);
                 (void)press(Key::ok);
-                if (press(Key::ok) != (allowed ? x::MenuCommand::baud : x::MenuCommand::none))
+                if (press(Key::ok) != (allowed ? fw::MenuCommand::baud : fw::MenuCommand::none))
                     return false;
             }
         }
     }
-    x::Menu menu{};
+    fw::Menu menu{};
     menu.open();
     for (const auto key : {Key::ok, Key::ok, Key::down})
         (void)menu.handle(key, store, diagnostics, RadioOutput::internal);
@@ -887,7 +1043,7 @@ bool rf_ui_interlocks() {
 bool initialize_foreign_memory() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     auto &c = Test::context;
     std::fill(c.bytes.begin() + md::base, c.bytes.begin() + md::directory_base + 128, 0);
@@ -896,28 +1052,28 @@ bool initialize_foreign_memory() {
     store.initialize(tx);
     (void)settle(store);
     if (store.editable() || !store.can_initialize() ||
-        !store.initialize_models(x::diagnostic_model, legacy_radio) || !settle(store) ||
+        !store.initialize_models(fw::diagnostic_model, legacy_radio) || !settle(store) ||
         (store.data().radio.output != RadioOutput::off) || !store.entries()[0].present)
         return false;
     struct restoredScenario {};
     using restoredTest = coretx::test::FakeApplication<restoredScenario, Context, Memory>;
     restoredTest::reset();
     restoredTest::context.bytes = c.bytes;
-    x::ModelStorage<restoredTest::Board> restored{};
+    fw::ModelStorage<restoredTest::Board> restored{};
     return boot(restored) && (restored.active() == 0) &&
            std::equal(c.bytes.begin(), c.bytes.begin() + 2176, prefix.begin()) &&
            (restored.data().radio.receiver == legacy_radio.receiver);
 }
 
 bool stick_modes() {
-    x::Diagnostics diagnostics{};
+    fw::Diagnostics diagnostics{};
     coretx::ControlSetup setup{};
     for (auto &axis : setup.calibration)
         axis = {0, 2048, 4095};
     setup.mapping[0].reversed = setup.mapping[1].reversed = true;
     if (!diagnostics.restore_calibration(setup))
         return false;
-    x::StockSamples samples{};
+    fw::StockSamples samples{};
     samples.fill(2048);
     samples[0] = 0;
     samples[2] = 4095;
@@ -930,7 +1086,7 @@ bool stick_modes() {
         {-512, 1024, 0, 1024}};
     for (std::size_t i = 0; i < expected.size(); ++i) {
         if (!diagnostics.set_stick_mode(i + 1) ||
-            !x::Diagnostics::valid_setup(diagnostics.setup()) ||
+            !fw::Diagnostics::valid_setup(diagnostics.setup()) ||
             (diagnostics.stick_mode() != (i + 1)) ||
             !std::equal(expected[i].begin(), expected[i].end(),
                         diagnostics.prepared().controls.analogs.begin()))
@@ -938,19 +1094,19 @@ bool stick_modes() {
     }
     setup.mapping[0] = {1, true};
     setup.mapping[1] = {0, true};
-    return !x::Diagnostics::valid_setup(setup) && !diagnostics.set_stick_mode(0);
+    return !fw::Diagnostics::valid_setup(setup) && !diagnostics.set_stick_mode(0);
 }
 
 bool menu_scrolling() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     Store store{};
     if (!boot(store))
         return false;
-    x::Diagnostics diagnostics{};
-    x::Menu menu{};
+    fw::Diagnostics diagnostics{};
+    fw::Menu menu{};
     menu.open();
     const auto press = [&](const Key key) {
         (void)menu.handle(key, store, diagnostics, RadioOutput::off);
@@ -973,12 +1129,12 @@ bool menu_scrolling() {
 bool editor_navigation() {
     struct Scenario {};
     using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
-    using Store = x::ModelStorage<Test::Board>;
+    using Store = fw::ModelStorage<Test::Board>;
     Test::reset();
     Store store{};
     if (!boot(store))
         return false;
-    x::Diagnostics diagnostics{};
+    fw::Diagnostics diagnostics{};
     coretx::ControlSetup setup{};
     for (auto &axis : setup.calibration)
         axis = {0, 2048, 4095};
@@ -986,12 +1142,12 @@ bool editor_navigation() {
     if (!diagnostics.restore_calibration(setup))
         return false;
     diagnostics.use_model(store.data().model);
-    x::StockSamples samples{};
+    fw::StockSamples samples{};
     samples.fill(2048);
     samples[0] = 0;
     diagnostics.observe(samples, coretx::TimestampUs{1000});
     const auto initial = diagnostics.evaluation().frame.channels[0];
-    x::Menu menu{};
+    fw::Menu menu{};
     menu.open();
     coretx::ui::Framebuffer root{};
     menu.render(store, diagnostics, RadioOutput::off, root);
@@ -1056,6 +1212,10 @@ int main() {
         }
     };
     check(codec(), "bounded model codec, CRC, identity and version");
+    check(active_first_loading(),
+          "active banks load first; background scan publishes no second model");
+    check(background_loading_errors(),
+          "background errors preserve active model and block queued writes");
     check(obsolete_models_can_be_recreated(), "obsolete models rejected, explicit reset allowed");
     check(dashboard_feature_gates(), "dashboard pages and model menus follow feature options");
     check(trim_menu_persistence(), "trim modes, cancellation and values persist per model");

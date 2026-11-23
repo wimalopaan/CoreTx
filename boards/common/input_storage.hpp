@@ -10,6 +10,7 @@ namespace input_storage {
 
 inline constexpr std::uint16_t base_address = 14784;
 inline constexpr std::size_t record_size = 128;
+inline constexpr std::uint8_t format_version = 3;
 inline constexpr std::uint32_t magic = 0x31504E49; // Little-endian "INP1".
 using Record = std::array<std::uint8_t, record_size>;
 static_assert((base_address >= 14720) && ((base_address + (2 * record_size)) <= 16384));
@@ -28,10 +29,12 @@ struct Decoded {
     bytes.fill(0xFF);
     coretx::storage::detail::Writer writer{bytes};
     writer.word(magic);
-    writer.field(std::uint8_t{1});
+    writer.field(format_version);
     writer.field(setup.extra_analog);
-    writer.field(setup.extra_digital);
-    writer.field(std::uint8_t{0});
+    writer.field(static_cast<std::uint8_t>(setup.digital_modes & 0xFFU));
+    writer.field(static_cast<std::uint8_t>((setup.trim_beep ? 0U : 1U) |
+                                           (setup.external_module ? 0U : 2U) |
+                                           ((setup.digital_modes >> 8U) << 2U)));
     writer.word(generation);
     for (const auto mode : setup.modes)
         writer.field(mode);
@@ -58,16 +61,17 @@ struct Decoded {
     coretx::storage::detail::Reader reader{bytes};
     std::uint32_t identifier{};
     std::uint8_t version{};
-    std::uint8_t reserved{};
+    std::uint8_t flags{};
+    std::uint8_t digital{};
     reader.word(identifier);
     reader.field(version);
     reader.field(decoded.setup.extra_analog);
-    reader.field(decoded.setup.extra_digital);
-    reader.field(reserved);
+    reader.field(digital);
+    reader.field(flags);
     reader.word(decoded.generation);
     if (identifier != magic)
         return decoded;
-    if (version != 1) {
+    if ((version != 1) && (version != 2) && (version != format_version)) {
         decoded.status = RadioStorageStatus::version;
         return decoded;
     }
@@ -78,7 +82,24 @@ struct Decoded {
         reader.field(axis.center);
         reader.field(axis.maximum);
     }
-    if (!reader.good || (reserved != 0) || !valid_input_setup(decoded.setup) ||
+    decoded.setup.trim_beep = (flags & 1U) == 0;
+    if (version < 3) {
+        if (digital > 1)
+            return decoded;
+        if (digital != 0) {
+            for (std::size_t i = 0; i < (features::i6s ? digital_input_count : 2U); ++i)
+                decoded.setup.set_digital_mode(i, DigitalInputMode::two_position);
+            decoded.setup.external_module = !features::i6s;
+        }
+    } else {
+        decoded.setup.digital_modes = static_cast<std::uint16_t>(digital | ((flags >> 2U) << 8U));
+        decoded.setup.external_module = (flags & 2U) == 0;
+    }
+    if (!reader.good ||
+        (flags > (version == 1   ? 0U
+                  : version == 2 ? 1U
+                                 : 15U)) ||
+        !valid_input_setup(decoded.setup) ||
         !std::all_of(bytes.begin() + static_cast<std::ptrdiff_t>(reader.position), bytes.end() - 4,
                      [](const auto value) { return value == 0xFF; }))
         return decoded;
@@ -94,6 +115,9 @@ template <typename Memory> class InputStorage {
         return (stage_ != Stage::wait) && (stage_ != Stage::ready);
     }
     [[nodiscard]] constexpr bool loaded() const noexcept { return loaded_; }
+    [[nodiscard]] constexpr bool busy() const noexcept {
+        return (stage_ != Stage::ready) || dirty_;
+    }
     [[nodiscard]] constexpr bool writable() const noexcept { return writable_; }
     [[nodiscard]] constexpr bool can_recover() const noexcept {
         return loaded_ && (stage_ == Stage::ready) && (status_ == RadioStorageStatus::invalid);
@@ -148,16 +172,16 @@ template <typename Memory> class InputStorage {
         dirty_ = true;
         return true;
     }
-    constexpr void service(const TimestampUs now, const i6x::StorageProbeResult probe) noexcept {
+    constexpr void service(const TimestampUs now, const StorageProbeResult probe) noexcept {
         if (stage_ == Stage::wait) {
-            if ((probe.state == i6x::StorageProbeState::idle) ||
-                (probe.state == i6x::StorageProbeState::scanning))
+            if ((probe.state == StorageProbeState::idle) ||
+                (probe.state == StorageProbeState::scanning))
                 return;
-            if (probe.state == i6x::StorageProbeState::failed) {
+            if (probe.state == StorageProbeState::failed) {
                 finish(RadioStorageStatus::io_error);
                 return;
             }
-            if (probe.state != i6x::StorageProbeState::found) {
+            if (probe.state != StorageProbeState::found) {
                 finish(RadioStorageStatus::missing);
                 return;
             }
@@ -165,7 +189,7 @@ template <typename Memory> class InputStorage {
                 finish(RadioStorageStatus::multiple);
                 return;
             }
-            Memory::select(static_cast<std::uint8_t>(i6x::StorageProbeResult::first_address +
+            Memory::select(static_cast<std::uint8_t>(StorageProbeResult::first_address +
                                                      std::countr_zero(probe.addresses)));
             stage_ = Stage::first;
         }
@@ -184,7 +208,7 @@ template <typename Memory> class InputStorage {
             if (Memory::busy())
                 return;
             pending_ = false;
-            if (Memory::error() != i6x::I2cError::none) {
+            if (Memory::error() != I2cError::none) {
                 writable_ = false;
                 finish(RadioStorageStatus::io_error);
                 return;

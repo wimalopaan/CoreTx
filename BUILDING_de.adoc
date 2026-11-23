@@ -1,0 +1,395 @@
+= CoreTX: Bauen und Flashen
+:toc:
+:toclevels: 2
+
+link:BUILDING.adoc[English] | link:README_de.adoc[Projektübersicht]
+
+== Voraussetzungen
+
+* CMake >= 3.30, Ninja und Compiler/Standardbibliothek mit C++26-Unterstützung.
+* Firmware: ARM GCC (`arm-none-eabi-g++`) samt Binutils im `PATH`.
+  Die mitgelieferte Toolchain ist `cmake/arm-none-eabi-gcc.cmake`.
+* Host-Tests: GCC oder Clang und Python 3. Der SDL3-Simulator benötigt zusätzlich
+  SDL3-Entwicklungsdateien und einen POSIX-Host.
+* CMSIS-Header werden beim Konfigurieren in festgelegten Upstream-Versionen geladen.
+  STM32-HAL und Hersteller-Startup-Code werden nicht verwendet.
+  Lokale Quellen sind unter <<offline>> beschrieben.
+
+Alle folgenden Befehle im CoreTX-Projektverzeichnis ausführen.
+Für Host und Firmware getrennte Build-Verzeichnisse verwenden.
+
+== Firmware bauen und Ausgabedateien
+
+[source,shell]
+----
+cmake --preset i6x
+cmake --build --preset i6x
+cmake --preset i6s
+cmake --build --preset i6s
+----
+
+Jeder Board-Build erzeugt die englische und deutsche Menüversion:
+
+[cols="1,2,2",options="header"]
+|===
+|Sender |Englische BIN |Deutsche BIN
+|FS-i6X |`build-i6x/coretx-i6x-en.bin` |`build-i6x/coretx-i6x-de.bin`
+|FS-i6S |`build-i6s/coretx-i6s-en.bin` |`build-i6s/coretx-i6s-de.bin`
+|===
+
+Die zugehörigen `.elf`, `.hex`, `.map` und `*-resource-report.txt` dienen zur
+Fehlersuche und zur Kontrolle von Flash/RAM. Die rohe BIN beginnt bei *`0x08000000`*.
+Der Linker prüft 128 KiB Flash, 16 KiB SRAM und einen reservierten 2-KiB-Stack;
+auch optionale Funktionen müssen innerhalb dieser Grenzen bleiben.
+Die Firmwareversion steht in `coretx/version.hpp`.
+
+Bei Bedarf nur eine Sprache bauen:
+
+[source,shell]
+----
+cmake --build --preset i6s --target coretx-i6s-de
+----
+
+i6S-Diagnoseziele werden nicht automatisch mitgebaut:
+
+[source,shell]
+----
+cmake --build --preset i6s --target coretx-i6s-touch-trace
+cmake --build --preset i6s --target coretx-i6s-touch-diagnostic
+cmake --build --preset i6s --target coretx-i6s-measurement
+----
+
+`touch-trace` ist die vollständige Firmware mit zusätzlicher Touchdiagnose und
+höherem Ressourcenbedarf. `touch-diagnostic` ist ein eigenständiger Touchtest ohne
+HF- oder EEPROM-Zugriffe. `measurement` ist Messfirmware, nicht die normale
+Senderanwendung. Diese Abbilder nicht mit der normalen Betriebsfirmware verwechseln.
+
+== Host-Simulator und Tests
+
+Die Presets `build` und `sanitize` aktivieren den SDL3-Simulator:
+
+[source,shell]
+----
+cmake --preset build
+cmake --build --preset build
+ctest --preset build
+./build/coretx_simulator
+
+cmake --preset sanitize
+cmake --build --preset sanitize
+ctest --preset sanitize
+----
+
+Für Tests ohne SDL3 mit `cmake --preset build -DCORETX_SIMULATOR=OFF`
+beziehungsweise dem entsprechenden `sanitize`-Befehl konfigurieren.
+Später den Simulator ausdrücklich mit `-DCORETX_SIMULATOR=ON` wieder einschalten.
+`sanitize` ergänzt AddressSanitizer und UndefinedBehaviorSanitizer.
+Host-Tests und Simulator sind keine flashbare Senderfirmware.
+
+== Presets und CMake-Optionen
+
+[cols="1,2,3",options="header"]
+|===
+|Preset |Verzeichnis |Konfiguration
+|`build` |`build/` |Nativ Debug, Simulator ON, Sanitizer OFF.
+|`sanitize` |`build-sanitize/` |Nativ Debug, Simulator ON, Sanitizer ON.
+|`i6x` |`build-i6x/` |ARM GCC, MinSizeRel, STM32-Firmware, FS-i6X.
+|`i6s` |`build-i6s/` |ARM GCC, MinSizeRel, STM32-Firmware, FS-i6S.
+|===
+
+Configure- und Build-Presets heißen jeweils gleich.
+CTest-Presets gibt es für `build` und `sanitize`.
+Die folgenden Projektoptionen gelten ohne Überschreibung durch Preset/Cache:
+
+[cols="2,1,4",options="header"]
+|===
+|Option |Standard |Wirkung
+|`CORETX_SANITIZERS` |`OFF`
+|Host-ASan/UBSan mit GCC/Clang; nicht mit STM32-Firmware kombinierbar.
+|`CORETX_SIMULATOR` |`OFF`
+|POSIX-SDL3-Desktop-Simulator; in den nativen Presets eingeschaltet.
+|`CORETX_STM32F072` |`OFF`
+|Bare-Metal-ARM-Firmware; in den Board-Presets eingeschaltet, benötigt ARM-GCC-Toolchain.
+|`CORETX_ADC_COHERENT_SNAPSHOTS` |`OFF`
+|Nur i6X-Firmware: zwei DMA-Hälften für kohärente ADC-Snapshots, benötigt zusätzliches RAM.
+ Aktiviert diesen Modus nicht in der i6S-Firmware.
+|`CORETX_A7105` |`ON`
+|Internes A7105/AFHDS 2A.
+|`CORETX_CRSF` |`ON`
+|Externes UART-CRSF-Modul.
+|`CORETX_MULTISWITCH` |`ON`
+|MultiSwitch-Dashboards und SET4-Befehle; nur mit `CORETX_CRSF=ON` wirksam.
+|`CORETX_EXTENDED_INPUTS` |`ON`
+|Unterstützung für zusätzliche Analog-/Digitaleingänge einkompilieren.
+ Einzelne Erweiterungseingänge stehen in den Sendereinstellungen zunächst auf Off.
+|`CORETX_SECURE_UI` |`OFF`
+|HF-Aus für geschützte Menüaktionen verlangen.
+ Hardwarebelegung und Speichersicherheit bleiben auch bei OFF abgesichert.
+|`CORETX_I2C_FAST_MODE` |`ON`
+|EEPROM-I2C2 mit etwa 400 kHz; OFF wählt 100 kHz.
+ Der Touch-Bus des i6S bleibt unverändert.
+|`CORETX_BOARD` |`I6X`
+|Board-Auswahl: `I6X` oder `I6S`; das i6s-Preset wählt `I6S`.
+ Bestimmt auch Board-Merkmale in nativen Tests.
+|`TRANSLATION` |`EN`
+|Sprache der nativen UI: `EN` oder `DE`. Board-Firmwareziele erzeugen immer beide Sprachen.
+|`CORETX_EDGETX_SOURCE` |leer
+|Optionaler lokaler EdgeTX-Checkout für den Vergleichstest mit dem Originalcode.
+ Zum Bauen von CoreTX nicht erforderlich.
+|===
+
+`CORETX_I6S` wird aus der Board-Auswahl abgeleitet und ist keine Benutzeroption.
+Relevante CMake-Standardvariablen:
+
+[cols="2,4",options="header"]
+|===
+|Variable |Verwendung
+|`BUILD_TESTING` |Bei Host-Builds standardmäßig ON; OFF lässt Tests weg.
+ Die Firmwarekonfiguration endet vor der CTest-Einbindung.
+|`CMAKE_BUILD_TYPE` |Debug in nativen Presets, MinSizeRel in Firmware-Presets.
+|`CMAKE_TOOLCHAIN_FILE` |`cmake/arm-none-eabi-gcc.cmake` in Firmware-Presets.
+ Die Toolchain beim Anlegen eines Build-Verzeichnisses wählen, nicht nachträglich wechseln.
+|`CMAKE_CXX_COMPILER` |Nativen Compiler beim ersten Konfigurieren auswählen.
+ Für Firmware wird ARM GCC benötigt.
+|===
+
+Optionen beim *Konfigurieren* setzen, nicht bei `cmake --build`:
+
+[source,shell]
+----
+cmake --preset i6s -DCORETX_A7105=OFF -DCORETX_SECURE_UI=ON
+cmake --build --preset i6s
+----
+
+`-DCORETX_CRSF=OFF` entfernt auch die davon abhängige MultiSwitch-Unterstützung.
+Mit `-DCORETX_MULTISWITCH=OFF` bleibt CRSF ohne MultiSwitch erhalten.
+Einkompilierte Unterstützung schaltet weder HF ein noch weist sie physische
+Eingänge zu. Beispielsweise bestimmt die Laufzeitoption *Externes Modul*, ob
+beim i6S PB6/PB7 für CRSF oder Erweiterungsschalter reserviert sind.
+
+Explizite `-D`-Werte bleiben im Cache dieses Build-Verzeichnisses erhalten,
+bis sie geändert werden. Betroffene Boards jeweils neu konfigurieren und bauen.
+
+[[offline]]
+=== CMSIS ohne Download
+
+Die festgelegten Abhängigkeiten stehen in `cmake/cmsis.cmake`.
+Passende lokale Checkouts über die normalen FetchContent-Variablen vorgeben:
+
+[source,shell]
+----
+cmake --preset i6s \
+  -DFETCHCONTENT_SOURCE_DIR_CORETX_CMSIS_CORE=/pfad/zu/CMSIS_6 \
+  -DFETCHCONTENT_SOURCE_DIR_CORETX_CMSIS_F0=/pfad/zu/cmsis-device-f0
+----
+
+Das erste Verzeichnis muss die CMSIS-Core-Header, das zweite die STM32F0-
+Geräteheader enthalten. Die Vorgaben gelten auch für Host-Hardwaretests.
+
+== Flash-Vorbereitung und Sicherungen
+
+WARNING: Motoren abklemmen/Propeller entfernen. Stabile Versorgung, das richtige
+Board-Abbild und ein USB-Datenkabel verwenden. Flashen ersetzt die Originalanwendung.
+Diese Abbilder gelten für STM32F072 mit 128 KiB, nicht für beliebige Flysky-Sender.
+
+Den STM32-*ROM-DFU-Bootloader* nach dem Verfahren für den konkreten Sender und
+die jeweilige Platinenrevision aktivieren. CoreTX implementiert keinen
+USB-DFU-Neustart aus der laufenden Anwendung; normaler USB-Betrieb beweist
+keinen aktiven ROM-DFU-Modus.
+Vor dem Schreiben die Gerätekennung *`0483:df11`* prüfen.
+Nur das beabsichtigte DFU-Gerät anschließen.
+
+Die ursprünglichen 128 KiB internen Flash vor dem Ersetzen mit einem der
+Lesebefehle unten sichern. Das *externe I2C-EEPROM ist getrennt*: Eine DFU-
+Flashsicherung enthält keine Modelle, Kalibrierung oder Sendereinstellungen.
+Vor Firmware-/Speicherformatwechseln eine eigene EEPROM-Sicherung aufbewahren.
+Mass-Erase oder Aufheben des Leseschutzes gehören nicht zum normalen Flashablauf;
+Entsperren kann vorhandene Daten löschen.
+
+[[first-flash]]
+=== Erstinstallation aus der Werksfirmware
+
+Beim ersten Flashen muss *ROM-DFU über die Hardware* aktiviert werden, bevor
+überhaupt CoreTX-Code läuft. Die dokumentierten Platinen verwenden diese
+vorübergehenden Boot-Brücken:
+
+[cols="1,1,3",options="header"]
+|===
+|Sender |Brücke |Referenz
+|FS-i6X |*R53-Pads*
+|https://github.com/OpenI6X/opentx/wiki/Flashing-%26-Upgrading[OpenI6X-Flashanleitung]
+ und https://github.com/OpenI6X/opentx/blob/master/doc/flysky/dfu_jump_r53.jpg[Platinenfoto].
+|FS-i6S |*R60*
+|https://fishpepper.de/2016/09/15/openground-part-2-fs-i6s-dfu-bootloader-access/[OpenGround-DFU-Anleitung]
+ und https://fishpepper.de/2016/09/15/openground-part-1-components-pinout/[Platinen-/Pinout-Referenz].
+|===
+
+Die Platinen unterscheiden sich: *R53 beim i6X, R60 beim i6S*.
+Bei diesen Verfahren muss *kein Widerstand ausgelötet* werden.
+Beschriftung und Referenzfotos mit der eigenen Platinenrevision vergleichen.
+Bei abweichendem Layout oder nicht sicher identifizierbaren Pads abbrechen,
+statt einen vermuteten Bauteilanschluss kurzzuschließen.
+Die Boot-Brücke nicht dauerhaft eingebaut lassen.
+
+[[first-flash-i6x]]
+==== FS-i6X: R53 brücken
+
+1. Ausschalten, USB abziehen und Batterien entnehmen. Gehäuse vorsichtig öffnen;
+   Kabel zwischen den Gehäusehälften nicht abreißen.
+2. Die beiden R53-Pads anhand des Referenzfotos identifizieren und vorübergehend
+   sicher brücken, ohne benachbarte Pads zu berühren.
+3. Batterien und USB-Datenkabel anschließen, dann den mechanischen Einschalter betätigen.
+4. Das Display bleibt leer. Am PC *STM32 BOOTLOADER / `0483:df11`* prüfen.
+   Erscheint das Gerät nicht, nicht flashen; Brückenposition, Versorgung, Kabel
+   und Treiber prüfen.
+5. Zuerst den gesamten internen Flash sichern, dann die *i6X*-CoreTX-BIN mit einem
+   der unten beschriebenen Verfahren schreiben. Externes EEPROM getrennt sichern.
+6. Ausschalten und USB/Batterien trennen, bevor die Brücke entfernt wird.
+   Platine kontrollieren, Gehäuse schließen und ohne R53-Brücke normal starten.
+
+[[first-flash-i6s]]
+==== FS-i6S: R60 brücken
+
+1. USB abziehen und Batterien entnehmen. Gehäuse vorsichtig öffnen und auf die
+   Kabel zwischen den Gehäusehälften achten.
+2. R60 anhand der Platinenreferenz identifizieren und vorübergehend sicher brücken;
+   keine benachbarten Bauteile kurzschließen.
+3. Batterien wieder anschließen. *Beide vorderen Einschalttasten etwa 5 s halten*,
+   dann das USB-Datenkabel anschließen und den Übergang durchgehend versorgen.
+   Dies ist die ROM-Startprozedur, nicht die normale Abschaltgeste von CoreTX.
+4. LCD/Hintergrundbeleuchtung bleiben aus. *STM32 BOOTLOADER / `0483:df11`* prüfen.
+   USB-Versorgung während Sicherung und Flashen stabil halten: ROM-DFU führt
+   die PB15-Selbsthaltungssteuerung von CoreTX nicht aus.
+5. Zuerst den gesamten internen Flash sichern, dann die *i6S*-CoreTX-BIN mit einem
+   der unten beschriebenen Verfahren schreiben. Externes EEPROM getrennt sichern.
+6. Alle Versorgungen trennen, bevor die vorübergehende R60-Brücke entfernt wird.
+   Platine kontrollieren, Gehäuse schließen und mit beiden Einschalttasten normal starten.
+
+Führt `:leave` bei noch eingesetzter Brücke nicht zum normalen Start, zuerst
+spannungsfrei machen und die Brücke entfernen.
+Diese STM32-Befehle nicht auf abweichende MCUs/USB-Kennungen erzwingen;
+Kompatibilität mit APM32-Nachbauten wird durch diese Anleitung nicht zugesichert.
+
+[[dfu-update]]
+=== Spätere Updates und Wiederherstellung
+
+Nach Installation eines CoreTX-Builds mit Einschalt-DFU sind für normale Updates
+weder Öffnen noch Boot-Brücke erforderlich:
+
+[cols="1,3",options="header"]
+|===
+|Sender |Beim Einschalten gedrückt halten
+|FS-i6X |Beide *horizontalen Trimmtasten nach innen*: linke Horizontaltrimmung
+ nach rechts, rechte Horizontaltrimmung nach links. Unabhängig vom Stickmode.
+|FS-i6S |Beide *hinteren Tasten SE/SF* (PA9/PA10), dann beide vorderen
+ Einschalttasten zum normalen Einschalten. Rücktasten und Einschalttasten unterscheiden!
+|===
+
+1. Ausschalten und zunächst USB abziehen, damit der MCU tatsächlich spannungslos wird.
+2. Die jeweilige Kombination *vor* Wiederanschließen von USB/Versorgung halten.
+   Mit dem normalen Schalter beziehungsweise den Einschalttasten einschalten.
+   Kombination halten, bis *STM32 BOOTLOADER / `0483:df11`* erscheint.
+3. Tasten loslassen, Versorgung/USB stabil halten und die passende Board-BIN
+   mit Web Flasher, `dfu-util` oder `rdfu` wie unten beschrieben übertragen.
+4. Nach dem Flashen mit losgelassenen DFU-Tasten normal neu starten.
+
+CoreTX tastet die Tasten beim Kaltstart entprellt ab, hält HF aus und wechselt
+*vor Watchdog-Start und EEPROM-Zugriffen* in den STM32-ROM-Bootloader.
+Beim i6S bleibt die PB15-Selbsthaltung während der Übergabe aktiv.
+Die Kombination funktioniert auch in den i6S-Abbildern touch-trace,
+touch-diagnostic und measurement.
+Watchdog-/Software-Resets nutzen diese Abkürzung bewusst nicht: Ein bereits
+laufender Watchdog lässt sich für eine zuverlässige DFU-Sitzung nicht stoppen.
+
+Dies ist ein Sprung in das MCU-ROM, kein eigener CoreTX-Flash-Bootloader und kein
+USB-Neustartbefehl aus der laufenden Anwendung. Bei Werksfirmware, älteren
+CoreTX-Builds ohne diese Funktion oder beschädigter Anwendung bleibt der
+<<first-flash,Hardware-DFU-Einstieg>> erforderlich.
+R53/R60 im normalen Betrieb nicht überbrückt lassen.
+
+CoreTX ab `0x08000000` ersetzt die Flysky-Anwendung samt im Flash liegendem
+Updater-Bootloader. Der originale Flysky-Updater ist kein CoreTX-Updateverfahren.
+Der getrennte STM32-ROM-Bootloader bleibt über die Hardware-Bootauswahl erreichbar.
+Zur Rückkehr zur Werksfirmware das vollständige gesicherte Flash-Abbild über
+ROM-DFU zurückschreiben und das dazugehörige externe EEPROM separat wiederherstellen.
+Nach Erstinstallation Eingänge kalibrieren sowie Modell, Kanalrichtungen und
+Failsafe bei sicher deaktivierter HF/abgeklemmten Motoren prüfen;
+fremde EEPROM-Layouts sind nicht mit CoreTX-Datensätzen austauschbar.
+
+=== Ferrox Web Flasher
+
+https://ferroxrc.com/flasher in Chrome, Edge oder Brave mit WebUSB-Unterstützung
+öffnen. Den passenden Sender auswählen und die lokal gebaute/heruntergeladene
+CoreTX-`.bin` als *lokale Datei* laden. Nicht stattdessen ein angebotenes
+Ferrox-Release auswählen.
+ROM-DFU-Gerät verbinden, USB-Zugriff im Browser erlauben und Schreibvorgang
+abschließen. Anschließend den normalen Startvorgang des Senders verwenden.
+
+Windows benötigt einen geeigneten Treiber für *STM32 BOOTLOADER*, etwa WinUSB
+über Zadig. Linux benötigt USB-Zugriffsrechte; auf einem systemd-logind-Desktop
+kann eine lokale udev-Regel dem aktiven Benutzer Zugriff geben:
+
+[source]
+----
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="df11", TAG+="uaccess"
+----
+
+Die Regel mit Administratorrechten in `/etc/udev/rules.d/` ablegen, Regeln neu
+laden und das Gerät neu verbinden. Auf anderen Systemen die örtliche
+Rechteverwaltung beachten.
+macOS benötigt einen WebUSB-fähigen Browser, aber keinen separaten STM32-Treiber.
+
+=== dfu-util
+
+https://dfu-util.sourceforge.net/[dfu-util] für das jeweilige Betriebssystem
+installieren, beispielsweise das Paket `dfu-util` unter Debian/Ubuntu.
+Die Beispiele verwenden ein deutsches i6S-Abbild; für i6X
+`build-i6x/coretx-i6x-de.bin` beziehungsweise die entsprechende `-en.bin` verwenden.
+
+[source,shell]
+----
+dfu-util -l
+dfu-util -d 0483:df11 -a 0 -s 0x08000000:131072 -U original-firmware.bin
+dfu-util -d 0483:df11 -a 0 -s 0x08000000:leave -D build-i6s/coretx-i6s-de.bin
+----
+
+Der Lesebefehl sichert den internen Flash; `-D` schreibt die rohe BIN, `:leave`
+fordert das Verlassen von DFU an. In der Geräteliste prüfen, dass Alternate
+Setting 0 den internen Flash bezeichnet. Bleibt das Gerät im DFU-Modus,
+den normalen Startvorgang verwenden.
+
+=== rdfu (EdgeTX/rs-dfu)
+
+Gemeint ist das Kommandozeilenwerkzeug `rdfu` aus
+https://github.com/EdgeTX/rs-dfu[EdgeTX/rs-dfu].
+Die CLI-Datei für Betriebssystem/Architektur aus dessen
+https://github.com/EdgeTX/rs-dfu/releases[Releases] laden, gegebenenfalls
+ausführbar machen und als `rdfu` in den `PATH` legen oder den vollständigen
+Dateinamen verwenden. Rust/Cargo wird nur zum Selbstbauen dieses Werkzeugs benötigt.
+
+[source,shell]
+----
+rdfu list --vendor 0483 --product df11
+rdfu read --vendor 0483 --product df11 --start-address 0x08000000 --length 131072 original-firmware.bin
+rdfu write --vendor 0483 --product df11 --start-address 0x08000000 build-i6s/coretx-i6s-de.bin
+----
+
+CoreTX liefert rohe BIN-Abbilder, deshalb wird die Startadresse ausdrücklich
+angegeben. Nach erfolgreichem Schreiben den normalen Startvorgang verwenden.
+`rdfu reboot` bedient einen EdgeTX-Bootloader-Mechanismus; es ist kein
+CoreTX-Befehl zum Aktivieren des STM32-ROM-Bootloaders.
+
+== Veröffentlichte Abbilder
+
+Die https://github.com/wimalopaan/CoreTx/releases[CoreTX-Releases] können hinter
+der Quellcodeversion zurückliegen. `.github/workflows/i6x.yml` und
+`.github/workflows/i6s.yml` bauen jeweils deutsche/englische Firmware bei Pushes,
+Pull Requests und manuellen Starts. Versionstags passend zu `v[0-9]*` hängen
+die DE/EN-BIN/HEX-Dateien beider Sender an dasselbe GitHub-Release.
+Artefaktnamen und Dateinamen sind boardspezifisch; ein erneuter Workflow-Lauf
+eines Boards entfernt nicht die Dateien des anderen Boards.
+Lokal bauen, solange kein passendes Release-Abbild vorliegt.
+
+Elektrische Belegung und Ressourcenkonflikte:
+link:PERIPHERALS_de.adoc#i6x[FS-i6X-Peripherie] und
+link:PERIPHERALS_de.adoc#i6s[FS-i6S-Peripherie].

@@ -14,7 +14,7 @@ namespace coretx::firmware::i6s {
     case TouchError::not_initialized:
         return tr::not_initialized;
     case TouchError::timeout:
-        return tr::timeout;
+        return tr::touch_timeout;
     case TouchError::nack:
         return tr::no_ack;
     case TouchError::bus:

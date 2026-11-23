@@ -11,9 +11,8 @@
 #include <bit>
 #include <string_view>
 
-namespace coretx::firmware::i6x {
+namespace coretx::firmware {
 
-using firmware::AnalogInput;
 inline constexpr auto gimbal_inputs = firmware::Hardware::gimbal_inputs;
 inline constexpr auto stock_inputs = firmware::Hardware::stock_inputs;
 
@@ -40,16 +39,12 @@ enum class ScanEvent : std::uint8_t { pending, complete, failed };
 
 using adc_registers = stm32f072::AdcTraits<firmware::Hardware::adc>;
 
-struct dma_registers : stm32f072::DmaTraits<firmware::Hardware::adc_dma> {
+struct adc_dma_registers : stm32f072::DmaTraits<firmware::Hardware::adc_dma> {
     inline static constexpr std::uint32_t configuration =
         DMA_CCR_MINC | DMA_CCR_PSIZE_0 | DMA_CCR_MSIZE_0 | DMA_CCR_PL_1 | DMA_CCR_CIRC;
 };
 
-#if defined(CORETX_ADC_COHERENT_SNAPSHOTS) && CORETX_ADC_COHERENT_SNAPSHOTS
-inline constexpr bool coherent_adc_snapshots = true;
-#else
-inline constexpr bool coherent_adc_snapshots = false;
-#endif
+inline constexpr bool coherent_adc_snapshots = features::coherent_adc_snapshots;
 
 namespace detail {
 
@@ -59,7 +54,7 @@ class AdcState {
     using Registers = stm32f072::AdcTraits<Assignment::adc>;
     using Dma = stm32f072::DmaTraits<Assignment::adc_dma>;
     static_assert(Assignment::adc_dma == Registers::dma, "Invalid ADC DMA channel");
-    static constexpr auto configuration = dma_registers::configuration;
+    static constexpr auto configuration = adc_dma_registers::configuration;
 
   public:
     using Samples = std::array<std::uint16_t, Inputs.size()>;
@@ -336,4 +331,4 @@ class Adc {
     return coretx::ui::tr::unknown_adc_error;
 }
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

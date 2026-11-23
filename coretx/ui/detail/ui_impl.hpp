@@ -32,13 +32,15 @@ inline constexpr std::array<std::string_view, analog_count> analog_names{
     "AIL", "ELE", "THR", "RUD", "VRA", "VRB", "SA",  "SB",
     "SC",  "SD",  "VRC", "VRD", "VRE", "VRF", "VRG", "A16"};
 inline constexpr std::array<std::string_view, switch_count> switch_names{
-    "SA", "SB", "SC",  "SD",  "VRA", "VRB", "VRC", "VRD", "VRE", "VRF", "VRG",
+    "SA",  "SB",  "SC",  "SD",  "VRA", "VRB",
 #if defined(CORETX_I6S) && CORETX_I6S
-    "SG", "SH", "SWI", "SWJ", "SWK",
+    "SWI", "SWJ", "SWK", "SWL", "SWM", "SG",  "SH", "SN",
+    "SO",  "SP",  "SE",  "SF",  "T3",  "T4"
 #else
-    "SE", "SF", "SG", "SH", "SI",
+    "VRC", "VRD", "VRE", "VRF", "VRG", "SE",  "SF", "SG",
+    "SH",  "SI",  "T1",  "T2",  "T3",  "T4"
 #endif
-    "T1", "T2", "T3",  "T4"};
+};
 inline constexpr std::array<std::string_view, 11> input_fields{
     "SOURCE", "WEIGHT %", "EXPO %", "OFFSET %", "TRIM",  "SIDE",
     "INVERT", "TARGET",   "SWITCH", "SW POS",   "SW NOT"};

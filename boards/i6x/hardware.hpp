@@ -56,6 +56,7 @@ struct Hardware {
                                             Pin{GPIOC_BASE, 8}};
     static constexpr std::uintptr_t key_rows_port = GPIOD_BASE;
     static constexpr unsigned key_rows_first = 12;
+    static constexpr std::uint8_t bootloader_trim_mask = (1U << 1) | (1U << 6);
     static constexpr LcdPins lcd{GPIOE_BASE,      {GPIOB_BASE, 3}, {GPIOB_BASE, 4},
                                  {GPIOB_BASE, 5}, {GPIOD_BASE, 2}, {GPIOD_BASE, 7},
                                  {GPIOF_BASE, 3}, {GPIOC_BASE, 9}};

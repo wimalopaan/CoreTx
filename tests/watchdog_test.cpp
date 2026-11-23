@@ -197,11 +197,11 @@ bool fault_history() {
     if ((Driver::initialize() != Error::none) || (Driver::last_fault() != 0))
         return false;
     coretx::ui::Framebuffer display{}, expected{};
-    fw::i6x::SystemInfo info{};
+    fw::SystemInfo info{};
     info.watchdog_fault = 0x0301;
-    fw::i6x::render_system(info, display);
+    fw::render_system(info, display);
     expected.compact();
-    expected.text(fw::i6x::SystemLayout::board_name_x, fw::i6x::SystemLayout::sender_y, "F03:01");
+    expected.text(fw::SystemLayout::board_name_x, fw::SystemLayout::sender_y, "F03:01");
     for (int y = 8; y < 14; ++y)
         for (int x = 96; x < 128; ++x)
             if (display.pixel_at(x, y) != expected.pixel_at(x, y))
@@ -280,9 +280,9 @@ bool independent_watchdogs() {
 constexpr bool counter_rendering() {
     coretx::ui::Framebuffer display{};
     coretx::ui::Framebuffer expected{};
-    fw::i6x::SystemInfo system{};
+    fw::SystemInfo system{};
     system.watchdog_resets = 0xFFFF'FFFFU;
-    fw::i6x::render_system(system, display);
+    fw::render_system(system, display);
     expected.compact();
     expected.text(0, 55, coretx::ui::tr::watchdog_resets);
     expected.text(87, 55, "4294967295");

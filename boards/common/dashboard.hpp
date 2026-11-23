@@ -9,7 +9,7 @@
 #include "coretx/version.hpp"
 #include "platform/stm32f072/i2c.hpp"
 
-namespace coretx::firmware::i6x {
+namespace coretx::firmware {
 
 inline constexpr auto overview_channel_count = Model{}.dashboard_channels.size();
 
@@ -219,10 +219,11 @@ constexpr void render_physical_switches(coretx::ui::Framebuffer &display,
         if ((active & (1U << i)) == 0)
             continue;
         const auto position = positions[i];
-        // Uppercase denotes SA-SD/digital switches; lowercase denotes VRA-VRG as switches.
-        const auto name = i < 4                 ? static_cast<char>('A' + i)
-                          : i < auxiliary_count ? static_cast<char>('a' + (i - 4))
-                                                : coretx::ui::detail::switch_names[i].back();
+        // Use the mixer switch names, retaining lowercase a/b for VRA/B.
+        const auto name = i < 4 ? static_cast<char>('A' + i)
+                          : (i < 6) || (!features::i6s && (i < auxiliary_count))
+                              ? static_cast<char>('a' + (i - 4))
+                              : coretx::ui::detail::switch_names[i].back();
         const std::array<char, 2> label{
             name, ((available & (1U << i)) == 0)     ? '?'
                   : position == SwitchPosition::up   ? '^'
@@ -441,4 +442,4 @@ constexpr void render_dashboard(const Diagnostics &state, const char *const adc_
     render_overview(state, display, telemetry, output, now, model_name, model_error);
 }
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

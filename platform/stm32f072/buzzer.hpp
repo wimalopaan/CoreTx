@@ -5,6 +5,8 @@
 
 namespace coretx::firmware {
 
+enum class ClickTone : std::uint8_t { control, multiswitch };
+
 template <typename Io, unsigned Timer, Pin Output>
     requires stm32f072::TimerChannel1<Timer, Output>
 class Buzzer {
@@ -30,8 +32,9 @@ class Buzzer {
         started_ = {};
         active_ = false;
     }
-    static void click(const TimestampUs now) noexcept {
-        constexpr auto period = timer_hz / click_hz;
+    static void click(const TimestampUs now, const ClickTone tone = ClickTone::control) noexcept {
+        const auto period =
+            tone == ClickTone::multiswitch ? timer_hz / multiswitch_hz : timer_hz / click_hz;
         write(offsetof(TIM_TypeDef, ARR), period - 1U);
         write(offsetof(TIM_TypeDef, CCR1), period / 2U);
         write(offsetof(TIM_TypeDef, CNT), 0);
@@ -54,6 +57,7 @@ class Buzzer {
   private:
     static constexpr std::uint32_t timer_hz = 1'000'000U;
     static constexpr std::uint32_t click_hz = 2'200U;
+    static constexpr std::uint32_t multiswitch_hz = 1'100U;
     static constexpr auto click_duration = 10'000_us;
 
     static void write(const std::size_t offset, const std::uint32_t value) noexcept {

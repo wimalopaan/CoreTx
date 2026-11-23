@@ -34,6 +34,8 @@ template <typename Io, typename Assignment = Hardware>
 class TouchState : TouchRegisters<Assignment> {
     using Registers = TouchRegisters<Assignment>;
     using Bus = typename Registers::Bus;
+    using Edge = stm32f072::ExtiTraits<Assignment::touch_interrupt>;
+    inline static constexpr auto pending = EXTI_BASE + offsetof(EXTI_TypeDef, PR);
     using Registers::cr2;
     using Registers::icr;
     using Registers::interrupt;
@@ -56,6 +58,20 @@ class TouchState : TouchRegisters<Assignment> {
         drive<Io>(reset, false);
         configure<Io>(reset, false);
         configure_input<Io>({Assignment::touch_interrupt.port, Assignment::touch_interrupt.index});
+        Io::write(rcc_apb2enr, Io::read(rcc_apb2enr) | RCC_APB2ENR_SYSCFGCOMPEN);
+        (void)Io::read(rcc_apb2enr);
+        Io::write(Edge::route_register,
+                  (Io::read(Edge::route_register) & ~Edge::route_mask) | Edge::route);
+        constexpr auto mask = EXTI_BASE + offsetof(EXTI_TypeDef, IMR);
+        constexpr auto event_mask = EXTI_BASE + offsetof(EXTI_TypeDef, EMR);
+        constexpr auto falling = EXTI_BASE + offsetof(EXTI_TypeDef, FTSR);
+        constexpr auto rising = EXTI_BASE + offsetof(EXTI_TypeDef, RTSR);
+        // Latch short INT pulses in hardware without enabling an interrupt handler.
+        Io::write(mask, Io::read(mask) & ~Edge::line);
+        Io::write(event_mask, Io::read(event_mask) & ~Edge::line);
+        Io::write(rising, Io::read(rising) & ~Edge::line);
+        Io::write(falling, Io::read(falling) | Edge::line);
+        Io::write(pending, Edge::line);
         for (const std::uint8_t index :
              {Assignment::touch.scl.index, Assignment::touch.sda.index}) {
             const auto port = index == Assignment::touch.scl.index ? Assignment::touch.scl.port
@@ -95,9 +111,42 @@ class TouchState : TouchRegisters<Assignment> {
         stage_ = Stage::reset_low;
     }
     [[nodiscard]] constexpr TouchEvent service(const TimestampUs now) noexcept {
-        if (error_ != TouchError::none) {
+        const auto started = Io::now_us();
+        // Drain a 400 kHz report without unbounded flight-loop latency.
+        for (unsigned step = 0; step < 512; ++step) {
+            const auto elapsed = Io::now_us() - started;
+            if ((step != 0) && (elapsed >= 300_us))
+                break;
+            const auto event = advance(now);
+            if ((event != TouchEvent::none) || !transfer_)
+                return event;
+        }
+        return TouchEvent::none;
+    }
+    [[nodiscard]] constexpr TouchError error() const noexcept { return error_; }
+    [[nodiscard]] constexpr bool ready() const noexcept { return ready_; }
+    [[nodiscard]] constexpr bool received() const noexcept { return received_; }
+    [[nodiscard]] constexpr const TouchSample &sample() const noexcept { return sample_; }
+    [[nodiscard]] constexpr std::uint32_t frames() const noexcept { return frames_; }
+    [[nodiscard]] constexpr const auto &packet() const noexcept { return bytes_; }
+    [[nodiscard]] constexpr std::size_t packet_bytes() const noexcept { return position_; }
+
+  private:
+    [[nodiscard]] constexpr TouchEvent advance(const TimestampUs now) noexcept {
+        if (stage_ == Stage::failed) {
+            if ((error_ == TouchError::not_initialized) || (error_ == TouchError::packet) ||
+                ((now - since_) < 250'000_us))
+                return TouchEvent::failed;
+            const auto error = error_;
+            const auto frames = frames_;
+            initialize();
+            // Keep the failure visible until a complete report succeeds.
+            error_ = error;
+            frames_ = frames;
             return TouchEvent::failed;
         }
+        const auto previous_stage = stage_;
+        bool received_byte{};
         std::uint32_t flags{};
         if (transfer_) {
             flags = Io::read(isr);
@@ -109,8 +158,6 @@ class TouchState : TouchRegisters<Assignment> {
                 return fail(TouchError::overrun);
             if ((flags & I2C_ISR_NACKF) != 0)
                 return fail(TouchError::nack);
-            if ((now - since_) >= 10'000_us)
-                return fail(TouchError::timeout);
         }
         switch (stage_) {
         case Stage::reset_low:
@@ -121,43 +168,41 @@ class TouchState : TouchRegisters<Assignment> {
             }
             break;
         case Stage::boot:
-            if ((now - since_) >= 60'001_us)
-                stage_ = Stage::configure;
+            if ((now - since_) >= 60'001_us) {
+                ready_ = true;
+                Io::write(pending, Edge::line);
+                since_ = now - 8'000_us;
+                stage_ = Stage::idle;
+            }
             break;
-        case Stage::configure:
-            reading_ = false;
-            start(now);
-            break;
-        case Stage::idle:
-            if ((Io::read(interrupt) & (1U << Assignment::touch_interrupt.index)) != 0) {
-                if (!released_) {
-                    sample_.contacts = 0;
-                    sample_.gesture = Gesture::none;
-                    released_ = true;
-                    return TouchEvent::sample;
-                }
-            } else if ((now - polled_at_) >= 8'000_us) {
-                reading_ = true;
+        case Stage::idle: {
+            const bool edge = (Io::read(pending) & Edge::line) != 0;
+            const bool asserted = (Io::read(interrupt) & Edge::line) == 0;
+            if (!edge && !asserted && (sample_.contacts != 0) &&
+                ((now - sampled_at_) >= TouchNavigation::release_timeout_us)) {
+                sample_.contacts = 0;
+                sample_.gesture = Gesture::none;
+                sample_.position_valid = false;
+                sample_.synthetic = true;
+                return TouchEvent::sample;
+            } else if (edge ||
+                       ((asserted || (sample_.contacts != 0)) && ((now - since_) >= 8'000_us))) {
+                // Lift need not pulse INT: poll known contacts, never an untouched idle panel.
+                Io::write(pending, Edge::line);
                 start(now);
             }
             break;
+        }
         case Stage::bus_wait:
             if ((flags & I2C_ISR_BUSY) == 0) {
-                Io::write(cr2, address | ((reading_ ? 1U : 2U) << I2C_CR2_NBYTES_Pos) |
-                                   I2C_CR2_START | (reading_ ? 0U : I2C_CR2_AUTOEND));
+                Io::write(cr2, address | (1U << I2C_CR2_NBYTES_Pos) | I2C_CR2_START);
                 stage_ = Stage::reg;
             }
             break;
         case Stage::reg:
             if ((flags & I2C_ISR_TXIS) != 0) {
-                Io::write(txdr, reading_ ? 0U : settings[setting_][0]);
-                stage_ = reading_ ? Stage::restart : Stage::value;
-            }
-            break;
-        case Stage::value:
-            if ((flags & I2C_ISR_TXIS) != 0) {
-                Io::write(txdr, settings[setting_][1]);
-                stage_ = Stage::stop;
+                Io::write(txdr, 0);
+                stage_ = Stage::restart;
             }
             break;
         case Stage::restart:
@@ -171,6 +216,7 @@ class TouchState : TouchRegisters<Assignment> {
         case Stage::receive:
             if ((flags & I2C_ISR_RXNE) != 0) {
                 bytes_[position_++] = static_cast<std::uint8_t>(Io::read(rxdr));
+                received_byte = true;
                 if (position_ == bytes_.size())
                     stage_ = Stage::stop;
             } else if ((flags & I2C_ISR_STOPF) != 0) {
@@ -181,47 +227,36 @@ class TouchState : TouchRegisters<Assignment> {
             if ((flags & I2C_ISR_STOPF) != 0) {
                 Io::write(icr, I2C_ICR_STOPCF);
                 transfer_ = false;
-                if (reading_) {
-                    TouchSample decoded{};
-                    if (!decode_touch(bytes_, decoded))
-                        return fail(TouchError::packet);
-                    sample_ = decoded;
-                    received_ = true;
-                    released_ = sample_.contacts == 0;
-                    ++frames_;
-                    stage_ = Stage::idle;
-                    return TouchEvent::sample;
-                }
-                if (++setting_ == settings.size()) {
-                    ready_ = true;
-                    polled_at_ = now - 8'000_us;
-                    stage_ = Stage::idle;
-                } else {
-                    stage_ = Stage::configure;
-                }
+                TouchSample decoded{};
+                if (!decode_touch(bytes_, decoded))
+                    return fail(TouchError::packet);
+                sample_ = decoded;
+                error_ = TouchError::none;
+                sampled_at_ = now;
+                received_ = true;
+                ++frames_;
+                stage_ = Stage::idle;
+                return TouchEvent::sample;
             }
             break;
         case Stage::failed:
             break;
         }
+        if (transfer_) {
+            if ((stage_ != previous_stage) || received_byte)
+                progressed_at_ = now;
+            else if ((now - progressed_at_) >= 10'000_us)
+                return fail(TouchError::timeout);
+        }
         return TouchEvent::none;
     }
 
-    [[nodiscard]] constexpr TouchError error() const noexcept { return error_; }
-    [[nodiscard]] constexpr bool ready() const noexcept { return ready_; }
-    [[nodiscard]] constexpr bool received() const noexcept { return received_; }
-    [[nodiscard]] constexpr const TouchSample &sample() const noexcept { return sample_; }
-    [[nodiscard]] constexpr std::uint32_t frames() const noexcept { return frames_; }
-
-  private:
     enum class Stage : std::uint8_t {
         reset_low,
         boot,
-        configure,
         idle,
         bus_wait,
         reg,
-        value,
         restart,
         receive,
         stop,
@@ -231,12 +266,9 @@ class TouchState : TouchRegisters<Assignment> {
     inline static constexpr std::uint32_t address = 0x38U << 1;
     inline static constexpr std::uint32_t clear_flags =
         I2C_ICR_NACKCF | I2C_ICR_STOPCF | I2C_ICR_BERRCF | I2C_ICR_ARLOCF | I2C_ICR_OVRCF;
-    inline static constexpr std::array<std::array<std::uint8_t, 2>, 3> settings{
-        {{0xA4, 0}, {0x80, 22}, {0x88, 14}}};
     constexpr void start(const TimestampUs now) noexcept {
         Io::write(icr, clear_flags);
         since_ = now;
-        polled_at_ = now;
         transfer_ = true;
         stage_ = Stage::bus_wait;
     }
@@ -244,9 +276,12 @@ class TouchState : TouchRegisters<Assignment> {
         Io::write(Registers::cr2, I2C_CR2_STOP);
         Io::write(Registers::cr1, 0);
         Io::write(touch_registers::icr, clear_flags);
+        sample_ = {};
         error_ = error;
         ready_ = false;
+        received_ = false;
         transfer_ = false;
+        since_ = Io::now_us();
         stage_ = Stage::failed;
         return TouchEvent::failed;
     }
@@ -254,17 +289,15 @@ class TouchState : TouchRegisters<Assignment> {
     TouchSample sample_{};
     std::array<std::uint8_t, 7> bytes_{};
     std::size_t position_{};
-    std::size_t setting_{};
     TimestampUs since_{};
-    TimestampUs polled_at_{};
+    TimestampUs sampled_at_{};
+    TimestampUs progressed_at_{};
     std::uint32_t frames_{};
     TouchError error_{TouchError::not_initialized};
     Stage stage_{Stage::failed};
     bool transfer_{};
-    bool reading_{};
     bool ready_{};
     bool received_{};
-    bool released_{};
 };
 
 } // namespace detail
@@ -281,6 +314,8 @@ template <typename Io, typename Assignment = Hardware> class Touch {
     [[nodiscard]] static bool received() noexcept { return state_.received(); }
     [[nodiscard]] static const TouchSample &sample() noexcept { return state_.sample(); }
     [[nodiscard]] static std::uint32_t frames() noexcept { return state_.frames(); }
+    [[nodiscard]] static const auto &packet() noexcept { return state_.packet(); }
+    [[nodiscard]] static std::size_t packet_bytes() noexcept { return state_.packet_bytes(); }
 
   private:
     inline static constinit detail::TouchState<Io, Assignment> state_{};

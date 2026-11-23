@@ -82,6 +82,24 @@ Reset_Handler:
     b Default_Handler
 .size Reset_Handler, . - Reset_Handler
 
+.section .text.coretx_enter_rom_bootloader, "ax", %progbits
+.global coretx_enter_rom_bootloader
+.type coretx_enter_rom_bootloader, %function
+.thumb_func
+coretx_enter_rom_bootloader:
+    cpsid i
+    ldr r1, [r0]
+    ldr r2, [r0, #4]
+    movs r0, #0
+    msr control, r0
+    msr psp, r0
+    msr msp, r1
+    dsb
+    isb
+    cpsie i
+    bx r2
+.size coretx_enter_rom_bootloader, . - coretx_enter_rom_bootloader
+
 .section .text.Default_Handler, "ax", %progbits
 .global Default_Handler
 .type Default_Handler, %function

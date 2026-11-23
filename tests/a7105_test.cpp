@@ -314,20 +314,19 @@ bool disabled_safety() {
 }
 
 constexpr bool page_selection() {
-    namespace x = fw::i6x;
-    x::Diagnostics diagnostics{};
+    fw::Diagnostics diagnostics{};
     const auto expected_count = 2U;
-    if (x::Diagnostics::page_count != expected_count)
+    if (fw::Diagnostics::page_count != expected_count)
         return false;
     for (std::size_t page = 0; page < expected_count; ++page) {
         if (diagnostics.page() != page)
             return false;
         diagnostics.handle(fw::Key::ok);
-        if (diagnostics.phase() != x::CalibrationPhase::idle)
+        if (diagnostics.phase() != fw::CalibrationPhase::idle)
             return false;
         diagnostics.handle(fw::Key::down);
     }
-    return diagnostics.page() == x::Diagnostics::overview_page;
+    return diagnostics.page() == fw::Diagnostics::overview_page;
 }
 
 constexpr bool afhds_format_rendering() {

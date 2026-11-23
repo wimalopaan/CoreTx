@@ -1,0 +1,80 @@
+name: i6S firmware
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v[0-9]*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    container: archlinux:base
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install C++26 ARM toolchain and build tools
+        run: |
+          pacman -Syu --noconfirm --needed \
+            arm-none-eabi-gcc arm-none-eabi-newlib cmake git ninja python
+          arm-none-eabi-g++ --version
+          cmake --version
+
+      - name: Check out sources
+        uses: actions/checkout@v7
+
+      - name: Configure i6S
+        run: cmake --preset i6s
+
+      - name: Build German and English firmware
+        run: cmake --build --preset i6s --parallel 2
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: coretx-i6s-de-en
+          path: |
+            build-i6s/coretx-i6s-*.bin
+            build-i6s/coretx-i6s-*.hex
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: firmware
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware
+        uses: actions/download-artifact@v8
+        with:
+          name: coretx-i6s-de-en
+          path: firmware
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # The other board workflow may create the shared release concurrently.
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "CoreTX $RELEASE_TAG" \
+              --notes "Experimental firmware for Flysky FS-i6X and FS-i6S (STM32F072). Board-specific German and English BIN/HEX images are attached by the respective build workflows. Use only the image matching your transmitter. Back up the original firmware and EEPROM before flashing. Flash start address: 0x08000000." \
+              || gh release view "$RELEASE_TAG" >/dev/null
+          fi
+          gh release upload "$RELEASE_TAG" firmware/*.bin firmware/*.hex --clobber

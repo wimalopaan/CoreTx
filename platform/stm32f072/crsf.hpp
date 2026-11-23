@@ -9,7 +9,7 @@
 
 #include <optional>
 
-namespace coretx::firmware::i6x {
+namespace coretx::firmware {
 
 struct CrsfBaud {
     std::uint32_t rate{};
@@ -565,4 +565,4 @@ template <typename Io, typename Assignment = firmware::Hardware> class Crsf {
     inline static constinit std::optional<detail::CrsfState<Io, Assignment>> state_storage_{};
 };
 
-} // namespace coretx::firmware::i6x
+} // namespace coretx::firmware

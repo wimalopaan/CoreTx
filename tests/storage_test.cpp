@@ -63,10 +63,10 @@ constexpr bool roundtrip() {
     const auto original = fixture();
     store::Record record{};
     if (!store::encode(original, 0x12345678, record) || (record[0] != 'R') || (record[1] != 'C') ||
-        (record[2] != 'C') || (record[3] != 'S') || (record[4] != 6) || (record[5] != 0) ||
-        (record[6] != 4) || (record[7] != 3) || (record[8] != 0x78) || (record[9] != 0x56) ||
-        (record[10] != 0x34) || (record[11] != 0x12) || (record[20] != 1) || (record[22] != 0xFF) ||
-        (record[23] != 0xFF) || (record[66] != 7) || (record[67] != 1)) {
+        (record[2] != 'C') || (record[3] != 'S') || (record[4] != store::format_version) ||
+        (record[5] != 0) || (record[6] != 4) || (record[7] != 3) || (record[8] != 0x78) ||
+        (record[9] != 0x56) || (record[10] != 0x34) || (record[11] != 0x12) || (record[20] != 1) ||
+        (record[22] != 0xFF) || (record[23] != 0xFF) || (record[66] != 7) || (record[67] != 1)) {
         return false;
     }
     store::State restored{};
@@ -220,7 +220,7 @@ constexpr bool recovery_and_versions() {
         (recovered.slots[1].code != store::Error::checksum)) {
         return false;
     }
-    first[4] = 7;
+    first[4] = store::format_version + 1;
     reseal(first);
     if ((store::select(first, second).status.code != store::Error::version) ||
         (store::select_into(first, second, scratch).status.code != store::Error::version)) {
@@ -276,7 +276,7 @@ constexpr bool obsolete_formats_are_rejected() {
     store::Record current{};
     if (!store::encode(original, 7, current))
         return false;
-    for (std::uint8_t version = 1; version < store::format_version; ++version) {
+    for (std::uint8_t version = 1; version < store::oldest_format_version; ++version) {
         auto obsolete = current;
         obsolete[4] = version;
         reseal(obsolete);
@@ -293,6 +293,30 @@ constexpr bool obsolete_formats_are_rejected() {
     return true;
 }
 static_assert(obsolete_formats_are_rejected());
+
+constexpr bool sound_options() {
+    auto state = fixture();
+    store::Record record{}, upgraded{};
+    store::State restored{};
+    for (const bool enabled : {false, true}) {
+        state.model.multiswitch_beep = enabled;
+        if (!store::encode(state, 7, record) || !store::decode(record, restored) ||
+            (restored.model.multiswitch_beep != enabled) || !store::encode(restored, 7, upgraded) ||
+            (upgraded != record))
+            return false;
+        record[4] = 6;
+        reseal(record);
+        const auto result = store::decode(record, restored);
+        if (enabled) {
+            if (!result || !restored.model.multiswitch_beep ||
+                !store::encode(restored, 7, record) || (record != upgraded))
+                return false;
+        } else if (result || (result.status.code != store::Error::field))
+            return false;
+    }
+    return true;
+}
+static_assert(sound_options());
 
 void torn_writes() {
     auto old = fixture();

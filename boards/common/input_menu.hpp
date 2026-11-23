@@ -17,7 +17,7 @@ class InputMenu {
         visible_ = true;
     }
     [[nodiscard]] constexpr bool visible() const noexcept { return visible_; }
-    [[nodiscard]] constexpr InputMenuCommand handle(const Key key, i6x::Diagnostics &diagnostics,
+    [[nodiscard]] constexpr InputMenuCommand handle(const Key key, Diagnostics &diagnostics,
                                                     const RadioOutput output, const bool writable,
                                                     const bool busy,
                                                     const char *const storage_message,
@@ -77,19 +77,23 @@ class InputMenu {
                 editing_ = true;
             }
         } else if ((key == Key::up) || (key == Key::down)) {
-            const int maximum = selected_ < extension_rows ? 1 : 5;
+            const auto selected = entry(diagnostics, selected_);
+            const int maximum = selected.kind == Kind::analog_enable ? 1
+                                : selected.kind == Kind::digital
+                                    ? ((selected.index == 0) || (selected.index == 2) ? 2 : 1)
+                                    : 5;
             draft_ = (draft_ + (key == Key::up ? 1 : maximum)) % (maximum + 1);
         } else if (key == Key::ok) {
             auto setup = diagnostics.input_setup();
-            if constexpr (features::extended_inputs) {
-                if (selected_ == 0)
-                    setup.extra_digital = draft_ != 0;
-                else if (selected_ == 1)
-                    setup.extra_analog = draft_ != 0;
-                else
-                    setup.modes[selected_ - extension_rows] = static_cast<InputMode>(draft_);
+            const auto selected = entry(diagnostics, selected_);
+            if (selected.kind == Kind::analog_enable)
+                setup.extra_analog = draft_ != 0;
+            else if (selected.kind == Kind::digital) {
+                setup.set_digital_mode(selected.index, static_cast<DigitalInputMode>(draft_));
+                if (draft_ == static_cast<int>(DigitalInputMode::three_position))
+                    setup.set_digital_mode(selected.index + 1, DigitalInputMode::off);
             } else
-                setup.modes[selected_] = static_cast<InputMode>(draft_);
+                setup.modes[selected.index] = static_cast<InputMode>(draft_);
             if (!diagnostics.set_input_setup(setup)) {
                 notice_ = coretx::ui::tr::bad_request;
                 return {};
@@ -99,7 +103,7 @@ class InputMenu {
         }
         return {};
     }
-    constexpr void render(const i6x::Diagnostics &diagnostics, coretx::ui::Framebuffer &display,
+    constexpr void render(const Diagnostics &diagnostics, coretx::ui::Framebuffer &display,
                           const char *const storage_message,
                           const bool can_recover = false) const noexcept {
         namespace tr = coretx::ui::tr;
@@ -127,45 +131,93 @@ class InputMenu {
             const bool ink = i != selected_;
             if (!ink)
                 display.rectangle(0, y - 1, 128, 10);
-            const bool calibration = (i + 1) == count(diagnostics);
+            const auto item = entry(diagnostics, i);
+            const bool calibration = item.kind == Kind::calibration;
             const std::string_view label =
-                calibration          ? tr::menu_calibration
-                : i < extension_rows ? (i == 0 ? tr::menu_extra_digital : tr::menu_extra_analog)
-                                     : auxiliary_names[i - extension_rows];
+                calibration                        ? tr::menu_calibration
+                : item.kind == Kind::analog_enable ? tr::menu_extra_analog
+                : item.kind == Kind::digital
+                    ? coretx::ui::detail::switch_names[auxiliary_count + item.index]
+                    : auxiliary_names[item.index];
             display.text(0, y, label, ink);
             if (!calibration) {
                 const int field = editing_ && (selected_ == i) ? draft_ : value(diagnostics, i);
                 const std::string_view text =
-                    i < extension_rows ? (field == 0 ? tr::menu_no : tr::menu_yes)
-                                       : input_mode_names[static_cast<std::size_t>(field)];
+                    item.kind == Kind::analog_enable ? (field == 0 ? tr::menu_no : tr::menu_yes)
+                    : item.kind == Kind::digital
+                        ? digital_mode_names[static_cast<std::size_t>(field)]
+                        : input_mode_names[static_cast<std::size_t>(field)];
                 display.text(128 - static_cast<int>(text.size()) * 6, y, text, ink);
             }
         }
         display.small_text(0, 52, tr::menu_input_setup);
+        const auto selected = entry(diagnostics, selected_);
         display.small_text(0, 58,
                            notice_ != nullptr ? notice_
-                           : editing_ && features::i6s && features::extended_inputs &&
-                                   (selected_ == 0) && (draft_ != 0)
+                           : editing_ && features::i6s && (selected.kind == Kind::digital) &&
+                                   (selected.index < 2) && (draft_ != 0)
                                ? tr::inputs_swd_warning
+                           : editing_ && (selected.kind == Kind::digital) &&
+                                   (draft_ == static_cast<int>(DigitalInputMode::three_position))
+                               ? tr::inputs_pair_warning
                            : storage_message != nullptr ? storage_message
                                                         : tr::menu_help);
     }
 
   private:
-    inline static constexpr std::size_t extension_rows = features::extended_inputs ? 2U : 0U;
-    [[nodiscard]] static constexpr std::size_t count(const i6x::Diagnostics &diagnostics) noexcept {
-        return extension_rows + 6 +
-               (diagnostics.input_setup().extra_analog ? i6x::extra_adc_count : 0) + 1;
+    enum class Kind : std::uint8_t { analog_enable, analog, digital, calibration };
+    struct Entry {
+        Kind kind{};
+        std::size_t index{};
+    };
+    [[nodiscard]] static constexpr bool digital_visible(const Diagnostics &diagnostics,
+                                                        const std::size_t index) noexcept {
+        if (features::i6s && ((index == 2) || (index == 3)) &&
+            diagnostics.input_setup().external_module)
+            return false;
+        return ((index != 1) && (index != 3)) ||
+               (diagnostics.input_setup().digital_mode(index - 1) !=
+                DigitalInputMode::three_position);
     }
-    [[nodiscard]] static constexpr int value(const i6x::Diagnostics &diagnostics,
-                                             const std::size_t row) noexcept {
+    [[nodiscard]] static constexpr Entry entry(const Diagnostics &diagnostics,
+                                               std::size_t row) noexcept {
+        if constexpr (features::extended_inputs) {
+            if (row == 0)
+                return {Kind::analog_enable};
+            --row;
+        }
+        const auto analogs = 6 + (diagnostics.input_setup().extra_analog ? extra_adc_count : 0);
+        if (row < analogs)
+            return {Kind::analog, row};
+        row -= analogs;
         if constexpr (features::extended_inputs)
-            if (row < extension_rows)
-                return row == 0 ? diagnostics.input_setup().extra_digital
-                                : diagnostics.input_setup().extra_analog;
-        return static_cast<int>(diagnostics.input_setup().modes[row - extension_rows]);
+            for (std::size_t i = 0; i < (features::i6s ? digital_input_count : 2U); ++i) {
+                if (!digital_visible(diagnostics, i))
+                    continue;
+                if (row == 0)
+                    return {Kind::digital, i};
+                --row;
+            }
+        return {Kind::calibration};
     }
-    [[nodiscard]] constexpr int value(const i6x::Diagnostics &diagnostics) const noexcept {
+    [[nodiscard]] static constexpr std::size_t count(const Diagnostics &diagnostics) noexcept {
+        std::size_t result = 7 + (diagnostics.input_setup().extra_analog ? extra_adc_count : 0);
+        if constexpr (features::extended_inputs) {
+            ++result;
+            for (std::size_t i = 0; i < (features::i6s ? digital_input_count : 2U); ++i)
+                result += digital_visible(diagnostics, i) ? 1U : 0U;
+        }
+        return result;
+    }
+    [[nodiscard]] static constexpr int value(const Diagnostics &diagnostics,
+                                             const std::size_t row) noexcept {
+        const auto item = entry(diagnostics, row);
+        return item.kind == Kind::analog_enable ? diagnostics.input_setup().extra_analog
+               : item.kind == Kind::digital
+                   ? static_cast<int>(diagnostics.input_setup().digital_mode(item.index))
+                   : static_cast<int>(diagnostics.input_setup().modes[item.index]);
+    }
+    [[nodiscard]] constexpr int value(const Diagnostics &diagnostics) const noexcept {
         return value(diagnostics, selected_);
     }
     std::size_t selected_{};
