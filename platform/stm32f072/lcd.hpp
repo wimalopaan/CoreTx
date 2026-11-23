@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "boards/common/hardware.hpp"
 #include "coretx/ui/ui.hpp"
 #include "platform/stm32f072/gpio.hpp"
+#include "platform/stm32f072/peripherals.hpp"
 
 namespace coretx::firmware {
 
@@ -11,7 +11,7 @@ enum class LcdError : std::uint8_t { none, not_initialized, frame_busy };
 
 namespace detail {
 
-template <typename Io, typename Assignment = Hardware> class LcdState {
+template <typename Io, typename Assignment> class LcdState {
   public:
     [[nodiscard]] constexpr LcdError initialize() noexcept {
         using namespace stm32f072::registers;
@@ -247,7 +247,7 @@ template <typename Io, typename Assignment = Hardware> class LcdState {
 
 } // namespace detail
 
-template <typename Io, typename Assignment = Hardware> class Lcd {
+template <typename Io, typename Assignment> class Lcd {
   public:
     Lcd() = delete;
 

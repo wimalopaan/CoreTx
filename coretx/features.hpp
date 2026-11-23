@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include <cstdint>
+
 #if !defined(CORETX_A7105) || !defined(CORETX_CRSF) || !defined(CORETX_I6S) ||                     \
     !defined(CORETX_EXTENDED_INPUTS) || !defined(CORETX_MULTISWITCH) ||                            \
-    !defined(CORETX_SECURE_UI) || !defined(CORETX_I2C_FAST_MODE)
+    !defined(CORETX_SECURE_UI) || !defined(CORETX_I2C_FAST_MODE) ||                                \
+    !defined(CORETX_CRSF_REMOTE_TIMEOUT_MS) || !defined(CORETX_CRSF_REMOTE_RETRIES) ||             \
+    !defined(CORETX_CRSF_PARAMETER_IDS) || !defined(CORETX_CRSF_CACHE_BYTES) ||                    \
+    !defined(CORETX_I6S_TOUCH_THRESHOLD)
 #error "Define firmware features through the coretx CMake target"
 #endif
 
@@ -25,3 +30,19 @@ inline constexpr bool coherent_adc_snapshots = true;
 inline constexpr bool coherent_adc_snapshots = false;
 #endif
 } // namespace coretx::firmware::features
+
+// Tuning values set through CMake cache variables; see BUILDING.adoc.
+namespace coretx::firmware::tuning {
+inline constexpr std::uint32_t crsf_remote_timeout_ms = CORETX_CRSF_REMOTE_TIMEOUT_MS;
+inline constexpr std::uint8_t crsf_remote_retries = CORETX_CRSF_REMOTE_RETRIES;
+// IDs 0..crsf_parameter_ids-1 fit the CRSF tree tables; devices with higher IDs report a
+// capacity error. Each ID costs five bytes of RAM, the cache one byte per byte.
+inline constexpr std::uint16_t crsf_parameter_ids = CORETX_CRSF_PARAMETER_IDS;
+inline constexpr std::uint16_t crsf_cache_bytes = CORETX_CRSF_CACHE_BYTES;
+inline constexpr std::uint8_t i6s_touch_threshold = CORETX_I6S_TOUCH_THRESHOLD;
+static_assert((crsf_remote_timeout_ms >= 100) && (crsf_remote_timeout_ms <= 10'000));
+static_assert(crsf_remote_retries <= 50);
+static_assert((crsf_parameter_ids >= 32) && (crsf_parameter_ids <= 256));
+static_assert((crsf_cache_bytes >= 512) && (crsf_cache_bytes <= 4096));
+static_assert((i6s_touch_threshold >= 10) && (i6s_touch_threshold <= 60));
+} // namespace coretx::firmware::tuning

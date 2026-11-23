@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #define CORETX_I6S_TOUCH_TRACE
-#include "boards/common/sender_input.hpp"
 #include "boards/i6s/setup_controls.hpp"
+#include "boards/i6s/touch_input.hpp"
 #include "static_fixture.hpp"
 #include "tests/renderers/touch.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -134,10 +135,16 @@ struct InferredTaps {};
 struct PartialFailure {};
 struct TransferFailure {};
 struct PacketFailure {};
+struct RegisterReads {};
 template <typename Scenario> using Fixture = coretx::test::RegisterFixture<Scenario, Registers>;
 
-template <typename Driver> bool start(Registers &io, const std::uint32_t base = 0) {
+// Extra boot wait beyond the historical 60 ms; start() begins earlier so the controller is ready
+// at the same absolute timestamps.
+constexpr std::uint32_t boot_shift = hw::touch_boot_time.count() - 60'001U;
+
+template <typename Driver> bool start(Registers &io, std::uint32_t base = 0) {
     const auto written = io.writes;
+    base -= boot_shift;
     io.clock = base;
     io.cell(reg::interrupt) = 1U << 12;
     Driver::initialize();
@@ -149,12 +156,18 @@ template <typename Driver> bool start(Registers &io, const std::uint32_t base = 
     (void)Driver::service(coretx::TimestampUs{io.clock});
     if ((io.cell(GPIOA_BASE + offsetof(GPIO_TypeDef, ODR)) & (1U << 15)) == 0)
         return false;
-    for (std::uint32_t i = 80'002; i < 80'050; ++i) {
+    for (std::uint32_t i = 80'002 + boot_shift; i < 80'050 + boot_shift; ++i) {
         (void)Driver::service(coretx::TimestampUs{base + i});
         if (Driver::ready())
             break;
     }
-    return Driver::ready() && (Driver::error() == hw::TouchError::none) && (io.writes == written);
+    // After reset only active mode and the touch threshold are configured.
+    constexpr std::array<std::uint8_t, 4> configuration{
+        0x86, 0x00, 0x80, coretx::firmware::tuning::i6s_touch_threshold};
+    return Driver::ready() && (Driver::error() == hw::TouchError::none) &&
+           (io.writes == written + configuration.size()) &&
+           std::equal(configuration.begin(), configuration.end(),
+                      io.transmitted.begin() + static_cast<std::ptrdiff_t>(written));
 }
 
 constexpr bool decoding() {
@@ -195,7 +208,7 @@ bool reset_waits() {
     io.clock = requested;
     (void)Driver::service(coretx::TimestampUs{requested});
     // The boot deadline starts after the GPIO write, not at entry to service().
-    for (std::uint32_t i = 60'001; i < 60'020; ++i) {
+    for (std::uint32_t i = 60'001; i < hw::touch_boot_time.count() + 19U; ++i) {
         (void)Driver::service(coretx::TimestampUs{requested + i});
     }
     return (io.cell(reg::cr2) == 0) && (io.writes == 0) && !Driver::ready();
@@ -264,6 +277,74 @@ constexpr bool navigation() {
         return false;
     sample.x = 80;
     return multi.service(coretx::TimestampUs{4}, &sample, true) == Key::ok;
+}
+
+constexpr bool flicks() {
+    using coretx::TimestampUs;
+    // dx, dy, lift time (ms), expected key; the lift packet carries no position.
+    struct Case {
+        int dx, dy;
+        std::uint32_t lift_ms;
+        Key key;
+        bool tap;
+    };
+    constexpr std::array cases{
+        Case{9, 0, 150, Key::ok, false},   Case{-8, 0, 300, Key::cancel, false},
+        Case{0, 7, 100, Key::down, false}, Case{0, -7, 100, Key::up, false},
+        Case{9, 0, 400, Key::none, true},  Case{9, 7, 100, Key::none, true},
+        Case{7, 0, 100, Key::none, true},
+    };
+    for (const std::uint32_t base : {0U, 0xFFFF0000U}) {
+        for (const auto &c : cases) {
+            hw::TouchNavigation nav{};
+            hw::TouchSample sample{0, 0, 64, 32, 1, hw::Gesture::none, true};
+            if ((nav.service(TimestampUs{base}, &sample, true, true) != Key::none) ||
+                !nav.pressed() || (nav.pressed()->x != 64))
+                return false;
+            // The driver keeps polling a held contact well within the stale-contact deadline.
+            for (std::uint32_t ms = 100; ms + 100 <= c.lift_ms; ms += 100)
+                if (nav.service(TimestampUs{base + ms * 1000U}, &sample, true, true) != Key::none)
+                    return false;
+            sample.x = static_cast<std::uint8_t>(64 + c.dx);
+            sample.y = static_cast<std::uint8_t>(32 + c.dy);
+            if ((nav.service(TimestampUs{base + c.lift_ms * 1000U - 8000U}, &sample, true, true) !=
+                 Key::none) ||
+                !nav.pressed())
+                return false;
+            sample = {0, 0, 0, 0, 0, hw::Gesture::none, false};
+            if ((nav.service(TimestampUs{base + c.lift_ms * 1000U}, &sample, true, true) !=
+                 (c.tap ? Key::ok : c.key)) ||
+                (nav.tapped().has_value() != c.tap) || nav.pressed())
+                return false;
+        }
+    }
+    // Travel beyond the tap slop cancels the press highlight and the tap.
+    hw::TouchNavigation nav{};
+    hw::TouchSample sample{0, 0, 64, 32, 1, hw::Gesture::none, true};
+    (void)nav.service(TimestampUs{0}, &sample, true, true);
+    sample.x = 76;
+    sample.y = 44;
+    if ((nav.service(TimestampUs{1000}, &sample, true, true) != Key::none) || nav.pressed())
+        return false;
+    sample.contacts = 0;
+    if ((nav.service(TimestampUs{2000}, &sample, true, true) != Key::none) || nav.tapped())
+        return false;
+    // On the button bar, edge jitter that would be a flick elsewhere stays a tap.
+    for (const int dy : {0, 10}) {
+        nav = {};
+        sample = {0, 0, 10, 4, 1, hw::Gesture::none, true};
+        (void)nav.service(TimestampUs{0}, &sample, true, true);
+        sample.x = 19;
+        sample.y = static_cast<std::uint8_t>(4 + dy);
+        if (nav.service(TimestampUs{50'000}, &sample, true, true) != Key::none)
+            return false;
+        sample = {0, 0, 0, 0, 0, hw::Gesture::none, false};
+        const auto tap = nav.tapped();
+        if ((nav.service(TimestampUs{100'000}, &sample, true, true) != Key::ok) || !nav.tapped() ||
+            (nav.tapped()->x != 10) || (nav.tapped()->y != 4) || tap)
+            return false;
+    }
+    return true;
 }
 
 constexpr bool fast_swipes() {
@@ -950,7 +1031,7 @@ bool recovering_reports() {
                 (io.writes != writes))
                 return false;
         io.packet[1] = 0x14;
-        for (std::uint32_t now = 370'000; now < 470'000; now += 100) {
+        for (std::uint32_t now = 370'000; now < 470'000 + boot_shift; now += 100) {
             if (service(now) != Key::none)
                 return false;
             if ((Driver::frames() == 1) && (input.message() == nullptr))
@@ -960,12 +1041,12 @@ bool recovering_reports() {
             (Driver::frames() < 2) || (input.message() != nullptr))
             return false;
         io.packet[2] = 0;
-        for (std::uint32_t now = 470'000; now < 480'000; now += 100)
+        for (std::uint32_t now = 470'000 + boot_shift; now < 480'000 + boot_shift; now += 100)
             if (service(now) != Key::none)
                 return false;
         io.packet[2] = 1;
         unsigned actions{};
-        for (std::uint32_t now = 480'000; now < 500'000; now += 100) {
+        for (std::uint32_t now = 480'000 + boot_shift; now < 500'000 + boot_shift; now += 100) {
             const auto key = service(now);
             if (key == Key::ok)
                 ++actions;
@@ -975,13 +1056,13 @@ bool recovering_reports() {
         if (actions != 1)
             return false;
         io.cell(reg::interrupt) = touch_line;
-        for (std::uint32_t now = 500'000; now < 503'000; now += 100)
+        for (std::uint32_t now = 500'000 + boot_shift; now < 503'000 + boot_shift; now += 100)
             if (service(now) != Key::none)
                 return false;
         io.cell(reg::interrupt) = 0;
         io.cell(reg::isr) = I2C_ISR_BUSY;
-        (void)service(510'000);
-        for (std::uint32_t now = 520'000; now < 1'520'000; now += 1000) {
+        (void)service(510'000 + boot_shift);
+        for (std::uint32_t now = 520'000 + boot_shift; now < 1'520'000 + boot_shift; now += 1000) {
             io.cell(reg::isr) = I2C_ISR_BUSY;
             if ((service(now) != Key::none) || (input.message() == nullptr))
                 return false;
@@ -1020,6 +1101,7 @@ bool failures() {
         auto &io = TransferTest::registers;
         if (!start<Transfer>(io))
             return false;
+        const auto configured = io.writes;
         io.cell(reg::interrupt) = 0;
         io.cell(reg::isr) = I2C_ISR_BUSY;
         (void)Transfer::service(coretx::TimestampUs{80'052});
@@ -1029,7 +1111,7 @@ bool failures() {
             Transfer::ready() || Transfer::received() || (io.cell(reg::cr1) != 0))
             return false;
         if ((Transfer::service(coretx::TimestampUs{100'000}) != hw::TouchEvent::failed) ||
-            (io.writes != 0))
+            (io.writes != configured))
             return false;
     }
     PacketTest::reset_registers();
@@ -1044,6 +1126,28 @@ bool failures() {
         (Packet::packet_bytes() != 7) || (Packet::packet() != io.packet))
         return false;
     return start<Packet>(io) && !Packet::received();
+}
+
+bool register_reads() {
+    using Test = Fixture<RegisterReads>;
+    using Driver = hw::Touch<Test::Io>;
+    Test::reset_registers();
+    auto &io = Test::registers;
+    if (!start<Driver>(io))
+        return false;
+    const auto written = io.writes;
+    io.packet[0] = 0x64;
+    const auto value = Driver::read_register(0xA3);
+    if (!value || (*value != 0x64) || (io.writes != written + 1) ||
+        (io.transmitted[written] != 0xA3) || !Driver::ready())
+        return false;
+    // A stalled controller must not block the diagnostic loop beyond the per-flag deadline.
+    io.poll_cost = 1;
+    io.byte_delay = 5000;
+    const auto started = io.clock;
+    return !Driver::read_register(0x86) && (io.clock - started < 5000U) &&
+           (Driver::error() == hw::TouchError::timeout) && !Driver::ready() &&
+           !Driver::read_register(0x86);
 }
 
 constexpr bool rendering() {
@@ -1161,6 +1265,7 @@ bool setup_gpio() {
 
 static_assert(decoding());
 static_assert(navigation());
+static_assert(flicks());
 static_assert(rendering());
 
 } // namespace
@@ -1176,6 +1281,7 @@ int main() {
     RUN(reset_waits)
     RUN(navigation)
     RUN(fast_swipes)
+    RUN(flicks)
     RUN(hardware)
     RUN(delayed_reports)
     RUN(latched_interrupt)
@@ -1189,6 +1295,7 @@ int main() {
     RUN(polled_release_taps)
     RUN(recovering_reports)
     RUN(failures)
+    RUN(register_reads)
     RUN(rendering)
     RUN(setup_navigation)
     RUN(setup_gpio)

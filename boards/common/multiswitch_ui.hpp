@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "boards/i6s/touch_navigation.hpp"
+#include "boards/common/switch_names.hpp"
 #include "coretx/radio/multiswitch.hpp"
 #include "coretx/ui/translation.hpp"
 #include "coretx/ui/ui.hpp"
@@ -59,7 +59,7 @@ switch_condition_label(const Condition &condition, std::array<char, 6> &buffer) 
         buffer[size++] = static_cast<char>('1' + (condition.index - switch_count));
         buffer[size++] = condition.position == SwitchPosition::down ? '1' : '0';
     } else if ((condition.index < switch_count) && valid_switch_position(condition.position)) {
-        const auto name = coretx::ui::detail::switch_names[condition.index];
+        const auto name = switch_names[condition.index];
         for (const auto character : name)
             buffer[size++] = character;
         buffer[size++] = condition.position == SwitchPosition::up     ? '^'
@@ -112,108 +112,10 @@ constexpr void render_multiswitch(const MultiSwitchPage &page, const std::size_t
     display.compact(false);
 }
 
-class MultiSwitchTouch {
-  public:
-    constexpr void reset() noexcept {
-        *this = {};
-        blocked_ = true;
-    }
-    [[nodiscard]] constexpr Key service(const TimestampUs now, const i6s::TouchSample *sample,
-                                        const bool healthy, const std::uint8_t momentary) noexcept {
-        tapped_.reset();
-        const bool expired =
-            active_ && ((now - last_packet_) >= i6s::TouchNavigation::release_timeout_us);
-        const bool inferred_release =
-            expired && sample && sample->synthetic && (sample->contacts == 0);
-        if (!healthy || (expired && !inferred_release)) {
-            active_ = false;
-            held_.reset();
-            blocked_ = true;
-        }
-        if (!healthy || (sample == nullptr))
-            return Key::none;
-        last_packet_ = now;
-        if (sample->contacts > 1) {
-            active_ = false;
-            held_.reset();
-            blocked_ = true;
-        }
-        if (blocked_) {
-            if (sample->contacts == 0)
-                blocked_ = false;
-            return Key::none;
-        }
-        if (sample->contacts == 0) {
-            Key key{};
-            if (active_ && !emitted_) {
-                key = i6s::swipe_key(*sample, start_x_, start_y_);
-                const bool moved = sample->position_valid &&
-                                   ((int{sample->x} - start_x_ >= i6s::swipe_distance) ||
-                                    (int{sample->x} - start_x_ <= -i6s::swipe_distance) ||
-                                    (int{sample->y} - start_y_ >= i6s::swipe_distance) ||
-                                    (int{sample->y} - start_y_ <= -i6s::swipe_distance));
-                if (!momentary_ && (!sample->synthetic || inferred_release) && (key == Key::none) &&
-                    !tap_cancelled_ && !moved) {
-                    tapped_ = multiswitch_at(start_x_, start_y_);
-                }
-            }
-            active_ = false;
-            held_.reset();
-            return key;
-        }
-        if (!active_) {
-            active_ = true;
-            emitted_ = false;
-            tap_cancelled_ = false;
-            start_x_ = sample->x;
-            start_y_ = sample->y;
-            pressed_at_ = now;
-            held_ = multiswitch_at(start_x_, start_y_);
-            momentary_ = held_ && ((momentary & (1U << *held_)) != 0);
-            if (!momentary_)
-                held_.reset();
-            const auto key = i6s::swipe_key(*sample, start_x_, start_y_);
-            emitted_ = key != Key::none;
-            if (emitted_)
-                held_.reset();
-            return key;
-        }
-        if (emitted_)
-            return Key::none;
-        if (momentary_) {
-            if (held_ != multiswitch_at(sample->x, sample->y))
-                held_.reset();
-        }
-        const int dx = int{sample->x} - start_x_;
-        const int dy = int{sample->y} - start_y_;
-        auto key = i6s::swipe_key(*sample, start_x_, start_y_);
-        if ((key == Key::none) && !tap_cancelled_ && !multiswitch_at(start_x_, start_y_) &&
-            ((now - pressed_at_) >= DurationUs{800'000}))
-            key = Key::ok_long;
-        if (key != Key::none) {
-            emitted_ = true;
-            held_.reset();
-        }
-        if ((dx >= i6s::swipe_distance) || (dx <= -i6s::swipe_distance) ||
-            (dy >= i6s::swipe_distance) || (dy <= -i6s::swipe_distance))
-            tap_cancelled_ = true;
-        return key;
-    }
-    [[nodiscard]] constexpr std::optional<std::size_t> held() const noexcept { return held_; }
-    [[nodiscard]] constexpr std::optional<std::size_t> tapped() const noexcept { return tapped_; }
-
-  private:
-    TimestampUs last_packet_{};
-    TimestampUs pressed_at_{};
-    std::optional<std::size_t> held_{};
-    std::optional<std::size_t> tapped_{};
-    std::uint8_t start_x_{};
-    std::uint8_t start_y_{};
-    bool active_{};
-    bool blocked_{true};
-    bool emitted_{};
-    bool tap_cancelled_{};
-    bool momentary_{};
-};
+constexpr void highlight_multiswitch(const std::size_t index,
+                                     coretx::ui::Framebuffer &display) noexcept {
+    display.invert(1 + static_cast<int>(index % 4) * 32, 14 + static_cast<int>(index / 4) * 18, 30,
+                   17);
+}
 
 } // namespace coretx::firmware

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "boards/common/application.hpp"
+#include "boards/i6s/power.hpp"
 #include "boards/i6s/setup_controls.hpp"
+#include "boards/i6s/touch_input.hpp"
 #include "platform/stm32f072/crsf.hpp"
 #include "static_fixture.hpp"
 
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 namespace {
 
@@ -59,6 +62,7 @@ struct Context {
     bool internal_binding{};
     bool power_button{};
     unsigned power_releases{};
+    std::vector<std::uint32_t> farewell_hz{};
     unsigned memory_delay{};
     unsigned memory_remaining{};
     bool memory_fail_writes{};
@@ -76,7 +80,7 @@ struct Context {
     bool radio_valid{};
     fw::StorageProbeState probe_state{fw::StorageProbeState::not_found};
     coretx::crsf::Telemetry telemetry{};
-    coretx::crsf::config::Client crsf_config{};
+    coretx::firmware::CrsfClient crsf_config{};
     coretx::crsf::Channels tx_channels{};
     std::array<std::uint8_t, 4> multiswitch_states{};
     coretx::afhds2a::ChannelMode internal_mode{};
@@ -130,6 +134,9 @@ template <typename Test> struct InputHardware {
             else
                 ++c.center_clicks;
         }
+    }
+    static void play(coretx::TimestampUs, std::uint32_t hz, coretx::DurationUs) {
+        Test::context.farewell_hz.push_back(hz);
     }
     static void stop() {}
 };
@@ -407,7 +414,7 @@ template <typename Test> struct ExternalRFModule {
         auto &c = Test::context;
         return c.telemetry;
     }
-    static coretx::crsf::config::Client &config() { return Test::context.crsf_config; }
+    static coretx::firmware::CrsfClient &config() { return Test::context.crsf_config; }
     static CrsfError error() { return CrsfError::none; }
     static std::uint32_t baudrate() { return 400'000; }
     static std::uint32_t actual_baudrate() { return 400'000; }
@@ -431,6 +438,7 @@ template <typename Test> struct SenderBoard : Platform<Test> {
 };
 template <typename Test> struct TouchSenderBoard : SenderBoard<Test> {
     using Input = coretx::firmware::TouchInput<::Touch<Test>>;
+    using Power = coretx::firmware::i6s::PowerButton;
     inline static constexpr std::string_view name = "I6S";
     inline static constexpr bool sb_three_position = true;
     static bool power_button_pressed() { return Test::context.power_button; }
@@ -841,8 +849,9 @@ bool shared_touch_sender() {
     (void)step(app, c, 1);
     c.touch_sample.x = 80;
     (void)step(app, c, 2);
+    // Each recognized stroke is confirmed audibly while the trim beep is enabled.
     if ((app.diagnostics().phase() != fw::CalibrationPhase::idle) ||
-        (app.diagnostics().page() != fw::Diagnostics::system_page))
+        (app.diagnostics().page() != fw::Diagnostics::system_page) || (c.center_clicks != 2))
         return false;
     c.touch_error = s::TouchError::nack;
     c.touch_ready = false;
@@ -1013,6 +1022,11 @@ bool power_off_during_load() {
     c.probe_state = fw::StorageProbeState::found;
     for (unsigned i = 0; i < 1000; ++i) {
         (void)step(app, c, c.now + 1000U);
+        // The farewell tones and the collapse animation finish before the supply is released.
+        if ((c.power_releases != 0) && (i < 790)) {
+            std::fprintf(stderr, "Shutdown released before animation: iteration=%u\n", i);
+            return false;
+        }
         if (c.powered || c.internal_active || (app.output() != fw::RadioOutput::off)) {
             std::fprintf(stderr, "Shutdown load RF: iteration=%u output=%u\n", i,
                          static_cast<unsigned>(app.output()));
@@ -1020,7 +1034,8 @@ bool power_off_during_load() {
         }
     }
     return (c.power_releases == 1) && (app.state() == fw::ApplicationState::powered_off) &&
-           (app.models().data().radio.output == data.radio.output);
+           (app.models().data().radio.output == data.radio.output) &&
+           (c.farewell_hz == std::vector<std::uint32_t>{1'760, 1'320, 880});
 }
 
 template <template <typename> typename BoardPolicy> bool input_setup_recovery() {

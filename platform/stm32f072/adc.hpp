@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "boards/common/hardware.hpp"
+#include "coretx/features.hpp"
 #include "coretx/ui/translation.hpp"
 
 #include "platform/stm32f072/gpio.hpp"
+#include "platform/stm32f072/peripherals.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,13 +13,6 @@
 #include <string_view>
 
 namespace coretx::firmware {
-
-inline constexpr auto gimbal_inputs = firmware::Hardware::gimbal_inputs;
-inline constexpr auto stock_inputs = firmware::Hardware::stock_inputs;
-
-inline constexpr std::size_t battery_index = stock_inputs.size();
-inline constexpr auto sender_inputs = firmware::Hardware::sender_inputs;
-inline constexpr std::size_t extra_adc_count = sender_inputs.size() - stock_inputs.size() - 1;
 
 [[nodiscard]] constexpr std::int32_t battery_millivolts(const std::uint16_t raw) noexcept {
     // OpenI6X nominal stock scaling, translated from half-resolution ADC to mV.
@@ -37,24 +31,20 @@ enum class AdcError : std::uint8_t {
 };
 enum class ScanEvent : std::uint8_t { pending, complete, failed };
 
-using adc_registers = stm32f072::AdcTraits<firmware::Hardware::adc>;
-
-struct adc_dma_registers : stm32f072::DmaTraits<firmware::Hardware::adc_dma> {
-    inline static constexpr std::uint32_t configuration =
-        DMA_CCR_MINC | DMA_CCR_PSIZE_0 | DMA_CCR_MSIZE_0 | DMA_CCR_PL_1 | DMA_CCR_CIRC;
-};
+inline constexpr std::uint32_t adc_dma_configuration =
+    DMA_CCR_MINC | DMA_CCR_PSIZE_0 | DMA_CCR_MSIZE_0 | DMA_CCR_PL_1 | DMA_CCR_CIRC;
 
 inline constexpr bool coherent_adc_snapshots = features::coherent_adc_snapshots;
 
 namespace detail {
 
-template <typename Io, const auto &Inputs = gimbal_inputs, bool Coherent = coherent_adc_snapshots,
-          typename Assignment = firmware::Hardware>
+template <typename Io, typename Assignment, const auto &Inputs = Assignment::gimbal_inputs,
+          bool Coherent = coherent_adc_snapshots>
 class AdcState {
     using Registers = stm32f072::AdcTraits<Assignment::adc>;
     using Dma = stm32f072::DmaTraits<Assignment::adc_dma>;
     static_assert(Assignment::adc_dma == Registers::dma, "Invalid ADC DMA channel");
-    static constexpr auto configuration = adc_dma_registers::configuration;
+    static constexpr auto configuration = adc_dma_configuration;
 
   public:
     using Samples = std::array<std::uint16_t, Inputs.size()>;
@@ -277,10 +267,10 @@ class AdcState {
 
 } // namespace detail
 
-template <typename Io, const auto &Inputs = gimbal_inputs, bool Coherent = coherent_adc_snapshots,
-          typename Assignment = firmware::Hardware>
+template <typename Io, typename Assignment, const auto &Inputs = Assignment::gimbal_inputs,
+          bool Coherent = coherent_adc_snapshots>
 class Adc {
-    using State = detail::AdcState<Io, Inputs, Coherent, Assignment>;
+    using State = detail::AdcState<Io, Assignment, Inputs, Coherent>;
 
   public:
     Adc() = delete;

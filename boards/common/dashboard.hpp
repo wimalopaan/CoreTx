@@ -3,6 +3,7 @@
 
 #include "boards/common/controls.hpp"
 #include "boards/common/radio_storage.hpp"
+#include "boards/common/switch_names.hpp"
 #include "coretx/radio/telemetry.hpp"
 #include "coretx/ui/translation.hpp"
 #include "coretx/ui/ui.hpp"
@@ -219,11 +220,11 @@ constexpr void render_physical_switches(coretx::ui::Framebuffer &display,
         if ((active & (1U << i)) == 0)
             continue;
         const auto position = positions[i];
-        // Use the mixer switch names, retaining lowercase a/b for VRA/B.
-        const auto name = i < 4 ? static_cast<char>('A' + i)
-                          : (i < 6) || (!features::i6s && (i < auxiliary_count))
-                              ? static_cast<char>('a' + (i - 4))
-                              : coretx::ui::detail::switch_names[i].back();
+        // Use the mixer switch names, with lowercase letters for potentiometers (VRA -> a).
+        const auto full = switch_names[i];
+        const auto name = i < 4                    ? static_cast<char>('A' + i)
+                          : full.starts_with("VR") ? static_cast<char>(full.back() - 'A' + 'a')
+                                                   : full.back();
         const std::array<char, 2> label{
             name, ((available & (1U << i)) == 0)     ? '?'
                   : position == SwitchPosition::up   ? '^'

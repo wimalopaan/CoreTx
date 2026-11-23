@@ -127,6 +127,22 @@ The following are project options and their defaults when not overridden by a pr
 |`CORETX_I2C_FAST_MODE` |`ON`
 |EEPROM I2C2 at approximately 400 kHz; OFF selects 100 kHz.
  Does not change the i6S touch bus.
+|`CORETX_CRSF_REMOTE_TIMEOUT_MS` |`1000`
+|CRSF parameter read timeout per request for receivers and other devices behind the RF link,
+ 100..10000 ms. The TX module itself keeps 500 ms.
+|`CORETX_CRSF_REMOTE_RETRIES` |`9`
+|Repetitions of an unanswered remote parameter read, 0..50. The default gives
+ 10 requests, so _CRSF response timeout #n_ appears after about 10 s.
+ The TX module itself keeps 2 repetitions.
+|`CORETX_CRSF_PARAMETER_IDS` |`256`
+|Highest CRSF parameter ID + 1 that the menu can hold, 32..256. Costs five bytes of RAM per ID;
+ devices with higher IDs report _CRSF memory limit_. 256 covers every device.
+|`CORETX_CRSF_CACHE_BYTES` |`1280`
+|RAM cache for loaded CRSF parameter entries, 512..4096 bytes. Smaller caches reload
+ parameters more often while scrolling but limit nothing else.
+|`CORETX_I6S_TOUCH_THRESHOLD` |`22`
+|i6S FT6236 touch threshold (register 0x80), 10..60; lower is more sensitive.
+ See _Touch sensitivity_ in PERIPHERALS.adoc.
 |`CORETX_BOARD` |`I6X`
 |Board selection: `I6X` or `I6S`; the i6s preset selects `I6S`.
  Also selects board features in native tests.

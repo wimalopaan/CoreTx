@@ -4,9 +4,9 @@
 #include "boards/common/extended_inputs.hpp"
 #include "boards/common/radio_board.hpp"
 #include "boards/common/rf_modules.hpp"
-#include "boards/common/sender_input.hpp"
 #include "boards/i6s/power.hpp"
 #include "boards/i6s/setup_controls.hpp"
+#include "boards/i6s/touch_input.hpp"
 #include "boards/i6x/keys.hpp"
 #include "platform/stm32f072/adc.hpp"
 #include "platform/stm32f072/bootloader.hpp"
@@ -39,13 +39,15 @@ template <typename Io, typename Assignment = Hardware> struct SenderBoard {
                   "Buzzer must not reconfigure the system clock");
     inline static constexpr std::string_view name = Hardware::name;
     inline static constexpr bool sb_three_position = Hardware::sb_three_position;
-    using Adc = firmware::Adc<Io, Hardware::sender_inputs, coherent_adc_snapshots, Hardware>;
+    using Adc = firmware::Adc<Io, Hardware, Hardware::sender_inputs, coherent_adc_snapshots>;
     using Input = typename SenderInput<Io, Hardware>::Type;
     using Inputs = ExtendedInputs<Io, Hardware>;
     using Display = Lcd<Io, Hardware>;
     using Probe = StorageProbe<Io, Hardware>;
     using Memory = Eeprom<Io, Hardware>;
     using Watchdog = firmware::Watchdog<Io>;
+    // The i6S switches itself off with a held power button; the i6X has a mechanical switch.
+    using Power = std::conditional_t<Hardware::power_latch, i6s::PowerButton, void>;
     using Bootloader = stm32f072::Bootloader<Io>;
     using Modules = RfModules<Io, Hardware>;
     using ExternalRFModule = typename Modules::ExternalRFModule;

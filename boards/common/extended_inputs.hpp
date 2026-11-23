@@ -84,6 +84,10 @@ template <typename Io, typename Assignment> class ExtendedInputs {
             Sound::click(now, tone);
         Sound::service(now);
     }
+    static void play(const TimestampUs now, const std::uint32_t hz,
+                     const DurationUs duration) noexcept {
+        Sound::play(now, hz, duration);
+    }
     static void stop() noexcept { Sound::stop(); }
 
   private:

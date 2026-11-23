@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "boards/common/crsf_client.hpp"
 #include "boards/common/crsf_menu.hpp"
-#include "coretx/radio/crsf_config.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -44,7 +44,7 @@ Bytes command(const std::uint8_t status) {
     return bytes;
 }
 struct Link {
-    cfg::Client client{};
+    coretx::firmware::CrsfClient client{};
     c::Telemetry telemetry{};
     cfg::Frame outbound{};
     std::uint32_t clock{};
@@ -219,14 +219,18 @@ void chunk_integrity_and_errors() {
 
 void parameter_error_identification() {
     namespace md = coretx::firmware::crsf_menu_detail;
+    // 0xFF is reserved by CRSF, so the highest usable ID is 254.
+    constexpr auto top = static_cast<std::uint8_t>(
+        std::min<std::size_t>(254, coretx::firmware::CrsfClient::parameter_ids - 1));
     Link link{};
     link.start(2);
-    link.entry(0, folder(0, {254, 2}));
-    link.request(254);
-    link.entry(254, {0, c::CRSF_STRING, 'N', 0, 'X'});
+    link.entry(0, folder(0, {top, 2}));
+    link.request(top);
+    link.entry(top, {0, c::CRSF_STRING, 'N', 0, 'X'});
     link.request(2);
     link.entry(2, number(0));
-    const auto footer_matches = [](const cfg::Client &client, const std::string &message) {
+    const auto footer_matches = [](const coretx::firmware::CrsfClient &client,
+                                   const std::string &message) {
         coretx::firmware::CrsfMenu menu{};
         coretx::ui::Framebuffer display{};
         menu.render(client, display, coretx::TimestampUs{});
@@ -238,8 +242,9 @@ void parameter_error_identification() {
                     return false;
         return true;
     };
-    require(footer_matches(link.client, std::string{md::tr::crsf_invalid} + " #254"),
-            "error footer retains the failed ID after another parameter finishes");
+    require(
+        footer_matches(link.client, std::string{md::tr::crsf_invalid} + " #" + std::to_string(top)),
+        "error footer retains the failed ID after another parameter finishes");
     Link root{};
     root.start(0);
     root.entry(0, number(0));
@@ -252,17 +257,19 @@ void parameter_error_identification() {
 }
 
 void large_folder_cache_and_scroll() {
+    constexpr auto count = static_cast<std::uint8_t>(
+        std::min<std::size_t>(80, coretx::firmware::CrsfClient::parameter_ids - 1));
     Link link{};
-    link.start(80);
+    link.start(count);
     Bytes children{};
-    for (std::uint8_t i = 1; i <= 80; ++i)
+    for (std::uint8_t i = 1; i <= count; ++i)
         children.push_back(i);
     link.entry(0, folder(0, children));
-    for (std::uint8_t i = 1; i <= 80; ++i) {
+    for (std::uint8_t i = 1; i <= count; ++i) {
         link.request(i);
         link.entry(i, number(0));
     }
-    require(link.client.count() == 80, "large folder tree is not cache-size limited");
+    require(link.client.count() == count, "large folder tree is not cache-size limited");
     for (std::uint8_t i = 1; i <= 4; ++i)
         require(link.client.parameter(i).has_value(), "visible rows remain pinned");
     require(!link.client.parameter(30), "background entries may be evicted");
@@ -274,12 +281,34 @@ void large_folder_cache_and_scroll() {
     require(!link.client.busy(), "scrolling refills only missing visible rows");
     for (std::uint8_t i = 30; i <= 33; ++i)
         require(link.client.parameter(i).has_value(), "new viewport pinned");
+    // 0xFF is reserved by CRSF, so the highest usable ID is 254.
+    constexpr auto top = static_cast<std::uint8_t>(
+        std::min<std::size_t>(254, coretx::firmware::CrsfClient::parameter_ids - 1));
     Link sparse{};
     sparse.start(1);
-    sparse.entry(0, folder(0, {254}));
-    sparse.request(254);
-    sparse.entry(254, number(0));
+    sparse.entry(0, folder(0, {top}));
+    sparse.request(top);
+    sparse.entry(top, number(0));
     require(!sparse.client.busy(), "root child IDs, not advertised count, drive modern traversal");
+    if constexpr (coretx::firmware::CrsfClient::parameter_ids < 256) {
+        constexpr auto beyond =
+            static_cast<std::uint8_t>(coretx::firmware::CrsfClient::parameter_ids);
+        Link child{};
+        child.start(1);
+        child.entry(0, folder(0, {beyond}));
+        require(child.client.error() == cfg::Error::capacity,
+                "child IDs beyond the configured table size are rejected");
+        Link legacy{};
+        legacy.start(beyond);
+        for (unsigned retry = 0; retry < 2; ++retry) {
+            legacy.clock += 500'000;
+            legacy.request(0);
+        }
+        legacy.clock += 500'000;
+        (void)legacy.client.next_frame(coretx::TimestampUs{legacy.clock}, legacy.outbound);
+        require(legacy.client.error() == cfg::Error::capacity,
+                "legacy parameter counts beyond the table size are rejected");
+    }
 }
 
 void write_verification_and_folder_refresh() {
@@ -341,10 +370,67 @@ void timeout_and_legacy() {
                 "legacy fallback and timer wrap");
         require(link.client.write(1, 50), "legacy write");
         (void)link.client.next_frame(coretx::TimestampUs{link.clock}, link.outbound);
+        for (unsigned retry = 0; retry < 2; ++retry) {
+            link.clock += 500'000;
+            link.request(1);
+        }
         link.clock += 500'000;
         link.client.service(coretx::TimestampUs{link.clock});
         require(link.client.error() == cfg::Error::timeout, "unacknowledged write fails");
     }
+}
+
+void remote_retries() {
+    Link link{};
+    link.client.open(coretx::TimestampUs{});
+    require(link.client.next_frame(coretx::TimestampUs{}, link.outbound) == 6, "receiver ping");
+    Bytes info{};
+    string(info, "Receiver");
+    info.resize(info.size() + 14);
+    info[info.size() - 2] = 2;
+    link.reply(c::CRSF_FRAMETYPE_DEVICE_INFO, info, c::CRSF_ADDRESS_CRSF_RECEIVER);
+    link.client.select(0);
+    link.request(0);
+    const auto entry = [&](const std::uint8_t id, const Bytes &bytes) {
+        Bytes data{id, 0};
+        data.insert(data.end(), bytes.begin(), bytes.end());
+        link.reply(c::CRSF_FRAMETYPE_PARAMETER_SETTINGS_ENTRY, data, c::CRSF_ADDRESS_CRSF_RECEIVER);
+    };
+    entry(0, folder(0, {1, 2}));
+    link.request(1);
+    // Replies over the RF link may take seconds; configured retries precede a missing-reply error.
+    constexpr auto retries = coretx::firmware::tuning::crsf_remote_retries;
+    constexpr auto timeout = coretx::firmware::tuning::crsf_remote_timeout_ms * 1'000U;
+    for (unsigned retry = 0; retry < retries; ++retry) {
+        link.clock += timeout - 1;
+        require(link.client.next_frame(coretx::TimestampUs{link.clock}, link.outbound) == 0,
+                "receiver reply is awaited for the remote timeout");
+        link.clock += 1;
+        link.request(1);
+    }
+    entry(1, number(0));
+    require(link.client.error() == cfg::Error::none, "late receiver reply still loads");
+    link.request(2);
+    for (unsigned retry = 0; retry < retries; ++retry) {
+        link.clock += timeout;
+        link.request(2);
+    }
+    link.clock += timeout;
+    link.client.service(coretx::TimestampUs{link.clock});
+    require((link.client.error() == cfg::Error::timeout) && (link.client.error_parameter() == 2),
+            "receiver parameter fails after all remote retries");
+
+    // A write without acknowledgement is verified by reading the parameter back.
+    require(link.client.write(1, 7), "receiver write");
+    (void)link.client.next_frame(coretx::TimestampUs{link.clock}, link.outbound);
+    require(link.outbound[2] == c::CRSF_FRAMETYPE_PARAMETER_WRITE, "receiver write frame");
+    link.clock += timeout;
+    link.request(1);
+    link.clock += timeout;
+    link.request(1);
+    entry(1, number(0, 7));
+    require(!link.client.pending_write() && (link.client.error() == cfg::Error::none),
+            "late receiver write verified by read-back");
 }
 
 void fixed_point_and_command() {
@@ -682,7 +768,28 @@ void dashboard_touch_rows_and_transactions() {
             if ((x < 32) || (x >= 96))
                 require(display.pixel_at(x, y) == buttons.pixel_at(x, y),
                         "touch button labels contrast with their filled backgrounds");
-    menu.tap(110, 4, link.client, now);
+    const auto highlighted = [&](const std::uint8_t x, const std::uint8_t y, const int top,
+                                 const int left, const int width) {
+        auto pressed = display;
+        menu.highlight(x, y, link.client, pressed);
+        auto expected = display;
+        if (width != 0)
+            expected.invert(left, top, width, 10);
+        for (int py = 0; py < 64; ++py)
+            for (int px = 0; px < 128; ++px)
+                if (pressed.pixel_at(px, py) != expected.pixel_at(px, py))
+                    return false;
+        return (width == 0) || (pressed.pixel_at(left, top) != display.pixel_at(left, top));
+    };
+    require(highlighted(10, 4, 0, 0, 32) && highlighted(110, 4, 0, 96, 32) &&
+                highlighted(70, 33, coretx::firmware::crsf_menu_detail::list_y - 1 + 20, 0, 128) &&
+                highlighted(70, 56, 0, 0, 0),
+            "touch feedback inverts exactly the element a tap would activate");
+    require(highlighted(37, 4, 0, 0, 32) && highlighted(34, 13, 0, 0, 32) &&
+                highlighted(95, 13, 0, 96, 32) &&
+                highlighted(60, 13, coretx::firmware::crsf_menu_detail::list_y - 1, 0, 128),
+            "button hit areas extend beside and below the drawn boxes");
+    menu.tap(95, 13, link.client, now);
     require(link.client.pending_write(), "visible OK confirms the selected field");
     menu.suspend(link.client);
     require(!menu.visible() && link.client.pending_write(),
@@ -756,10 +863,12 @@ int main() {
     large_folder_cache_and_scroll();
     write_verification_and_folder_refresh();
     timeout_and_legacy();
+    remote_retries();
     fixed_point_and_command();
     string_write_and_disconnected_edit();
     root_uses_selected_device_name();
     menu_titles_and_value_details();
     progressive_menu_and_editing();
-    std::printf("CRSF configuration tests passed (client %zu bytes)\n", sizeof(cfg::Client));
+    std::printf("CRSF configuration tests passed (client %zu bytes)\n",
+                sizeof(coretx::firmware::CrsfClient));
 }

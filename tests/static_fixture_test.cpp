@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#include "boards/common/sender_input.hpp"
+#include "boards/i6s/touch_input.hpp"
 #include "platform/stm32f072/clock.hpp"
 #include "platform/stm32f072/gpio.hpp"
 #include "static_fixture.hpp"

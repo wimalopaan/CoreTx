@@ -41,6 +41,11 @@ bool viewport(SDL_Window *const window, Viewport &view) {
     return true;
 }
 
+// The simulator is a board of its own; it uses the FS-i6X input names.
+constexpr coretx::ui::SwitchNames switch_names{"SA",  "SB",  "SC",  "SD",  "VRA", "VRB", "VRC",
+                                               "VRD", "VRE", "VRF", "VRG", "SE",  "SF",  "SG",
+                                               "SH",  "SI",  "T1",  "T2",  "T3",  "T4"};
+
 bool pointer(SDL_Window *const window, coretx::ui::Interface &ui, coretx::Model &model,
              coretx::RawControls &controls, coretx::ControlSetup &setup, const PointerKind &kind,
              const float x, const float y) {
@@ -410,6 +415,7 @@ int main(const int argc, char **const argv) {
     auto controls = coretx::ui::simulator_raw_controls();
     controls.trims = model.trims;
     coretx::ui::Interface ui{};
+    ui.set_switch_names(switch_names);
     Framebuffer display{};
     coretx::Status previous_error{};
     coretx::PreparationStatus previous_preparation_error{};

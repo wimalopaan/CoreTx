@@ -7,7 +7,7 @@ Originalfirmware und externes EEPROM getrennt sichern.
 Neutrale Kanalausgabe ist kein garantierter Motor-Aus-Failsafe.
 
 Experimentelle Firmware für *Flysky FS-i6X und FS-i6S* mit STM32F072,
-128 KiB Flash und 16 KiB RAM. Aktuelle Firmwareversion im Quellcode: *4*
+128 KiB Flash und 16 KiB RAM. Aktuelle Firmwareversion im Quellcode: *5*
 (`coretx/version.hpp`).
 
 == Ziele

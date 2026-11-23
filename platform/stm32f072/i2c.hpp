@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "boards/common/hardware.hpp"
 #include "coretx/features.hpp"
 #include "coretx/ui/translation.hpp"
 #include "platform/stm32f072/gpio.hpp"
+#include "platform/stm32f072/peripherals.hpp"
 
 #include <array>
 
 namespace coretx::firmware {
-
-using i2c_registers = stm32f072::I2cTraits<firmware::Hardware::storage.peripheral>;
 
 enum class StorageProbeState : std::uint8_t { idle, scanning, found, not_found, failed };
 enum class I2cError : std::uint8_t {
@@ -56,7 +54,7 @@ struct StorageProbeResult {
 
 namespace detail {
 
-template <typename Io, typename Assignment = firmware::Hardware>
+template <typename Io, typename Assignment>
 class ProbeState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
     using Registers = stm32f072::I2cTraits<Assignment::storage.peripheral>;
     using Registers::cr2;
@@ -207,7 +205,7 @@ class ProbeState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
 
 } // namespace detail
 
-template <typename Io, typename Assignment = firmware::Hardware> class StorageProbe {
+template <typename Io, typename Assignment> class StorageProbe {
     using State = detail::ProbeState<Io, Assignment>;
 
   public:

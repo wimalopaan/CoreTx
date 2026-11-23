@@ -10,6 +10,10 @@ struct Hardware {
     static constexpr std::string_view name = "I6X";
     static constexpr bool sb_three_position = false;
     static constexpr bool power_latch = false;
+    // Trim buttons that can also act as switches; the i6S uses touch and rear buttons instead.
+    static constexpr bool trim_buttons = true;
+    // Digital inputs routed through the external module bay.
+    static constexpr std::uint8_t external_module_digital_mask = 0;
     static constexpr Pin hold_power{};
     static constexpr unsigned clock_timer = 2;
     static constexpr unsigned buzzer_timer = 1;

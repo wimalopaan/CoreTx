@@ -583,6 +583,7 @@ struct Eeprom {
     constexpr Eeprom() { bytes.fill(0xFF); }
 };
 template <typename Test> struct Memory {
+    inline static constexpr std::size_t page_size = 64;
     static void reset() noexcept {}
     static void select(std::uint8_t) {
         auto &e = Test::context;

@@ -152,6 +152,16 @@ PC13 ist ein Steuersignal, keine Angabe zur verfügbaren Versorgungsleistung.
 HF-Pfad zur Laufzeit. Vor Änderungen externe HF abschalten.
 `CORETX_MULTISWITCH=ON` ergänzt Dashboards und SET4-Befehle bei einkompiliertem CRSF.
 
+Das Modul-Konfigurationsmenü wiederholt unbeantwortete Parameteranfragen. Das TX-Modul
+antwortet über die Leitung: 0,5 s je Anfrage, 3 Anfragen. Empfänger und andere
+entfernte Geräte antworten über die Funkstrecke; eine Anfrage wird daher jede Sekunde
+wiederholt, und die Meldung _CRSF-Antwort fehlt #n_ (Parameternummer `n`) erscheint
+erst nach 10 s ohne Antwort. Verspätete Antworten werden weiterhin angenommen.
+Schreibzugriffe werden nicht wiederholt: Bleibt die Bestätigung eines geänderten Werts aus,
+wird der Parameter mit denselben Zeiten und Wiederholungen zurückgelesen und muss
+dem geschriebenen Wert entsprechen. `CORETX_CRSF_REMOTE_TIMEOUT_MS` (Standard 1000)
+und `CORETX_CRSF_REMOTE_RETRIES` (Standard 9) ändern die Werte für entfernte Geräte.
+
 === LCD und Buzzer
 
 [cols="2,3",options="header"]
@@ -341,9 +351,21 @@ werden in der UI eingestellt.
 
 I2C1 verwendet den 48-MHz-Systemtakt und Timingwert `0x00B01A4B`.
 Der Bus ist unabhängig von der EEPROM-I2C-Geschwindigkeitsoption.
-Beim Start liegt Reset 20 ms an, anschließend folgen 60 ms Wartezeit.
-Die Reset-Vorgaben des Controllers bleiben erhalten; CoreTX überschreibt die
-Register `0xA4`, `0x80` und `0x88` nicht.
+Beim Start liegt Reset 20 ms an, anschließend folgen 300 ms Wartezeit; vorher liefert der Controller bei Registerzugriffen nur Nullen.
+Danach schreibt CoreTX `0x86 = 0x00`, damit der Controller im Ruhezustand nicht in
+den Monitor-Modus wechselt, und setzt die Berührungsschwelle `0x80`;
+`0xA4` und `0x88` behalten ihre Reset-Vorgaben.
+
+.Touch-Empfindlichkeit
+Die Schwelle `0x80` ist die kleinste Kapazitätsänderung, die der FT6236 als Berührung
+wertet; kleinere Werte sind empfindlicher. Nach dem Reset steht sie auf 31 (`0x1F`),
+wobei leichte oder sehr kurze Tipps verloren gingen; CoreTX verwendet daher 22.
+Deutlich kleinere Werte riskieren Geisterberührungen durch Störungen oder Feuchtigkeit,
+größere erfordern festeres Drücken. Einstellbar mit
+`-DCORETX_I6S_TOUCH_THRESHOLD=<10..60>` (Standard 22). Nach einer Änderung zeigt das Touch-Diagnoseimage den
+wirksamen Wert als `TH` hexadezimal an (22 = `16`).
+Das Touch-Diagnoseimage zeigt diese Register sowie je Berührung Paketanzahl,
+größte Paketlücke, Dauer, Weg und Art des Loslassens.
 
 Transfers laufen kooperativ mit höchstens 300 us/512 Schritten pro Serviceaufruf.
 Eine neue Interruptflanke startet das Lesen ohne Warten auf das normale Pollintervall.
@@ -353,6 +375,18 @@ Ein 300-ms-Timeout für veraltete Kontakte gibt die Geste frei;
 nach Übertragungsfehlern folgt ein neuer Versuch nach 250 ms.
 Im Dashboard wechselt horizontales Wischen die Seite, vertikales Wischen scrollt
 innerhalb einer Seite; MultiSwitch-Elemente unterstützen ihre jeweiligen Tipp-/Halteaktionen.
+Eine Umschaltkachel schaltet, sobald der Finger 100 ms ruhig (innerhalb der Tipp-Toleranz)
+darauf liegt, oder beim früheren Loslassen; ein auf einer Kachel beginnendes Wischen verlässt
+die Toleranz vorher und schaltet sie nicht um.
+Wischen erfordert 12 px horizontal bzw. 10 px vertikal; ein innerhalb von 300 ms
+losgelassener Flick genügt mit 8/7 px. Die Hauptachse muss die andere um die Hälfte
+übertreffen, und Wege unter 12 px brechen einen Tipp nie ab. Eine berührte CRSF-Zeile
+bzw. -Schaltfläche oder MultiSwitch-Kachel wird sofort invertiert, und jede erkannte
+Aktion klickt, solange der Trim-Piep aktiv ist.
+Berührungen, die in den oberen 15 px beginnen (CRSF Zurück/OK), sind immer Tipps,
+solange sie nicht 12 px wandern, da der Panelrand kurze Tipps zu scheinbaren Flicks
+verzerrt. Die Trefferflächen von Zurück und OK sind größer als die gezeichneten Felder:
+x < 40 / x >= 88 in der Kopfzeile und x < 36 / x >= 92 bis y = 14.
 
 === Internes A7105 / AFHDS 2A
 
@@ -394,6 +428,16 @@ DMA-Abschluss und RX-Fortschritt werden gepollt; keine USART-/DMA-ISR.
 Die Laufzeitoption *Externes Modul* muss zusätzlich auf Ja stehen und reserviert PB6/PB7.
 `CORETX_MULTISWITCH=ON` ergänzt Dashboards und SET4-Befehle bei einkompiliertem CRSF.
 
+Das Modul-Konfigurationsmenü wiederholt unbeantwortete Parameteranfragen. Das TX-Modul
+antwortet über die Leitung: 0,5 s je Anfrage, 3 Anfragen. Empfänger und andere
+entfernte Geräte antworten über die Funkstrecke; eine Anfrage wird daher jede Sekunde
+wiederholt, und die Meldung _CRSF-Antwort fehlt #n_ (Parameternummer `n`) erscheint
+erst nach 10 s ohne Antwort. Verspätete Antworten werden weiterhin angenommen.
+Schreibzugriffe werden nicht wiederholt: Bleibt die Bestätigung eines geänderten Werts aus,
+wird der Parameter mit denselben Zeiten und Wiederholungen zurückgelesen und muss
+dem geschriebenen Wert entsprechen. `CORETX_CRSF_REMOTE_TIMEOUT_MS` (Standard 1000)
+und `CORETX_CRSF_REMOTE_RETRIES` (Standard 9) ändern die Werte für entfernte Geräte.
+
 === LCD und Buzzer
 
 [cols="2,3",options="header"]
@@ -429,8 +473,10 @@ Eine DFU-Sicherung des internen Flash enthält dieses EEPROM *nicht*.
 LOW-Signal der beiden Einschalttasten.
 Nach dem Start müssen die Tasten zunächst losgelassen werden.
 Beide Tasten 1,5 s halten, um das Abschalten anzufordern.
-CoreTX deaktiviert sofort die HF, beendet ausstehende Speichervorgänge,
-schaltet die LEDs aus und gibt erst dann die Selbsthaltung frei.
+CoreTX deaktiviert sofort die HF, spielt eine absteigende Tonfolge
+(1760/1320/880 Hz) und lässt das Bild zu einer Linie und dann zu einem Punkt
+zusammenfallen (0,8 s). Erst wenn diese Animation und ausstehende Speichervorgänge
+beendet sind, schaltet CoreTX die LEDs aus und gibt die Selbsthaltung frei.
 Bei einem Speicherfehler bleibt der Sender eingeschaltet, statt einen
 fehlgeschlagenen Schreibvorgang durch Abschalten abzubrechen.
 USB kann den Sender auch nach Freigabe der Selbsthaltung weiter versorgen.

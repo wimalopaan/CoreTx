@@ -7,7 +7,7 @@ Back up the original firmware and external EEPROM separately.
 Neutral channel output is not a guaranteed motor-off failsafe.
 
 Experimental firmware for the *Flysky FS-i6X and FS-i6S*, based on the STM32F072
-with 128 KiB flash and 16 KiB RAM. Current source firmware version: *4*
+with 128 KiB flash and 16 KiB RAM. Current source firmware version: *5*
 (`coretx/version.hpp`).
 
 == Goals

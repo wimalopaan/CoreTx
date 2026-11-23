@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "boards/common/hardware.hpp"
 #include "boards/common/radio_storage.hpp"
 #include "coretx/core/input_setup.hpp"
 #include "coretx/ui/translation.hpp"
@@ -47,16 +48,19 @@ struct Decoded {
     checksum.word(coretx::storage::crc32(std::span{bytes}.first(record_size - 4)));
     return bytes;
 }
+[[nodiscard]] constexpr std::uint32_t checksum(const Record &bytes) noexcept {
+    std::uint32_t stored{};
+    coretx::storage::detail::Reader reader{std::span{bytes}.last(4)};
+    reader.word(stored);
+    return stored;
+}
 [[nodiscard]] constexpr Decoded decode(const Record &bytes) noexcept {
     Decoded decoded{};
     if (std::all_of(bytes.begin(), bytes.end(), [](const auto value) { return value == 0xFF; })) {
         decoded.status = RadioStorageStatus::empty;
         return decoded;
     }
-    coretx::storage::detail::Reader checksum{std::span{bytes}.last(4)};
-    std::uint32_t stored{};
-    checksum.word(stored);
-    if (stored != coretx::storage::crc32(std::span{bytes}.first(record_size - 4)))
+    if (checksum(bytes) != coretx::storage::crc32(std::span{bytes}.first(record_size - 4)))
         return decoded;
     coretx::storage::detail::Reader reader{bytes};
     std::uint32_t identifier{};
@@ -87,9 +91,9 @@ struct Decoded {
         if (digital > 1)
             return decoded;
         if (digital != 0) {
-            for (std::size_t i = 0; i < (features::i6s ? digital_input_count : 2U); ++i)
+            for (std::size_t i = 0; i < board::digital_inputs; ++i)
                 decoded.setup.set_digital_mode(i, DigitalInputMode::two_position);
-            decoded.setup.external_module = !features::i6s;
+            decoded.setup.external_module = board::external_module_digital_mask == 0;
         }
     } else {
         decoded.setup.digital_modes = static_cast<std::uint16_t>(digital | ((flags >> 2U) << 8U));
@@ -110,7 +114,8 @@ struct Decoded {
 
 template <typename Memory> class InputStorage {
   public:
-    constexpr explicit InputStorage(const bool i6s = false) noexcept : setup_(i6s) {}
+    constexpr explicit InputStorage(const bool sb_three_position = false) noexcept
+        : setup_(sb_three_position) {}
     [[nodiscard]] constexpr bool owns_memory() const noexcept {
         return (stage_ != Stage::wait) && (stage_ != Stage::ready);
     }
@@ -125,16 +130,16 @@ template <typename Memory> class InputStorage {
     [[nodiscard]] constexpr bool recover() noexcept {
         if (!can_recover())
             return false;
-        pending_setup_ = setup_;
-        record_ = input_storage::encode(pending_setup_, 0);
+        record_ = input_storage::encode(setup_, 0);
+        pending_checksum_ = input_storage::checksum(record_);
         has_active_ = false;
         generation_ = 0;
-        target_ = 1;
-        offset_ = 0;
+        target_ = 0;
         loaded_ = false;
         dirty_ = true;
         status_ = RadioStorageStatus::saving;
         stage_ = Stage::invalidate_other;
+        transfer_.erase(address(1));
         return true;
     }
     [[nodiscard]] constexpr RadioStorageStatus status() const noexcept { return status_; }
@@ -174,171 +179,165 @@ template <typename Memory> class InputStorage {
     }
     constexpr void service(const TimestampUs now, const StorageProbeResult probe) noexcept {
         if (stage_ == Stage::wait) {
-            if ((probe.state == StorageProbeState::idle) ||
-                (probe.state == StorageProbeState::scanning))
-                return;
             if (probe.state == StorageProbeState::failed) {
                 finish(RadioStorageStatus::io_error);
                 return;
             }
-            if (probe.state != StorageProbeState::found) {
-                finish(RadioStorageStatus::missing);
+            const auto selection = select_memory<Memory>(probe);
+            if (selection == ProbeSelection::wait)
+                return;
+            if (selection != ProbeSelection::selected) {
+                finish(selection == ProbeSelection::missing ? RadioStorageStatus::missing
+                                                            : RadioStorageStatus::multiple);
                 return;
             }
-            if (std::popcount(probe.addresses) != 1) {
-                finish(RadioStorageStatus::multiple);
-                return;
-            }
-            Memory::select(static_cast<std::uint8_t>(StorageProbeResult::first_address +
-                                                     std::countr_zero(probe.addresses)));
             stage_ = Stage::first;
+            transfer_.read(address(0), record_);
         }
         if (stage_ == Stage::ready) {
             if (!dirty_ || !writable_)
                 return;
             target_ = has_active_ ? 1U - active_ : 0U;
-            pending_setup_ = setup_;
-            record_ = input_storage::encode(pending_setup_, has_active_ ? generation_ + 1U : 0U);
-            status_ = RadioStorageStatus::saving;
-            stage_ = Stage::invalidate;
-            offset_ = 0;
+            write();
         }
-        if (pending_) {
-            Memory::service(now);
-            if (Memory::busy())
+        for (;;) {
+            switch (transfer_.service(now)) {
+            case Transfer::Result::busy:
                 return;
-            pending_ = false;
-            if (Memory::error() != I2cError::none) {
+            case Transfer::Result::failed:
                 writable_ = false;
                 finish(RadioStorageStatus::io_error);
                 return;
+            case Transfer::Result::mismatch:
+                writable_ = false;
+                finish(RadioStorageStatus::verify);
+                return;
+            case Transfer::Result::done:
+                break;
             }
-            if (stage_ == Stage::invalidate_other) {
-                target_ = 0;
-                offset_ = 0;
-                stage_ = Stage::invalidate;
-            } else if (stage_ == Stage::invalidate) {
-                offset_ = 1;
-                stage_ = Stage::body;
-            } else if (stage_ == Stage::commit) {
-                offset_ = 0;
-                stage_ = Stage::verify;
-            } else {
-                offset_ += count_;
-                if (offset_ == input_storage::record_size) {
-                    offset_ = 0;
-                    switch (stage_) {
-                    case Stage::first:
-                        first_ = input_storage::decode(record_);
-                        stage_ = Stage::second;
-                        break;
-                    case Stage::second:
-                        load(input_storage::decode(record_));
-                        return;
-                    case Stage::body:
-                        stage_ = Stage::commit;
-                        break;
-                    case Stage::verify:
-                        if (record_ != input_storage::encode(pending_setup_,
-                                                             has_active_ ? generation_ + 1U : 0U)) {
-                            writable_ = false;
-                            finish(RadioStorageStatus::verify);
-                            return;
-                        }
-                        generation_ = has_active_ ? generation_ + 1U : 0U;
-                        active_ = target_;
-                        has_active_ = true;
-                        writable_ = true;
-                        dirty_ = setup_ != pending_setup_;
-                        finish(RadioStorageStatus::saved);
-                        return;
-                    default:
-                        break;
-                    }
+            switch (stage_) {
+            case Stage::invalidate_other:
+                stage_ = Stage::write;
+                transfer_.write(address(target_), record_, 1);
+                continue;
+            case Stage::first:
+                first_ = summary(input_storage::decode(record_));
+                stage_ = Stage::second;
+                transfer_.read(address(1), record_);
+                continue;
+            case Stage::second:
+                if (!load(input_storage::decode(record_)))
+                    return;
+                transfer_.read(address(0), record_);
+                continue;
+            case Stage::reload: {
+                const auto decoded = input_storage::decode(record_);
+                if (!decoded.valid() || (decoded.generation != first_.generation) ||
+                    (input_storage::checksum(record_) != first_.checksum)) {
+                    finish(RadioStorageStatus::invalid);
+                    return;
                 }
+                select(decoded, 0);
+                return;
+            }
+            case Stage::write:
+                if (!input_storage::decode(record_).valid()) {
+                    writable_ = false;
+                    finish(RadioStorageStatus::verify);
+                    return;
+                }
+                generation_ = has_active_ ? generation_ + 1U : 0U;
+                active_ = target_;
+                has_active_ = true;
+                writable_ = true;
+                dirty_ = input_storage::checksum(input_storage::encode(setup_, generation_)) !=
+                         pending_checksum_;
+                finish(RadioStorageStatus::saved);
+                return;
+            case Stage::wait:
+            case Stage::ready:
+                return;
             }
         }
-        const auto bank = stage_ == Stage::first ? 0U : stage_ == Stage::second ? 1U : target_;
-        const auto address = static_cast<std::uint16_t>(
-            input_storage::base_address + bank * input_storage::record_size + offset_);
-        count_ = std::min(Memory::page_size - offset_ % Memory::page_size,
-                          input_storage::record_size - offset_);
-        bool started{};
-        if ((stage_ == Stage::first) || (stage_ == Stage::second) || (stage_ == Stage::verify))
-            started = Memory::read(address, std::span{record_}.subspan(offset_, count_));
-        else if ((stage_ == Stage::invalidate) || (stage_ == Stage::invalidate_other))
-            started = Memory::write(address, invalid_);
-        else if (stage_ == Stage::commit)
-            started = Memory::write(address, std::span{record_}.first(1));
-        else
-            started = Memory::write(address, std::span{record_}.subspan(offset_, count_));
-        if (!started) {
-            writable_ = false;
-            finish(RadioStorageStatus::io_error);
-        } else
-            pending_ = true;
     }
 
   private:
-    enum class Stage : std::uint8_t {
-        wait,
-        first,
-        second,
-        ready,
-        invalidate_other,
-        invalidate,
-        body,
-        commit,
-        verify
-    };
+    enum class Stage : std::uint8_t { wait, first, second, reload, ready, invalidate_other, write };
+    using Transfer = SlotTransfer<Memory>;
+    [[nodiscard]] static constexpr std::uint16_t address(const std::size_t slot) noexcept {
+        return static_cast<std::uint16_t>(input_storage::base_address +
+                                          slot * input_storage::record_size);
+    }
+    constexpr void write() noexcept {
+        record_ = input_storage::encode(setup_, has_active_ ? generation_ + 1U : 0U);
+        pending_checksum_ = input_storage::checksum(record_);
+        status_ = RadioStorageStatus::saving;
+        stage_ = Stage::write;
+        transfer_.write(address(target_), record_, 1);
+    }
     constexpr void finish(const RadioStorageStatus status) noexcept {
         status_ = status;
         stage_ = Stage::ready;
         loaded_ = true;
     }
-    constexpr void load(const input_storage::Decoded second) noexcept {
+    // Slot 0 is reduced to a summary so that only one decoded setup exists at a time.
+    struct Summary {
+        std::uint32_t generation{};
+        std::uint32_t checksum{};
+        RadioStorageStatus status{RadioStorageStatus::invalid};
+        [[nodiscard]] constexpr bool valid() const noexcept {
+            return status == RadioStorageStatus::ready;
+        }
+    };
+    [[nodiscard]] constexpr Summary summary(const input_storage::Decoded &decoded) const noexcept {
+        return {decoded.generation, input_storage::checksum(record_), decoded.status};
+    }
+    constexpr void select(const input_storage::Decoded &selected, const std::size_t bank) noexcept {
+        setup_ = selected.setup;
+        generation_ = selected.generation;
+        active_ = bank;
+        has_active_ = true;
+        writable_ = true;
+        finish(RadioStorageStatus::ready);
+    }
+    // Returns true when slot 0 won and has to be read again.
+    [[nodiscard]] constexpr bool load(const input_storage::Decoded &second) noexcept {
         if ((first_.status == RadioStorageStatus::version) ||
             (second.status == RadioStorageStatus::version)) {
             finish(RadioStorageStatus::version);
-            return;
+            return false;
         }
         if (!first_.valid() && !second.valid()) {
             writable_ = (first_.status == RadioStorageStatus::empty) &&
                         (second.status == RadioStorageStatus::empty);
             finish(writable_ ? RadioStorageStatus::empty : RadioStorageStatus::invalid);
-            return;
+            return false;
         }
         if (first_.valid() && second.valid() &&
             (((second.generation - first_.generation) == 0x80000000U) ||
-             ((first_.generation == second.generation) && (first_.setup != second.setup)))) {
+             ((first_.generation == second.generation) &&
+              (first_.checksum != input_storage::checksum(record_))))) {
             finish(RadioStorageStatus::invalid);
-            return;
+            return false;
         }
-        auto selected = first_;
         if (!first_.valid() || (second.valid() && (second.generation != first_.generation) &&
                                 ((second.generation - first_.generation) < 0x80000000U))) {
-            selected = second;
-            active_ = 1;
+            select(second, 1);
+            return false;
         }
-        setup_ = selected.setup;
-        generation_ = selected.generation;
-        has_active_ = true;
-        writable_ = true;
-        finish(RadioStorageStatus::ready);
+        stage_ = Stage::reload;
+        return true;
     }
     InputSetup setup_{};
-    InputSetup pending_setup_{};
     input_storage::Record record_{};
-    input_storage::Decoded first_{};
-    inline static constexpr std::array<std::uint8_t, 1> invalid_{0};
+    Summary first_{};
+    std::uint32_t pending_checksum_{};
+    Transfer transfer_{};
     std::uint32_t generation_{};
     std::size_t active_{};
     std::size_t target_{};
-    std::size_t offset_{};
-    std::size_t count_{};
     Stage stage_{};
     RadioStorageStatus status_{RadioStorageStatus::loading};
-    bool pending_{};
     bool loaded_{};
     bool writable_{};
     bool dirty_{};

@@ -29,23 +29,26 @@ class Buzzer {
         write(offsetof(TIM_TypeDef, CCER), TIM_CCER_CC1P);
         if constexpr (Peripheral::main_output)
             write(offsetof(TIM_TypeDef, BDTR), TIM_BDTR_MOE);
-        started_ = {};
+        until_ = {};
         active_ = false;
     }
     static void click(const TimestampUs now, const ClickTone tone = ClickTone::control) noexcept {
-        const auto period =
-            tone == ClickTone::multiswitch ? timer_hz / multiswitch_hz : timer_hz / click_hz;
+        play(now, tone == ClickTone::multiswitch ? multiswitch_hz : click_hz, click_duration);
+    }
+    static void play(const TimestampUs now, const std::uint32_t hz,
+                     const DurationUs duration) noexcept {
+        const auto period = timer_hz / hz;
         write(offsetof(TIM_TypeDef, ARR), period - 1U);
         write(offsetof(TIM_TypeDef, CCR1), period / 2U);
         write(offsetof(TIM_TypeDef, CNT), 0);
         write(offsetof(TIM_TypeDef, EGR), TIM_EGR_UG);
         write(offsetof(TIM_TypeDef, CCER), TIM_CCER_CC1E | TIM_CCER_CC1P);
         write(offsetof(TIM_TypeDef, CR1), TIM_CR1_ARPE | TIM_CR1_CEN);
-        started_ = now;
+        until_ = now + duration;
         active_ = true;
     }
     static void service(const TimestampUs now) noexcept {
-        if (active_ && ((now - started_) >= click_duration))
+        if (active_ && ((now - until_) < DurationUs{0x8000'0000U}))
             stop();
     }
     static void stop() noexcept {
@@ -63,7 +66,7 @@ class Buzzer {
     static void write(const std::size_t offset, const std::uint32_t value) noexcept {
         Io::write(Peripheral::base + offset, value);
     }
-    inline static TimestampUs started_{};
+    inline static TimestampUs until_{};
     inline static bool active_{};
 };
 

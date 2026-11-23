@@ -3,6 +3,7 @@
 
 #include "boards/common/controls.hpp"
 #include "boards/common/radio_storage.hpp"
+#include "boards/common/slot_transfer.hpp"
 #include "coretx/ui/translation.hpp"
 #include "platform/stm32f072/crsf.hpp"
 
@@ -29,7 +30,14 @@ static_assert((34 + 2 + (max_input_lines * coretx::storage::detail::packed_model
 using Record = std::array<std::uint8_t, record_size>;
 using Name = std::array<char, 12>;
 
+struct EmptyModel {};
+inline constexpr EmptyModel empty_model{};
+
 struct Data {
+    constexpr Data() noexcept = default;
+    // Avoids copying the flash-resident diagnostic_model; the owner fills the model at runtime.
+    constexpr explicit Data(EmptyModel) noexcept : model{} {}
+
     Model model{diagnostic_model};
     RadioSettings radio{};
     Name name{'M', 'o', 'd', 'e', 'l', ' ', '0', '1'};
@@ -177,19 +185,18 @@ template <typename Memory> class ModelStorage {
   public:
     constexpr void initialize(const afhds2a::TxId transmitter) noexcept {
         stage_ = Stage::wait;
-        pending_ = loaded_ = writable_ = dirty_ = changed_ = switch_after_ = directory_write_ =
-            false;
+        transfer_ = {};
+        loaded_ = writable_ = dirty_ = changed_ = switch_after_ = false;
         trim_save_pending_ = false;
         directory_valid_ = false;
         resettable_ = directory_damaged_ = slot_damaged_ = false;
-        reset_verify_ = false;
         directory_empty_ = scan_empty_ = slot_empty_ = true;
-        active_ = target_ = offset_ = copy_target_ = 0;
+        active_ = target_ = copy_target_ = 0;
         bank_ = directory_bank_ = 0;
         directory_generation_ = 0;
         entries_.fill({});
         message_ = coretx::ui::tr::models_loading;
-        data_.model = diagnostic_model;
+        make_diagnostic_model(data_.model);
         data_.radio = {};
         data_.baud_index = 1;
         models::default_name(data_.name, 0);
@@ -197,6 +204,8 @@ template <typename Memory> class ModelStorage {
         data_.radio.transmitter = transmitter;
     }
     [[nodiscard]] constexpr models::Data &data() noexcept { return data_; }
+    // Scratch is unused before the first service and serves as calibration decode area.
+    [[nodiscard]] constexpr Model &legacy_workspace() noexcept { return scratch_.model; }
     [[nodiscard]] constexpr const models::Data &data() const noexcept { return data_; }
     [[nodiscard]] constexpr const auto &entries() const noexcept { return entries_; }
     [[nodiscard]] constexpr std::size_t active() const noexcept { return active_; }
@@ -217,7 +226,6 @@ template <typename Memory> class ModelStorage {
         models::default_name(data_.name, 0);
         resettable_ = false;
         reset_index_ = 0;
-        reset_verify_ = false;
         stage_ = Stage::reset;
         message_ = coretx::ui::tr::models_saving;
         return true;
@@ -264,7 +272,6 @@ template <typename Memory> class ModelStorage {
             return true;
         target_ = index;
         bank_ = entries_[index].bank;
-        offset_ = 0;
         stage_ = Stage::select;
         message_ = coretx::ui::tr::models_loading_one;
         return true;
@@ -292,7 +299,6 @@ template <typename Memory> class ModelStorage {
             copy_target_ = index;
             target_ = source;
             bank_ = entries_[source].bank;
-            offset_ = 0;
             stage_ = Stage::copy;
             return true;
         }
@@ -325,7 +331,6 @@ template <typename Memory> class ModelStorage {
         pending_name_ = name;
         target_ = index;
         bank_ = entries_[index].bank;
-        offset_ = 0;
         stage_ = Stage::rename;
         return true;
     }
@@ -347,23 +352,19 @@ template <typename Memory> class ModelStorage {
     constexpr void service(const TimestampUs now, const StorageProbeResult probe,
                            const Model &legacy, const RadioSettings radio) noexcept {
         if (stage_ == Stage::wait) {
-            if ((probe.state == StorageProbeState::idle) ||
-                (probe.state == StorageProbeState::scanning))
+            const auto selection = select_memory<Memory>(probe);
+            if (selection == ProbeSelection::wait)
                 return;
-            loaded_ = true;
-            if ((probe.state != StorageProbeState::found) ||
-                (std::popcount(probe.addresses) != 1)) {
+            if (selection != ProbeSelection::selected) {
                 finish(coretx::ui::tr::models_unique_eeprom, false);
                 return;
             }
-            Memory::select(static_cast<std::uint8_t>(StorageProbeResult::first_address +
-                                                     std::countr_zero(probe.addresses)));
-            loaded_ = false;
             if (!coretx::validate(legacy)) {
                 finish(coretx::ui::tr::models_legacy_invalid, false);
                 return;
             }
-            data_.model = legacy;
+            if (&legacy != &data_.model)
+                data_.model = legacy;
             data_.radio = radio;
             record_.fill(0xFF);
             stage_ = Stage::directory_load;
@@ -379,153 +380,26 @@ template <typename Memory> class ModelStorage {
             if (!begin_save(active_, true, false))
                 return;
         }
-        if (pending_) {
-            Memory::service(now);
-            if (Memory::busy())
+        for (;;) {
+            if (!transfer_.active() && !start())
                 return;
-            pending_ = false;
-            if (Memory::error() != I2cError::none) {
-                finish(error_message(Memory::error()), false);
+            switch (transfer_.service(now)) {
+            case Transfer::Result::busy:
                 return;
+            case Transfer::Result::failed:
+                finish(Memory::error() == I2cError::none ? coretx::ui::tr::bad_request
+                                                         : error_message(Memory::error()),
+                       false);
+                return;
+            case Transfer::Result::mismatch:
+                finish(coretx::ui::tr::models_error, false);
+                return;
+            case Transfer::Result::done:
+                break;
             }
-            if (stage_ == Stage::reset) {
-                if (!reset_verify_) {
-                    reset_verify_ = true;
-                } else {
-                    if (!std::equal(verify_.begin(), verify_.begin() + 4, record_.begin())) {
-                        finish(coretx::ui::tr::models_error, false);
-                        return;
-                    }
-                    reset_verify_ = false;
-                    ++reset_index_;
-                }
-                if (reset_index_ == ((models::count * 2) + 2)) {
-                    entries_.fill({});
-                    active_ = 0;
-                    directory_bank_ = 0;
-                    directory_generation_ = 0;
-                    directory_damaged_ = slot_damaged_ = false;
-                    writable_ = true;
-                    scratch_ = data_;
-                    if (!begin_save(0, true, true))
-                        return;
-                }
-            } else if (stage_ == Stage::directory_load) {
-                if (!load_directory())
-                    return;
-            } else if (scanning() || (stage_ == Stage::select) ||
-                       (stage_ == Stage::copy) || (stage_ == Stage::rename)) {
-                offset_ += Memory::page_size;
-                if (offset_ == models::record_size) {
-                    offset_ = 0;
-                    if (!scanning()) {
-                        models::Info info{};
-                        if ((models::decode(record_, target_, transmitter_, scratch_, info) != 1) ||
-                            !info.present || (info.checksum != entries_[target_].checksum)) {
-                            finish(coretx::ui::tr::models_error, false);
-                            return;
-                        }
-                        if (stage_ == Stage::copy) {
-                            models::default_name(scratch_.name, copy_target_);
-                            if (!begin_save(copy_target_, true, true))
-                                return;
-                        } else if (stage_ == Stage::rename) {
-                            scratch_.name = pending_name_;
-                            if (!begin_save(target_, true, false))
-                                return;
-                        } else {
-                            switch_after_ = true;
-                            start_directory();
-                        }
-                    } else if (!scan_record())
-                        return;
-                }
-            } else if (stage_ == Stage::invalidate) {
-                offset_ = directory_write_ ? 0 : Memory::page_size;
-                stage_ = directory_write_ ? Stage::commit : Stage::body;
-            } else if (stage_ == Stage::body) {
-                offset_ += Memory::page_size;
-                if (offset_ == transfer_size()) {
-                    offset_ = 0;
-                    stage_ = Stage::commit;
-                }
-            } else if (stage_ == Stage::commit) {
-                offset_ = 0;
-                stage_ = Stage::verify;
-            } else if (stage_ == Stage::verify) {
-                if (!std::equal(verify_.begin(), verify_.end(), record_.begin() + offset_)) {
-                    finish(coretx::ui::tr::models_error, false);
-                    return;
-                }
-                offset_ += Memory::page_size;
-                if (offset_ == transfer_size()) {
-                    offset_ = 0;
-                    if (directory_write_) {
-                        directory_bank_ = bank_;
-                        ++directory_generation_;
-                        if (switch_after_) {
-                            data_ = scratch_;
-                            active_ = target_;
-                            changed_ = true;
-                        }
-                        switch_after_ = false;
-                        directory_write_ = false;
-                        finish(coretx::ui::tr::models_saved, true);
-                        return;
-                    }
-                    models::Info info{};
-                    if (models::decode(record_, target_, transmitter_, scratch_, info) != 1) {
-                        finish(coretx::ui::tr::models_error, false);
-                        return;
-                    }
-                    info.bank = bank_;
-                    entries_[target_] = info;
-                    if (switch_after_)
-                        start_directory();
-                    else {
-                        finish(coretx::ui::tr::models_saved, true);
-                        return;
-                    }
-                }
-            }
+            if (!complete())
+                return;
         }
-        const auto address = static_cast<std::uint16_t>(
-            ((stage_ == Stage::directory_load) || directory_write_
-                 ? models::directory_base + bank_ * Memory::page_size
-                 : models::base + (target_ * 2 + bank_) * models::record_size) +
-            offset_);
-        bool started{};
-        if (stage_ == Stage::reset) {
-            const auto reset_address = static_cast<std::uint16_t>(
-                reset_index_ < (models::count * 2)
-                    ? models::base + reset_index_ * models::record_size
-                    : models::directory_base +
-                          (reset_index_ - models::count * 2) * Memory::page_size);
-            const std::array<std::uint8_t, 4> marker{
-                0, static_cast<std::uint8_t>(reset_index_ < (models::count * 2) ? 'D' : 'I'),
-                static_cast<std::uint8_t>(reset_index_ < (models::count * 2) ? 'L' : 'R'), '1'};
-            // EEPROM writes retain their span across cooperative service calls.
-            std::copy(marker.begin(), marker.end(), record_.begin());
-            started = reset_verify_ ? Memory::read(reset_address, std::span{verify_}.first(4))
-                                    : Memory::write(reset_address, std::span{record_}.first(4));
-        } else if ((stage_ == Stage::directory_load) || scanning() ||
-                   (stage_ == Stage::select) || (stage_ == Stage::copy) ||
-                   (stage_ == Stage::rename))
-            started = Memory::read(address, std::span{record_}.subspan(offset_, Memory::page_size));
-        else if (stage_ == Stage::verify)
-            started = Memory::read(address, verify_);
-        else if (stage_ == Stage::invalidate)
-            started = Memory::write(static_cast<std::uint16_t>(address - offset_), invalid_);
-        else if ((stage_ == Stage::body) || (stage_ == Stage::commit))
-            started =
-                Memory::write(address, std::span{record_}.subspan(offset_, Memory::page_size));
-        else
-            return;
-        pending_ = started;
-        if (!started)
-            finish(Memory::error() == I2cError::none ? coretx::ui::tr::bad_request
-                                                     : error_message(Memory::error()),
-                   false);
     }
 
   private:
@@ -540,11 +414,134 @@ template <typename Memory> class ModelStorage {
         copy,
         rename,
         reset,
-        invalidate,
-        body,
-        commit,
-        verify
+        write,
+        directory
     };
+    using Transfer = SlotTransfer<Memory>;
+    [[nodiscard]] constexpr std::uint16_t record_address() const noexcept {
+        return static_cast<std::uint16_t>(models::base +
+                                          (target_ * 2 + bank_) * models::record_size);
+    }
+    [[nodiscard]] constexpr std::span<std::uint8_t> directory_page() noexcept {
+        return std::span{record_}.first(Memory::page_size);
+    }
+    [[nodiscard]] constexpr std::uint16_t directory_address() const noexcept {
+        return static_cast<std::uint16_t>(models::directory_base + bank_ * Memory::page_size);
+    }
+    // Starts the EEPROM transfer of the current stage; false when the stage has none.
+    constexpr bool start() noexcept {
+        switch (stage_) {
+        case Stage::directory_load:
+            transfer_.read(directory_address(), directory_page());
+            return true;
+        case Stage::scan:
+        case Stage::active_scan:
+        case Stage::background_scan:
+        case Stage::select:
+        case Stage::copy:
+        case Stage::rename:
+            transfer_.read(record_address(), record_);
+            return true;
+        case Stage::write:
+            // The first page holds the header; writing it last commits the record.
+            transfer_.write(record_address(), record_, Memory::page_size);
+            return true;
+        case Stage::directory:
+            transfer_.write(directory_address(), directory_page(), Memory::page_size);
+            return true;
+        case Stage::reset: {
+            // Reset markers make every slot and directory bank explicitly invalid.
+            const bool record = reset_index_ < (models::count * 2);
+            const auto address = static_cast<std::uint16_t>(
+                record ? models::base + reset_index_ * models::record_size
+                       : models::directory_base +
+                             (reset_index_ - models::count * 2) * Memory::page_size);
+            const std::array<std::uint8_t, 4> marker{
+                0, static_cast<std::uint8_t>(record ? 'D' : 'I'),
+                static_cast<std::uint8_t>(record ? 'L' : 'R'), '1'};
+            std::copy(marker.begin(), marker.end(), record_.begin());
+            transfer_.write(address, std::span{record_}.first(marker.size()), marker.size(), false);
+            return true;
+        }
+        case Stage::wait:
+        case Stage::ready:
+            break;
+        }
+        return false;
+    }
+    // Handles a completed transfer; true when the next stage needs another transfer.
+    [[nodiscard]] constexpr bool complete() noexcept {
+        switch (stage_) {
+        case Stage::reset:
+            if (++reset_index_ != ((models::count * 2) + 2))
+                return true;
+            entries_.fill({});
+            active_ = 0;
+            directory_bank_ = 0;
+            directory_generation_ = 0;
+            directory_damaged_ = slot_damaged_ = false;
+            writable_ = true;
+            scratch_ = data_;
+            return begin_save(0, true, true);
+        case Stage::directory_load:
+            return load_directory();
+        case Stage::scan:
+        case Stage::active_scan:
+        case Stage::background_scan:
+            return scan_record();
+        case Stage::select:
+        case Stage::copy:
+        case Stage::rename: {
+            models::Info info{};
+            if ((models::decode(record_, target_, transmitter_, scratch_, info) != 1) ||
+                !info.present || (info.checksum != entries_[target_].checksum)) {
+                finish(coretx::ui::tr::models_error, false);
+                return false;
+            }
+            if (stage_ == Stage::copy) {
+                models::default_name(scratch_.name, copy_target_);
+                return begin_save(copy_target_, true, true);
+            }
+            if (stage_ == Stage::rename) {
+                scratch_.name = pending_name_;
+                return begin_save(target_, true, false);
+            }
+            switch_after_ = true;
+            start_directory();
+            return true;
+        }
+        case Stage::write: {
+            models::Info info{};
+            if (models::decode(record_, target_, transmitter_, scratch_, info) != 1) {
+                finish(coretx::ui::tr::models_error, false);
+                return false;
+            }
+            info.bank = bank_;
+            entries_[target_] = info;
+            if (switch_after_) {
+                start_directory();
+                return true;
+            }
+            finish(coretx::ui::tr::models_saved, true);
+            return false;
+        }
+        case Stage::directory:
+            directory_bank_ = bank_;
+            ++directory_generation_;
+            if (switch_after_) {
+                data_ = scratch_;
+                active_ = target_;
+                changed_ = true;
+            }
+            switch_after_ = false;
+            finish(coretx::ui::tr::models_saved, true);
+            return false;
+        case Stage::wait:
+        case Stage::ready:
+            break;
+        }
+        return false;
+    }
     [[nodiscard]] constexpr bool scanning() const noexcept {
         return (stage_ == Stage::scan) || (stage_ == Stage::active_scan) ||
                (stage_ == Stage::background_scan);
@@ -562,16 +559,12 @@ template <typename Memory> class ModelStorage {
         message_ = message;
         writable_ = writable;
         stage_ = Stage::ready;
-        pending_ = false;
+        transfer_ = {};
         loaded_ = true;
         if (!writable) {
             dirty_ = false;
-            directory_write_ = false;
             switch_after_ = false;
         }
-    }
-    constexpr std::size_t transfer_size() const noexcept {
-        return directory_write_ ? Memory::page_size : models::record_size;
     }
     constexpr bool begin_save(const std::size_t target, const bool present,
                               const bool switch_after) noexcept {
@@ -583,14 +576,11 @@ template <typename Memory> class ModelStorage {
             return false;
         }
         switch_after_ = switch_after;
-        directory_write_ = false;
-        offset_ = 0;
-        stage_ = Stage::invalidate;
+        stage_ = Stage::write;
         message_ = coretx::ui::tr::models_saving;
         return true;
     }
     constexpr void start_directory() noexcept {
-        directory_write_ = true;
         bank_ = static_cast<std::uint8_t>(1U - directory_bank_);
         record_.fill(0xFF);
         coretx::storage::detail::Writer out{std::span{record_}.first(Memory::page_size)};
@@ -600,8 +590,7 @@ template <typename Memory> class ModelStorage {
         out.word(directory_generation_ + 1U);
         coretx::storage::detail::Writer crc{std::span{record_}.subspan(Memory::page_size - 4, 4)};
         crc.word(coretx::storage::crc32(std::span{record_}.first(Memory::page_size - 4)));
-        offset_ = 0;
-        stage_ = Stage::invalidate;
+        stage_ = Stage::directory;
     }
     constexpr bool load_directory() noexcept {
         const auto bytes = std::span{record_}.first(Memory::page_size);
@@ -731,28 +720,25 @@ template <typename Memory> class ModelStorage {
         finish(coretx::ui::tr::models_loaded, true);
         return false;
     }
-    models::Data data_{};
-    models::Data scratch_{};
+    models::Data data_{models::empty_model};
+    models::Data scratch_{models::empty_model};
     models::Name pending_name_{};
     models::Record record_{};
     std::array<models::Info, models::count> entries_{};
-    std::array<std::uint8_t, Memory::page_size> verify_{};
-    inline static constexpr std::array<std::uint8_t, 1> invalid_{0};
+    Transfer transfer_{};
     afhds2a::TxId transmitter_{};
     const char *message_{coretx::ui::tr::models_loading};
     std::uint32_t directory_generation_{};
-    std::size_t active_{}, target_{}, offset_{}, copy_target_{};
+    std::size_t active_{}, target_{}, copy_target_{};
     std::size_t reset_index_{};
     std::uint8_t bank_{}, directory_bank_{};
     Stage stage_{Stage::wait};
     TimestampUs trim_changed_at_{};
     bool trim_save_pending_{};
-    bool pending_{}, loaded_{}, writable_{}, dirty_{}, changed_{}, switch_after_{},
-        directory_write_{};
+    bool loaded_{}, writable_{}, dirty_{}, changed_{}, switch_after_{};
     bool directory_valid_{}, directory_empty_{true}, scan_empty_{true};
     bool slot_empty_{true};
     bool resettable_{}, directory_damaged_{}, slot_damaged_{};
-    bool reset_verify_{};
 };
 
 } // namespace coretx::firmware

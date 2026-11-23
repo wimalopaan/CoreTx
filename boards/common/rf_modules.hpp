@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "boards/common/crsf_client.hpp"
 #include "coretx/features.hpp"
 #include "platform/stm32f072/crsf.hpp"
 #if CORETX_A7105
@@ -32,7 +33,7 @@ struct ExternalRFModules {
 };
 
 template <typename Io, typename Assignment> struct ExternalRFModules<Io, Assignment, true> {
-    using ExternalRFModule = Crsf<Io, Assignment>;
+    using ExternalRFModule = Crsf<Io, Assignment, CrsfClient>;
 };
 
 template <typename Io, typename Assignment> struct RfModules : InternalRFModules<Io, Assignment> {

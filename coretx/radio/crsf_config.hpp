@@ -196,13 +196,26 @@ struct Device {
     std::uint8_t name_length{};
 };
 
-class Client {
+// Capacity and remote-link timing of a client; the firmware derives them from its CMake options.
+struct Limits {
+    // IDs 0..parameter_ids-1 fit the tree tables; each ID costs five bytes of RAM.
+    std::size_t parameter_ids{256};
+    std::size_t cache_bytes{1280};
+    // Read timeout and repetitions for devices behind the RF link; the TX module keeps 500 ms / 2.
+    std::uint32_t remote_timeout_ms{1000};
+    std::uint8_t remote_retries{9};
+};
+
+template <Limits L> class BasicClient {
   public:
     inline static constexpr std::size_t maximum_devices = 4;
     inline static constexpr std::size_t cache_slots = 16;
-    inline static constexpr std::size_t cache_bytes = 1280;
+    inline static constexpr std::size_t parameter_ids = L.parameter_ids;
+    inline static constexpr std::size_t cache_bytes = L.cache_bytes;
     inline static constexpr std::size_t maximum_parameter_bytes = 256;
     inline static constexpr std::size_t maximum_chunks_bytes = 512;
+    static_assert((parameter_ids > 0) && (parameter_ids <= 256), "CRSF IDs are one byte");
+    static_assert(cache_bytes >= maximum_parameter_bytes, "the cache must hold one parameter");
 
     void open(const TimestampUs now) noexcept {
         close();
@@ -348,7 +361,7 @@ class Client {
     }
     void enter(const std::uint8_t id) noexcept {
         if ((mode_ != Mode::parameters) || (writing_ || write_pending_) ||
-            (command_ != Command::idle) || (error_ == Error::link))
+            (command_ != Command::idle) || (error_ == Error::link) || (id >= parameter_ids))
             return;
         focus_ = id;
         window(0);
@@ -480,8 +493,12 @@ class Client {
         }
         if (waiting_ && ((now - requested_at_) >= timeout())) {
             waiting_ = false;
-            if (!writing_ && (retry_ < 2)) {
+            // An unacknowledged value write is not sent again; its parameter is read back
+            // instead (same timeout and retries as reads) and the reply verifies the value.
+            if ((!writing_ || (command_ == Command::idle)) && (retry_ < retries())) {
                 ++retry_;
+            } else if (!writing_ && (loading_ == 0) && !legacy_ && (total_ >= parameter_ids)) {
+                finish_error(Error::capacity);
             } else if (!writing_ && (loading_ == 0) && !legacy_) {
                 legacy_ = true;
                 legacy_next_ = 1;
@@ -546,7 +563,7 @@ class Client {
             if (id == 0xFFFF)
                 return 0;
             loading_ = static_cast<std::uint8_t>(id);
-        } else if (chunk_ == 0)
+        } else if ((chunk_ == 0) && ((retry_ == 0) || (command_ != Command::idle)))
             return 0;
         frame[5] = loading_;
         frame[6] = chunk_;
@@ -627,6 +644,10 @@ class Client {
                 finish_error(Error::malformed);
                 return;
             }
+            if (total_ >= parameter_ids) {
+                finish_error(Error::capacity);
+                return;
+            }
             flags_[0] = loaded_flag | CRSF_FOLDER;
             legacy_next_ = loading_ == 0 ? 1U : std::uint16_t{total_} + 1U;
             legacy_ = true;
@@ -663,6 +684,12 @@ class Client {
         if (!legacy_ && (loading_ != 0) &&
             ((entry->parent == loading_) || (entry->parent == 0xFF))) {
             finish_error(Error::malformed);
+            return;
+        }
+        if ((!legacy_ && (loading_ != 0) && (entry->parent >= parameter_ids)) ||
+            std::any_of(entry->children.begin(), entry->children.end(),
+                        [](const auto child) { return child >= parameter_ids; })) {
+            finish_error(Error::capacity);
             return;
         }
         if (legacy_) {
@@ -729,8 +756,23 @@ class Client {
         set_error(error, parameter);
         return false;
     }
+    // Parameter read timeouts. Only the TX module answers over the wire: 0.5 s per request,
+    // 3 requests. Every other device (receiver, ...) answers over the RF link, where replies wait
+    // for telemetry slots and are often lost: each request is repeated after
+    // Limits::remote_timeout_ms (firmware: CORETX_CRSF_REMOTE_TIMEOUT_MS, default 1 s), up to
+    // Limits::remote_retries times (CORETX_CRSF_REMOTE_RETRIES, default 9), so a missing reply is
+    // reported only after 10 unanswered requests (10 s).
+    // Late replies to an earlier request are still accepted. Writes are never repeated: a missing
+    // write acknowledgement starts read-backs of the parameter with the same timeout and retries,
+    // and the read value must match the written one.
+    [[nodiscard]] bool remote() const noexcept {
+        return destination_ != CRSF_ADDRESS_CRSF_TRANSMITTER;
+    }
     [[nodiscard]] DurationUs timeout() const noexcept {
-        return destination_ == CRSF_ADDRESS_CRSF_RECEIVER ? 1'000'000_us : 500'000_us;
+        return remote() ? DurationUs{L.remote_timeout_ms * 1'000U} : 500'000_us;
+    }
+    [[nodiscard]] std::uint8_t retries() const noexcept {
+        return remote() ? L.remote_retries : std::uint8_t{2};
     }
     void reset_tree() noexcept {
         folder_only_ = false;
@@ -778,9 +820,9 @@ class Client {
     }
     [[nodiscard]] bool set_children(const std::uint8_t folder,
                                     const std::span<const std::uint8_t> children) noexcept {
-        std::array<std::uint8_t, 32> seen{};
+        std::array<std::uint8_t, (parameter_ids + 7) / 8> seen{};
         for (const auto child : children) {
-            if ((child == 0) || (child == folder) ||
+            if ((child == 0) || (child >= parameter_ids) || (child == folder) ||
                 ((seen[child / 8U] & (1U << (child % 8U))) != 0) ||
                 (member(child) && (parent_[child] != folder)))
                 return false;
@@ -1061,15 +1103,15 @@ class Client {
     }
 
     // Complete tree metadata survives cache eviction; links are indexed by wire parameter ID.
-    std::array<std::uint8_t, 256> parent_{}; // Parent folder ID; 0 denotes the root.
-    std::array<std::uint8_t, 256> first_{};  // First child ID; 0 denotes an empty child list.
-    std::array<std::uint8_t, 256> next_{};   // Next sibling ID in device order; 0 ends the list.
+    std::array<std::uint8_t, parameter_ids> parent_{}; // Parent folder ID; 0 denotes the root.
+    std::array<std::uint8_t, parameter_ids> first_{};  // First child ID; 0: empty child list.
+    std::array<std::uint8_t, parameter_ids> next_{};   // Next sibling ID in device order; 0 ends.
     // Type and loaded/hidden/failed state; loaded does not imply a resident cache entry.
-    std::array<std::uint8_t, 256> flags_{};
+    std::array<std::uint8_t, parameter_ids> flags_{};
     // Folder IDs in BFS discovery order; completed entries remain here but are skipped.
-    std::array<std::uint8_t, 256> queue_{};
+    std::array<std::uint8_t, parameter_ids> queue_{};
     // One bit per ID: already linked into the tree, independently of its loading state.
-    std::array<std::uint8_t, 32> members_{};
+    std::array<std::uint8_t, (parameter_ids + 7) / 8> members_{};
     // Cache directory: parameter ID, byte offset and length within pool_.
     std::array<Slot, cache_slots> slots_{};
     // Evictable raw definitions; folder child lists live in the tree links instead.
@@ -1118,6 +1160,6 @@ class Client {
     bool write_pending_{};
 };
 
-static_assert(sizeof(Client) <= 4096);
+// The table and cache sizes are configurable; the firmware link checks the RAM budget.
 
 } // namespace coretx::crsf::config

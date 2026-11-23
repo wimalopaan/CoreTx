@@ -166,6 +166,25 @@ void journal() {
             CHECK(!reboot.writable() && (reboot.status() == fw::RadioStorageStatus::invalid));
     }
 }
+void newer_first_slot() {
+    struct Scenario {};
+    using Test = test::FakeApplication<Scenario, MemoryState, Memory>;
+    Test::reset();
+    auto &memory = Test::context;
+    InputSetup older{features::i6s};
+    InputSetup newer{features::i6s};
+    newer.modes[4] = InputMode::pot_detent;
+    const auto first = fw::input_storage::encode(newer, 2);
+    const auto second = fw::input_storage::encode(older, 1);
+    const auto base = fw::input_storage::base_address;
+    std::copy(first.begin(), first.end(), memory.bytes.begin() + base);
+    std::copy(second.begin(), second.end(), memory.bytes.begin() + base + 128);
+    // Slot 1 is decoded last; the newer slot 0 has to be read again.
+    fw::InputStorage<Test::Board> store{features::i6s};
+    service(store);
+    CHECK((store.status() == fw::RadioStorageStatus::ready) && store.writable());
+    CHECK(store.setup() == newer);
+}
 void recovery() {
     struct Scenario {};
     using Test = test::FakeApplication<Scenario, MemoryState, Memory>;
@@ -286,7 +305,7 @@ void input_rf_ui_interlocks() {
 void decoding() {
     for (const auto kind : {SourceKind::analog, SourceKind::switch_position}) {
         ui::Framebuffer display, expected;
-        ui::detail::draw_source(display, 0, 0, {kind, 255, false}, true);
+        ui::detail::draw_source(display, 0, 0, {kind, 255, false}, true, &fw::switch_names);
         expected.text(0, 0, "?");
         CHECK(display.bytes() == expected.bytes());
     }
@@ -808,7 +827,8 @@ void extended_analog_sources() {
                     constexpr std::array<std::string_view, 5> names{"SWI", "SWJ", "SWK", "SWL",
                                                                     "SWM"};
                     ui::Framebuffer actual, expected;
-                    ui::detail::draw_source(actual, 0, 0, model.inputs[0].source, true);
+                    ui::detail::draw_source(actual, 0, 0, model.inputs[0].source, true,
+                                            &fw::switch_names);
                     expected.text(0, 0, names[extra]);
                     CHECK(actual.bytes() == expected.bytes());
                 }
@@ -911,6 +931,7 @@ int main() {
     setup_rc_hold();
     journal();
     recovery();
+    newer_first_slot();
     input_rf_ui_interlocks();
     decoding();
     hardware();

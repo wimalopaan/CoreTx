@@ -304,7 +304,7 @@ bool disabled_safety() {
 
     Test::reset_registers();
     auto &io = Test::registers;
-    fw::external_module_off<Test::Io>();
+    fw::external_module_off<Test::Io, coretx::firmware::Hardware>();
     fw::internal_front_end_off<Test::Io, pins>();
     return (io.spi_accesses == 0) && !io.glitch &&
            ((io.cell(GPIOE_BASE + offsetof(GPIO_TypeDef, ODR)) & 0x300U) == 0x300U) &&
@@ -611,7 +611,7 @@ bool timer_wrap_delay_and_stop() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
     using InterruptIo = InterruptBackend<Test>;
-    using TestTimer = fw::RadioTimer<InterruptIo, TestInterruptGuard>;
+    using TestTimer = fw::RadioTimer<InterruptIo, TestInterruptGuard, coretx::firmware::Hardware>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -697,7 +697,7 @@ bool interrupt_driven_radio() {
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
     using Driver = fw::A7105<Test::Io, pins>;
     using InterruptIo = InterruptBackend<Test>;
-    using TestTimer = fw::RadioTimer<InterruptIo, TestInterruptGuard>;
+    using TestTimer = fw::RadioTimer<InterruptIo, TestInterruptGuard, coretx::firmware::Hardware>;
     using InterruptBus = TimedBus<Test>;
 
     for (const std::uint32_t base : {0U, 0xFFFF0000U}) {
@@ -765,7 +765,7 @@ bool interrupt_driven_binding(const std::uint32_t access_cost = 0,
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
     using Driver = fw::A7105<Test::Io, pins>;
     using InterruptIo = InterruptBackend<Test>;
-    using TestTimer = fw::RadioTimer<InterruptIo, TestInterruptGuard>;
+    using TestTimer = fw::RadioTimer<InterruptIo, TestInterruptGuard, coretx::firmware::Hardware>;
     using InterruptBus = TimedBus<Test>;
 
     Test::reset_registers();

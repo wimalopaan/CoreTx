@@ -16,19 +16,23 @@ namespace {
 
 namespace hw = coretx::firmware;
 namespace chip = coretx::firmware::stm32f072;
-using adc_reg = hw::adc_registers;
+using adc_reg = chip::AdcTraits<hw::Hardware::adc>;
+struct adc_dma_registers : chip::DmaTraits<hw::Hardware::adc_dma> {
+    static constexpr auto configuration = hw::adc_dma_configuration;
+};
 namespace reg = chip::registers;
 struct MetadataIo;
-using CoherentAdc = hw::Adc<MetadataIo, hw::gimbal_inputs, true>;
-using StockAdc = hw::Adc<MetadataIo, hw::stock_inputs>;
+using CoherentAdc = hw::Adc<MetadataIo, coretx::firmware::Hardware, hw::gimbal_inputs, true>;
+using StockAdc = hw::Adc<MetadataIo, coretx::firmware::Hardware, hw::stock_inputs>;
 using LcdError = coretx::firmware::LcdError;
-using StorageProbe = hw::StorageProbe<MetadataIo>;
-using Eeprom = hw::Eeprom<MetadataIo>;
+using StorageProbe = hw::StorageProbe<MetadataIo, coretx::firmware::Hardware>;
+using Eeprom = hw::Eeprom<MetadataIo, coretx::firmware::Hardware>;
 
 template <typename Test> struct TestMemory {
     TestMemory() = delete;
     inline static constexpr auto page_size = Eeprom::page_size;
-    inline static constinit hw::detail::EepromState<typename Test::Io> driver{};
+    inline static constinit hw::detail::EepromState<typename Test::Io, coretx::firmware::Hardware>
+        driver{};
 
     static void reset() noexcept { driver = {}; }
     static void select(const std::uint8_t address) noexcept { driver.select(address); }
@@ -138,8 +142,8 @@ struct FakeRegisters {
     [[nodiscard]] constexpr std::uint32_t now_us() { return read(reg::tim2_cnt); }
 
     constexpr void write(const std::uintptr_t address, const std::uint32_t value) {
-        if (address == hw::adc_dma_registers::ifcr) {
-            cell(hw::adc_dma_registers::isr) &=
+        if (address == adc_dma_registers::ifcr) {
+            cell(adc_dma_registers::isr) &=
                 (value & DMA_IFCR_CGIF1) != 0
                     ? ~std::uint32_t{DMA_ISR_GIF1 | DMA_ISR_TCIF1 | DMA_ISR_HTIF1 | DMA_ISR_TEIF1}
                     : ~value;
@@ -163,7 +167,7 @@ struct FakeRegisters {
             }
         }
         cell(address) = value;
-        if (address == hw::adc_dma_registers::cndtr) {
+        if (address == adc_dma_registers::cndtr) {
             dma_length = value;
         }
         if (address == reg::rcc_cr) {
@@ -234,31 +238,31 @@ struct FakeRegisters {
         }
     }
     constexpr void write_address(const std::uintptr_t address, std::uint16_t *const destination) {
-        if (address != hw::adc_dma_registers::cmar) {
+        if (address != adc_dma_registers::cmar) {
             std::abort();
         }
         dma_destination = destination;
     }
 
     constexpr void advance_dma() {
-        if (((cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) == 0) ||
+        if (((cell(adc_dma_registers::ccr) & DMA_CCR_EN) == 0) ||
             ((cell(adc_reg::cr) & ADC_CR_ADSTART) == 0)) {
             return;
         }
         const auto count = static_cast<std::size_t>(std::popcount(cell(adc_reg::chselr)));
-        const auto remaining = cell(hw::adc_dma_registers::cndtr);
+        const auto remaining = cell(adc_dma_registers::cndtr);
         if ((remaining == 0) || (remaining > dma_length)) {
             return;
         }
         dma_destination[dma_length - remaining] = input[converted++ % count];
-        if (--cell(hw::adc_dma_registers::cndtr) == (dma_length / 2)) {
-            cell(hw::adc_dma_registers::isr) |= DMA_ISR_HTIF1;
+        if (--cell(adc_dma_registers::cndtr) == (dma_length / 2)) {
+            cell(adc_dma_registers::isr) |= DMA_ISR_HTIF1;
             cell(adc_reg::isr) |= ADC_ISR_EOSEQ;
         }
-        if (cell(hw::adc_dma_registers::cndtr) == 0) {
-            cell(hw::adc_dma_registers::isr) |= DMA_ISR_TCIF1;
+        if (cell(adc_dma_registers::cndtr) == 0) {
+            cell(adc_dma_registers::isr) |= DMA_ISR_TCIF1;
             cell(adc_reg::isr) |= ADC_ISR_EOSEQ;
-            cell(hw::adc_dma_registers::cndtr) = static_cast<std::uint32_t>(dma_length);
+            cell(adc_dma_registers::cndtr) = static_cast<std::uint32_t>(dma_length);
         }
     }
 
@@ -279,7 +283,7 @@ struct FakeRegisters {
         cell(reg::tim2_cnt) += copy_delay;
         copy_delay = 0;
         if (copy_error) {
-            cell(hw::adc_dma_registers::isr) |= DMA_ISR_TEIF1;
+            cell(adc_dma_registers::isr) |= DMA_ISR_TEIF1;
         }
         return *source;
     }
@@ -301,7 +305,7 @@ template <typename Adc, typename Registers> hw::AdcError initialize_adc(Register
 bool adc_scans() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
-    using Adc = hw::Adc<Test::Io, hw::gimbal_inputs, true>;
+    using Adc = hw::Adc<Test::Io, coretx::firmware::Hardware, hw::gimbal_inputs, true>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -311,10 +315,9 @@ bool adc_scans() {
     if ((initialize_adc<Adc>(io) != hw::AdcError::none) || io.calibration_while_enabled ||
         ((io.cell(GPIOA_BASE + offsetof(GPIO_TypeDef, MODER)) & 0xFFFFFF00U) != 0xAAAAAA00U) ||
         (io.cell(adc_reg::cfgr1) != (ADC_CFGR1_DMAEN | ADC_CFGR1_DMACFG | ADC_CFGR1_CONT)) ||
-        (io.cell(hw::adc_dma_registers::cpar) != adc_reg::dr) ||
+        (io.cell(adc_dma_registers::cpar) != adc_reg::dr) ||
         ((io.cell(reg::rcc_ahbenr) & RCC_AHBENR_DMA1EN) == 0) ||
-        (io.cell(hw::adc_dma_registers::ccr) != hw::adc_dma_registers::configuration) ||
-        Adc::valid()) {
+        (io.cell(adc_dma_registers::ccr) != adc_dma_registers::configuration) || Adc::valid()) {
         return false;
     }
     constexpr std::uint32_t start = 0xFFFFFFF0U;
@@ -329,7 +332,7 @@ bool adc_scans() {
     }
     const CoherentAdc::Samples first{0, 1000, 2048, 4095};
     if ((Adc::samples() != first) || (io.cpu_dr_reads != 0) ||
-        ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) == 0))
+        ((io.cell(adc_dma_registers::ccr) & DMA_CCR_EN) == 0))
         return false;
     if ((Adc::service(coretx::TimestampUs{start + 100U}) != hw::ScanEvent::pending) ||
         ((io.cell(adc_reg::cr) & ADC_CR_ADSTART) == 0)) {
@@ -349,8 +352,8 @@ bool isolated_adc_contexts() {
     using FirstTest = coretx::test::RegisterFixture<FirstTestScenario, FakeRegisters>;
     struct SecondTestScenario {};
     using SecondTest = coretx::test::RegisterFixture<SecondTestScenario, FakeRegisters>;
-    using First = hw::Adc<FirstTest::Io, hw::gimbal_inputs, true>;
-    using Second = hw::Adc<SecondTest::Io, hw::gimbal_inputs, true>;
+    using First = hw::Adc<FirstTest::Io, coretx::firmware::Hardware, hw::gimbal_inputs, true>;
+    using Second = hw::Adc<SecondTest::Io, coretx::firmware::Hardware, hw::gimbal_inputs, true>;
     FirstTest::reset_registers();
     SecondTest::reset_registers();
     auto &first_io = FirstTest::registers;
@@ -372,7 +375,7 @@ bool isolated_adc_contexts() {
         (Second::samples()[3] != 3000)) {
         return false;
     }
-    first_io.cell(hw::adc_dma_registers::isr) |= DMA_ISR_TEIF1;
+    first_io.cell(adc_dma_registers::isr) |= DMA_ISR_TEIF1;
     return (First::service(coretx::TimestampUs{100}) == hw::ScanEvent::failed) &&
            (Second::service(coretx::TimestampUs{100}) == hw::ScanEvent::pending) &&
            (Second::error() == hw::AdcError::none) && Second::valid();
@@ -384,11 +387,12 @@ template <bool Coherent> struct DelayedAdcScenario {};
 
 template <bool Coherent = true> bool adc_failures() {
     using Test = coretx::test::RegisterFixture<AdcFailureScenario<Coherent>, FakeRegisters>;
-    using Adc = hw::Adc<typename Test::Io, hw::gimbal_inputs, Coherent>;
+    using Adc = hw::Adc<typename Test::Io, coretx::firmware::Hardware, hw::gimbal_inputs, Coherent>;
 
     using UninitializedTest =
         coretx::test::RegisterFixture<UninitializedAdcScenario<Coherent>, FakeRegisters>;
-    using Uninitialized = hw::Adc<typename UninitializedTest::Io, hw::gimbal_inputs, Coherent>;
+    using Uninitialized = hw::Adc<typename UninitializedTest::Io, coretx::firmware::Hardware,
+                                  hw::gimbal_inputs, Coherent>;
     UninitializedTest::reset_registers();
 
     if ((Uninitialized::error() != hw::AdcError::not_initialized) ||
@@ -415,16 +419,16 @@ template <bool Coherent = true> bool adc_failures() {
         if (failure == hw::AdcError::timeout) {
             io.paused = true;
         } else if (failure == hw::AdcError::dma) {
-            io.cell(hw::adc_dma_registers::isr) |= DMA_ISR_TEIF1;
+            io.cell(adc_dma_registers::isr) |= DMA_ISR_TEIF1;
         } else {
             io.paused = true;
-            io.cell(hw::adc_dma_registers::cndtr) = 9;
+            io.cell(adc_dma_registers::cndtr) = 9;
         }
         if ((Adc::service(coretx::TimestampUs{failure == hw::AdcError::timeout
                                                   ? 100 + CoherentAdc::scan_timeout_us.count()
                                                   : 110}) != hw::ScanEvent::failed) ||
             (Adc::error() != failure) || Adc::valid() ||
-            ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) != 0)) {
+            ((io.cell(adc_dma_registers::ccr) & DMA_CCR_EN) != 0)) {
             return false;
         }
     }
@@ -434,7 +438,7 @@ template <bool Coherent = true> bool adc_failures() {
 bool single_buffer_scans() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
-    using Adc = hw::Adc<Test::Io, hw::gimbal_inputs, false>;
+    using Adc = hw::Adc<Test::Io, coretx::firmware::Hardware, hw::gimbal_inputs, false>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -473,7 +477,7 @@ bool single_buffer_scans() {
         (Adc::service(coretx::TimestampUs{start + 5'100U}) != hw::ScanEvent::complete) ||
         (Adc::samples() != CoherentAdc::Samples{0, 1000, 345, 456}) || (Adc::discarded() != 0) ||
         !Adc::valid() || (io.cpu_dr_reads != 0) ||
-        ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) == 0)) {
+        ((io.cell(adc_dma_registers::ccr) & DMA_CCR_EN) == 0)) {
         return false;
     }
     io.advance_on_each_read = 0;
@@ -487,7 +491,7 @@ bool single_buffer_scans() {
 
 template <bool Coherent> bool delayed_adc_service() {
     using Test = coretx::test::RegisterFixture<DelayedAdcScenario<Coherent>, FakeRegisters>;
-    using Adc = hw::Adc<typename Test::Io, hw::stock_inputs, Coherent>;
+    using Adc = hw::Adc<typename Test::Io, coretx::firmware::Hardware, hw::stock_inputs, Coherent>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -516,13 +520,13 @@ template <bool Coherent> bool delayed_adc_service() {
            (Adc::service(coretx::TimestampUs{stopped + Adc::scan_timeout_us.count()}) ==
             hw::ScanEvent::failed) &&
            (Adc::error() == hw::AdcError::timeout) && !Adc::valid() &&
-           ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) == 0);
+           ((io.cell(adc_dma_registers::ccr) & DMA_CCR_EN) == 0);
 }
 
 bool dma_autonomous_scans() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
-    using Adc = hw::Adc<Test::Io, hw::gimbal_inputs, true>;
+    using Adc = hw::Adc<Test::Io, coretx::firmware::Hardware, hw::gimbal_inputs, true>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -542,7 +546,7 @@ bool dma_autonomous_scans() {
         }
         if ((Adc::service(coretx::TimestampUs{now}) != hw::ScanEvent::complete) ||
             (Adc::samples()[0] != io.input[0]) || (Adc::samples()[3] != 4095) ||
-            (io.cell(hw::adc_dma_registers::isr) != 0) || (io.cpu_dr_reads != 0)) {
+            (io.cell(adc_dma_registers::isr) != 0) || (io.cpu_dr_reads != 0)) {
             return false;
         }
         io.input[0] = 999;
@@ -553,7 +557,7 @@ bool dma_autonomous_scans() {
     }
     // Reinitialization must disable the old transfer before rebinding its buffer.
     if ((initialize_adc<Adc>(io) != hw::AdcError::none) || Adc::valid() ||
-        ((io.cell(hw::adc_dma_registers::ccr) & DMA_CCR_EN) != 0)) {
+        ((io.cell(adc_dma_registers::ccr) & DMA_CCR_EN) != 0)) {
         return false;
     }
     return true;
@@ -562,7 +566,7 @@ bool dma_autonomous_scans() {
 bool dma_incomplete_sequence() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
-    using Adc = hw::Adc<Test::Io, hw::gimbal_inputs, true>;
+    using Adc = hw::Adc<Test::Io, coretx::firmware::Hardware, hw::gimbal_inputs, true>;
 
     for (std::size_t kind = 0; kind < 4; ++kind) {
         Test::reset_registers();
@@ -604,7 +608,7 @@ bool dma_incomplete_sequence() {
 bool dma_latest_half_and_recovery() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
-    using Adc = hw::Adc<Test::Io, hw::gimbal_inputs, true>;
+    using Adc = hw::Adc<Test::Io, coretx::firmware::Hardware, hw::gimbal_inputs, true>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -661,7 +665,7 @@ inline constexpr auto extended_inputs = [] {
 bool expandable_scan() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
-    using Adc = hw::Adc<Test::Io, extended_inputs, true>;
+    using Adc = hw::Adc<Test::Io, coretx::firmware::Hardware, extended_inputs, true>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -680,7 +684,8 @@ bool expandable_scan() {
 bool stock_scan() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
-    using Adc = hw::Adc<Test::Io, hw::stock_inputs, hw::coherent_adc_snapshots>;
+    using Adc =
+        hw::Adc<Test::Io, coretx::firmware::Hardware, hw::stock_inputs, hw::coherent_adc_snapshots>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -714,7 +719,8 @@ bool stock_scan() {
 bool sender_battery_scan() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
-    using Adc = hw::Adc<Test::Io, hw::sender_inputs, hw::coherent_adc_snapshots>;
+    using Adc = hw::Adc<Test::Io, coretx::firmware::Hardware, hw::sender_inputs,
+                        hw::coherent_adc_snapshots>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -1538,7 +1544,8 @@ constexpr bool system_info_rendering() {
 bool adc_deferred_enable() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
-    using Adc = hw::Adc<Test::Io, hw::stock_inputs, hw::coherent_adc_snapshots>;
+    using Adc =
+        hw::Adc<Test::Io, coretx::firmware::Hardware, hw::stock_inputs, hw::coherent_adc_snapshots>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -1565,7 +1572,7 @@ bool lcd_irregular_timing() {
     auto &io = Test::registers;
     io.timer_stopped = true;
     io.cell(reg::tim2_cnt) = 0xFFFFF000U;
-    using Display = coretx::firmware::Lcd<Test::Io>;
+    using Display = coretx::firmware::Lcd<Test::Io, coretx::firmware::Hardware>;
     coretx::ui::Framebuffer display{};
     if ((Display::service(display) != LcdError::not_initialized) ||
         (Display::initialize() != LcdError::none)) {
@@ -1607,7 +1614,7 @@ bool lcd_irregular_timing() {
 bool lcd_bounded_transfer() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, FakeRegisters>;
-    using Display = coretx::firmware::Lcd<Test::Io>;
+    using Display = coretx::firmware::Lcd<Test::Io, coretx::firmware::Hardware>;
     Test::reset_registers();
     auto &io = Test::registers;
     io.timer_stopped = true;
@@ -1654,7 +1661,7 @@ bool lcd_bus_and_board() {
         (io.cell(GPIOB_BASE + offsetof(GPIO_TypeDef, MODER)) != 0xAAAAAAAAU)) {
         return false;
     }
-    using Display = coretx::firmware::Lcd<Test::Io>;
+    using Display = coretx::firmware::Lcd<Test::Io, coretx::firmware::Hardware>;
     if ((Display::initialize() != LcdError::none) ||
         ((io.cell(GPIOB_BASE + offsetof(GPIO_TypeDef, MODER)) & GPIO_MODER_MODER15) !=
          (0xAAAAAAAAU & GPIO_MODER_MODER15)) ||
@@ -1725,8 +1732,8 @@ bool cooperative_adc_lcd() {
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
     Test::reset_registers();
     auto &io = Test::registers;
-    using Adc = hw::Adc<Test::Io, hw::stock_inputs>;
-    using Display = coretx::firmware::Lcd<Test::Io>;
+    using Adc = hw::Adc<Test::Io, coretx::firmware::Hardware, hw::stock_inputs>;
+    using Display = coretx::firmware::Lcd<Test::Io, coretx::firmware::Hardware>;
     coretx::ui::Framebuffer display{};
     if ((Display::initialize() != LcdError::none) || (Adc::initialize(4) != hw::AdcError::none)) {
         return false;
@@ -1754,7 +1761,7 @@ struct I2cRegisters : FakeRegisters {
     bool invalid_transfer{};
 
     constexpr void write(const std::uintptr_t address, const std::uint32_t value) {
-        using i2c = hw::i2c_registers;
+        using i2c = chip::I2cTraits<hw::Hardware::storage.peripheral>;
         if (address == i2c::icr) {
             cell(i2c::isr) &= ~value;
             return;
@@ -1784,9 +1791,9 @@ struct I2cRegisters : FakeRegisters {
 bool storage_detection() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, I2cRegisters>;
-    using Probe = hw::StorageProbe<Test::Io>;
+    using Probe = hw::StorageProbe<Test::Io, coretx::firmware::Hardware>;
 
-    using i2c = hw::i2c_registers;
+    using i2c = chip::I2cTraits<hw::Hardware::storage.peripheral>;
     for (const auto responders : std::array<std::uint8_t, 4>{0, 1, 0x80, 0xA5}) {
         Test::reset_registers();
         auto &io = Test::registers;
@@ -1870,7 +1877,7 @@ bool storage_detection() {
 bool storage_errors() {
     struct UninitializedScenario {};
     using UninitializedTest = coretx::test::RegisterFixture<UninitializedScenario, I2cRegisters>;
-    using Uninitialized = hw::StorageProbe<UninitializedTest::Io>;
+    using Uninitialized = hw::StorageProbe<UninitializedTest::Io, coretx::firmware::Hardware>;
     UninitializedTest::reset_registers();
     const auto untouched = UninitializedTest::registers.cell_count;
     Uninitialized::service(coretx::TimestampUs{0});
@@ -1880,9 +1887,9 @@ bool storage_errors() {
 
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, I2cRegisters>;
-    using Probe = hw::StorageProbe<Test::Io>;
+    using Probe = hw::StorageProbe<Test::Io, coretx::firmware::Hardware>;
 
-    using i2c = hw::i2c_registers;
+    using i2c = chip::I2cTraits<hw::Hardware::storage.peripheral>;
     for (const auto flag :
          std::array<std::uint32_t, 5>{I2C_ISR_BUSY, 0, I2C_ISR_BERR, I2C_ISR_ARLO, I2C_ISR_OVR}) {
         Test::reset_registers();
@@ -1957,7 +1964,7 @@ struct EepromRegisters : FakeRegisters {
     constexpr EepromRegisters() { memory.fill(0xFF); }
 
     constexpr std::uint32_t read(const std::uintptr_t address) {
-        using i2c = hw::i2c_registers;
+        using i2c = chip::I2cTraits<hw::Hardware::storage.peripheral>;
         if (address == i2c::rxdr) {
             const auto value = memory[pointer++];
             cell(i2c::isr) = --remaining == 0 ? I2C_ISR_STOPF : I2C_ISR_BUSY | I2C_ISR_RXNE;
@@ -1967,7 +1974,7 @@ struct EepromRegisters : FakeRegisters {
     }
 
     constexpr void write(const std::uintptr_t address, const std::uint32_t value) {
-        using i2c = hw::i2c_registers;
+        using i2c = chip::I2cTraits<hw::Hardware::storage.peripheral>;
         if (address == i2c::icr) {
             cell(i2c::isr) &= ~value;
             return;
@@ -2034,7 +2041,7 @@ struct PersistenceFixture : coretx::test::RegisterFixture<Scenario, EepromRegist
     using Base = coretx::test::RegisterFixture<Scenario, EepromRegisters>;
     using Memory = TestMemory<PersistenceFixture>;
     using Storage = hw::CalibrationStorage<Memory>;
-    using Probe = hw::StorageProbe<typename Base::Io>;
+    using Probe = hw::StorageProbe<typename Base::Io, coretx::firmware::Hardware>;
 
     static void reset() noexcept {
         Base::reset_registers();
@@ -2042,13 +2049,16 @@ struct PersistenceFixture : coretx::test::RegisterFixture<Scenario, EepromRegist
     }
 };
 
+coretx::Model calibration_workspace{};
+
 template <typename Probe, typename Storage>
 bool run_persistence(EepromRegisters &io, Storage &storage, hw::Diagnostics &diagnostics) {
     for (std::size_t step = 0; step < 30'000; ++step) {
         io.cell(reg::tim2_cnt) += 100;
         const auto now = io.now_us();
         Probe::service(coretx::TimestampUs{now});
-        storage.service(coretx::TimestampUs{now}, Probe::result(), diagnostics);
+        storage.service(coretx::TimestampUs{now}, Probe::result(), diagnostics,
+                        calibration_workspace);
         if (!storage.busy()) {
             return true;
         }
@@ -2223,7 +2233,8 @@ bool persistence_recovery() {
         apply_calibration(diagnostics, storage, 600);
         for (std::size_t step = 0; (io.payload_writes < cut) && (step < 30'000); ++step) {
             io.cell(reg::tim2_cnt) += 100;
-            storage.service(coretx::TimestampUs{io.now_us()}, Probe::result(), diagnostics);
+            storage.service(coretx::TimestampUs{io.now_us()}, Probe::result(), diagnostics,
+                            calibration_workspace);
         }
         struct RebootTestScenario {};
         using RebootTest = PersistenceFixture<RebootTestScenario>;
@@ -2279,12 +2290,57 @@ bool persistence_recovery() {
            !invalid_diagnostics.calibrated() && (invalid_io.payload_writes == 0);
 }
 
+bool persistence_slot_selection() {
+    hw::Diagnostics calibrated{};
+    calibrate(calibrated);
+    coretx::storage::State newer{hw::diagnostic_model, calibrated.setup()};
+    newer.model.crsf_dashboard = !hw::diagnostic_model.crsf_dashboard;
+    coretx::storage::State older{hw::diagnostic_model, calibrated.setup()};
+    older.setup.calibration[0].minimum = 600;
+    coretx::storage::Record first{};
+    coretx::storage::Record second{};
+    if (!coretx::storage::encode(newer, 9, first) || !coretx::storage::encode(older, 8, second))
+        return false;
+    // Slot 1 is decoded last, so a winning slot 0 must be read again into the shared buffer.
+    struct NewerFirstScenario {};
+    using NewerFirst = PersistenceFixture<NewerFirstScenario>;
+    NewerFirst::reset();
+    std::copy(first.begin(), first.end(), NewerFirst::registers.memory.begin());
+    std::copy(second.begin(), second.end(),
+              NewerFirst::registers.memory.begin() + coretx::storage::slot_size);
+    NewerFirst::Storage storage{};
+    hw::Diagnostics restored{};
+    NewerFirst::Probe::initialize();
+    if (!run_persistence<NewerFirst::Probe>(NewerFirst::registers, storage, restored) ||
+        (storage.state() != hw::CalibrationStorageState::loaded) || (storage.generation() != 9) ||
+        !storage.legacy_loaded() || (restored.setup().calibration[0].minimum == 600) ||
+        (calibration_workspace.crsf_dashboard != newer.model.crsf_dashboard)) {
+        return false;
+    }
+    // Equal generations with different contents stay ambiguous.
+    if (!coretx::storage::encode(older, 9, second))
+        return false;
+    struct AmbiguousScenario {};
+    using Ambiguous = PersistenceFixture<AmbiguousScenario>;
+    Ambiguous::reset();
+    std::copy(first.begin(), first.end(), Ambiguous::registers.memory.begin());
+    std::copy(second.begin(), second.end(),
+              Ambiguous::registers.memory.begin() + coretx::storage::slot_size);
+    Ambiguous::Storage ambiguous{};
+    hw::Diagnostics untouched{};
+    Ambiguous::Probe::initialize();
+    return run_persistence<Ambiguous::Probe>(Ambiguous::registers, ambiguous, untouched) &&
+           (ambiguous.state() == hw::CalibrationStorageState::invalid) &&
+           (ambiguous.record_error() == coretx::storage::Error::generation) &&
+           !ambiguous.legacy_loaded() && !untouched.calibrated();
+}
+
 bool eeprom_transactions() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, EepromRegisters>;
     Test::reset_registers();
     auto &io = Test::registers;
-    using Memory = hw::Eeprom<Test::Io>;
+    using Memory = hw::Eeprom<Test::Io, coretx::firmware::Hardware>;
     Memory::select(0x50);
     std::array<std::uint8_t, 4> bytes{1, 2, 3, 4};
     if (Memory::write(63, bytes) || (Memory::error() != hw::I2cError::invalid_request) ||
@@ -2327,7 +2383,7 @@ bool eeprom_transactions() {
     StalledTest::reset_registers();
     auto &stalled = StalledTest::registers;
     stalled.stalled = true;
-    using Waiting = hw::Eeprom<StalledTest::Io>;
+    using Waiting = hw::Eeprom<StalledTest::Io, coretx::firmware::Hardware>;
     Waiting::select(0x50);
     if (!Waiting::read(0x1234, bytes)) {
         return false;
@@ -2337,7 +2393,8 @@ bool eeprom_transactions() {
     const auto failure = Waiting::trace();
     return !Waiting::busy() && (Waiting::error() == hw::I2cError::timeout) &&
            (failure.address == 0x1234) && (failure.position == 0) && (failure.stage == 2) &&
-           (failure.status == I2C_ISR_BUSY) && (stalled.cell(hw::i2c_registers::isr) == 0);
+           (failure.status == I2C_ISR_BUSY) &&
+           (stalled.cell(chip::I2cTraits<hw::Hardware::storage.peripheral>::isr) == 0);
 }
 
 bool persistence_format_protection() {
@@ -2440,8 +2497,8 @@ bool cooperative_persistence() {
     using Probe = IoTest::Probe;
     IoTest::Storage storage{};
     hw::Diagnostics diagnostics{};
-    using Adc = hw::Adc<Test::Io, hw::stock_inputs>;
-    using Display = coretx::firmware::Lcd<Test::Io>;
+    using Adc = hw::Adc<Test::Io, coretx::firmware::Hardware, hw::stock_inputs>;
+    using Display = coretx::firmware::Lcd<Test::Io, coretx::firmware::Hardware>;
     coretx::ui::Framebuffer display{};
     if ((Adc::initialize(4) != hw::AdcError::none) || (Display::initialize() != LcdError::none)) {
         return false;
@@ -2455,7 +2512,8 @@ bool cooperative_persistence() {
         io.cell(reg::tim2_cnt) += 100;
         const auto now = io.now_us();
         Probe::service(coretx::TimestampUs{now});
-        storage.service(coretx::TimestampUs{now}, Probe::result(), diagnostics);
+        storage.service(coretx::TimestampUs{now}, Probe::result(), diagnostics,
+                        calibration_workspace);
         const auto event = Adc::service(coretx::TimestampUs{now});
         if ((event == hw::ScanEvent::failed) || (Display::service(display) != LcdError::none)) {
             return false;
@@ -2529,6 +2587,7 @@ int main() {
         Check{"persistent_calibration", persistent_calibration},
         Check{"persistence_failures", persistence_failures},
         Check{"persistence_recovery", persistence_recovery},
+        Check{"persistence_slot_selection", persistence_slot_selection},
         Check{"persistence_format_protection", persistence_format_protection},
         Check{"cooperative_persistence", cooperative_persistence},
         Check{"system_info_rendering", system_info_rendering},

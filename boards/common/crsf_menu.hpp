@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "coretx/radio/crsf_config.hpp"
+#include "boards/common/crsf_client.hpp"
 #include "coretx/ui/input.hpp"
 #include "coretx/ui/translation.hpp"
 #include "coretx/ui/ui.hpp"
@@ -14,6 +14,16 @@ namespace tr = coretx::ui::tr;
 inline constexpr int header_y = 0;
 inline constexpr int list_y = 12;
 inline constexpr int row_height = 10;
+// Touch hit areas of the Back/OK buttons: larger than the drawn 32x10 boxes, because taps near
+// the panel edge are reported a few pixels too low or beside them.
+enum class Button : std::uint8_t { none, back, ok };
+[[nodiscard]] constexpr Button button(const std::uint8_t x, const std::uint8_t y) noexcept {
+    if (y < list_y - 1)
+        return x < 40 ? Button::back : x >= 88 ? Button::ok : Button::none;
+    if (y < 15)
+        return x < 36 ? Button::back : x >= 92 ? Button::ok : Button::none;
+    return Button::none;
+}
 inline constexpr int value_right = coretx::ui::Framebuffer::width - 1;
 inline constexpr int value_character_width = 4;
 inline constexpr int help_y = 58;
@@ -79,11 +89,11 @@ class CrsfMenu {
   public:
     [[nodiscard]] bool visible() const noexcept { return visible_; }
     [[nodiscard]] bool editing() const noexcept { return editing_; }
-    void finish_edit(coretx::crsf::config::Client &client) noexcept {
+    void finish_edit(CrsfClient &client) noexcept {
         editing_ = false;
         client.pin(0);
     }
-    void suspend(coretx::crsf::config::Client &client) noexcept {
+    void suspend(CrsfClient &client) noexcept {
         visible_ = false;
         finish_edit(client);
         if ((client.mode() != coretx::crsf::config::Mode::closed) && !client.pending_write() &&
@@ -91,25 +101,24 @@ class CrsfMenu {
             (client.error() == coretx::crsf::config::Error::none))
             client.suspend();
     }
-    void resume(coretx::crsf::config::Client &client, const TimestampUs now) noexcept {
+    void resume(CrsfClient &client, const TimestampUs now) noexcept {
         visible_ = true;
         notice_ = nullptr;
         if (client.mode() == coretx::crsf::config::Mode::closed)
             client.resume(now);
         client.window(first_);
     }
-    void open(coretx::crsf::config::Client &client, const TimestampUs now) noexcept {
+    void open(CrsfClient &client, const TimestampUs now) noexcept {
         *this = {};
         visible_ = true;
         client.open(now);
     }
-    void close(coretx::crsf::config::Client &client) noexcept {
+    void close(CrsfClient &client) noexcept {
         visible_ = false;
         editing_ = false;
         client.close();
     }
-    void handle(const Key key, coretx::crsf::config::Client &client,
-                const TimestampUs now) noexcept {
+    void handle(const Key key, CrsfClient &client, const TimestampUs now) noexcept {
         namespace cfg = coretx::crsf::config;
         if (!visible_)
             return;
@@ -214,14 +223,17 @@ class CrsfMenu {
             first_ = static_cast<std::uint8_t>(selected_ - cfg::visible_rows + 1);
         client.window(first_);
     }
-    void tap(const std::uint8_t x, const std::uint8_t y, coretx::crsf::config::Client &client,
+    void tap(const std::uint8_t x, const std::uint8_t y, CrsfClient &client,
              const TimestampUs now) noexcept {
         namespace cfg = coretx::crsf::config;
         namespace md = crsf_menu_detail;
         if (!visible_)
             return;
-        if (y < md::list_y - 1) {
-            if (x < 32) {
+        const auto button = md::button(x, y);
+        const bool confirm = editing_ || (client.command() == cfg::Command::confirmation);
+        if ((button == md::Button::back) || ((button == md::Button::ok) && confirm) ||
+            (y < md::list_y - 1)) {
+            if (button == md::Button::back) {
                 if (client.error() == cfg::Error::link) {
                     finish_edit(client);
                     client.open(now);
@@ -230,7 +242,7 @@ class CrsfMenu {
                 } else if ((client.view_mode() == cfg::Mode::parameters) ||
                            (client.command() != cfg::Command::idle))
                     handle(Key::cancel, client, now);
-            } else if ((x >= 96) && (editing_ || (client.command() == cfg::Command::confirmation)))
+            } else if ((button == md::Button::ok) && confirm)
                 handle(editing_ ? Key::ok_long : Key::ok, client, now);
             return;
         }
@@ -246,9 +258,32 @@ class CrsfMenu {
         selected_ = static_cast<std::uint8_t>(index);
         handle(Key::ok, client, now);
     }
-    void render(const coretx::crsf::config::Client &client, coretx::ui::Framebuffer &display,
-                const TimestampUs now, const bool active_header = false,
-                const char *const navigation_help = nullptr,
+    // Marks the element that tap() would activate for the current touch point.
+    void highlight(const std::uint8_t x, const std::uint8_t y, const CrsfClient &client,
+                   coretx::ui::Framebuffer &display) const noexcept {
+        namespace cfg = coretx::crsf::config;
+        namespace md = crsf_menu_detail;
+        if (!visible_)
+            return;
+        const auto button = md::button(x, y);
+        const bool confirm = editing_ || (client.command() == cfg::Command::confirmation);
+        if ((button == md::Button::back) || ((button == md::Button::ok) && confirm) ||
+            (y < md::list_y - 1)) {
+            if (button == md::Button::back)
+                display.invert(0, 0, 32, 10);
+            else if ((button == md::Button::ok) && confirm)
+                display.invert(96, 0, 32, 10);
+            return;
+        }
+        const auto row = static_cast<std::size_t>((y - (md::list_y - 1)) / md::row_height);
+        const auto count =
+            client.view_mode() == cfg::Mode::parameters ? client.count() : client.device_count();
+        if ((row < cfg::visible_rows) && ((first_ + row) < count))
+            display.invert(0, md::list_y - 1 + static_cast<int>(row) * md::row_height, 128,
+                           md::row_height);
+    }
+    void render(const CrsfClient &client, coretx::ui::Framebuffer &display, const TimestampUs now,
+                const bool active_header = false, const char *const navigation_help = nullptr,
                 const bool touch = false) const noexcept {
         namespace md = crsf_menu_detail;
         namespace cfg = coretx::crsf::config;
@@ -373,7 +408,7 @@ class CrsfMenu {
     }
 
   private:
-    void edit(const Key key, coretx::crsf::config::Client &client) noexcept {
+    void edit(const Key key, CrsfClient &client) noexcept {
         namespace c = coretx::crsf;
         const auto parameter = client.parameter(editing_id_);
         if (!parameter) {

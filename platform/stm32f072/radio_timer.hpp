@@ -20,8 +20,7 @@ class InterruptGuard {
     std::uint32_t previous_;
 };
 
-template <typename Io, typename Guard = InterruptGuard, typename Assignment = Hardware>
-class RadioTimer {
+template <typename Io, typename Guard, typename Assignment> class RadioTimer {
     using Timer = stm32f072::TimerTraits<Assignment::clock_timer>;
     using Exti = stm32f072::ExtiTraits<Assignment::radio.status>;
     static_assert(Assignment::clock_timer == 2, "Radio compare shares the system TIM2 clock");

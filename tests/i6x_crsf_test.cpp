@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "boards/common/crsf_client.hpp"
 #include "boards/common/dashboard.hpp"
+#include "boards/common/radio_board.hpp"
 #include "platform/stm32f072/crsf.hpp"
 #include "static_fixture.hpp"
 #include "tests/renderers/crsf.hpp"
@@ -11,9 +13,10 @@
 namespace {
 
 namespace hw = coretx::firmware;
-using reg = hw::crsf_registers;
+using reg = hw::CrsfRegisters<hw::Hardware>;
 struct MetadataIo;
-using Limits = hw::detail::CrsfState<MetadataIo>;
+using Limits =
+    hw::detail::CrsfState<MetadataIo, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
 constexpr auto power_pin = coretx::firmware::external_module_power;
 constexpr bool power_on_level = coretx::firmware::external_module_active_high;
 
@@ -275,7 +278,7 @@ constexpr bool telemetry_resynchronization() {
 bool dma_reception() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -330,7 +333,7 @@ bool dma_reception() {
 bool dma_receive_recovery() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
 
     coretx::crsf::Channels channels{};
     for (unsigned kind = 0; kind < 7; ++kind) {
@@ -444,7 +447,7 @@ constexpr bool protocol_frames() {
 bool wiring_and_baudrates() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -546,7 +549,7 @@ bool wiring_and_baudrates() {
 bool cooperative_transmission() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -623,7 +626,7 @@ bool cooperative_transmission() {
 bool configuration_arbitration() {
     struct ConfigurationScenario {};
     using Test = coretx::test::RegisterFixture<ConfigurationScenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
     Test::reset_registers();
     auto &io = Test::registers;
     coretx::crsf::Channels channels{};
@@ -681,7 +684,7 @@ bool configuration_arbitration() {
 bool multiswitch_arbitration() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
     Test::reset_registers();
     auto &io = Test::registers;
     coretx::Model model{};
@@ -781,12 +784,13 @@ bool multiswitch_arbitration() {
 bool transmission_faults() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
 
     coretx::crsf::Channels channels{};
     struct StartupScenario {};
     using StartupTest = coretx::test::RegisterFixture<StartupScenario, Registers>;
-    using Startup = hw::Crsf<StartupTest::Io>;
+    using Startup =
+        hw::Crsf<StartupTest::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
     StartupTest::reset_registers();
     auto &not_ready = StartupTest::registers;
     not_ready.acknowledge = false;
@@ -845,7 +849,7 @@ bool transmission_faults() {
 bool receive_error_rate() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
 
     for (const std::uint32_t start : {0U, 0xFFFFF000U}) {
         Test::reset_registers();
@@ -925,7 +929,7 @@ bool receive_error_rate() {
 bool pipeline_gating() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
 
     Test::reset_registers();
     auto &io = Test::registers;
@@ -1029,7 +1033,7 @@ constexpr bool telemetry_rendering() {
 bool consecutive_maximum_frames() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
 
     for (const unsigned offset : {0U, 192U}) {
         Test::reset_registers();
@@ -1069,7 +1073,7 @@ bool consecutive_maximum_frames() {
 bool lazy_state_lifecycle() {
     struct Scenario {};
     using Test = coretx::test::RegisterFixture<Scenario, Registers>;
-    using Driver = hw::Crsf<Test::Io>;
+    using Driver = hw::Crsf<Test::Io, coretx::firmware::Hardware, coretx::firmware::CrsfClient>;
     Test::reset_registers();
     auto &io = Test::registers;
     auto &client = Driver::config();

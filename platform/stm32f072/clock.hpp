@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "boards/common/hardware.hpp"
 #include "platform/stm32f072/platform.hpp"
 
 namespace coretx::firmware {
 
-template <typename Io, unsigned Timer = Hardware::clock_timer> class Clock {
+template <typename Io, unsigned Timer = 2> class Clock {
     // TIM2's 32-bit counter is the timestamp ABI, shared by Mmio and the radio IRQ.
     static_assert(Timer == 2, "The system clock requires the 32-bit TIM2 counter");
 

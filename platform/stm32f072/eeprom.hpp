@@ -10,7 +10,7 @@ namespace coretx::firmware {
 namespace detail {
 
 // FT24C128A: 16-bit memory address, 16 KiB, 64-byte write pages.
-template <typename Io, typename Assignment = firmware::Hardware>
+template <typename Io, typename Assignment>
 class EepromState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
     using Bus = ProbeState<Io, Assignment>;
     using Registers = stm32f072::I2cTraits<Assignment::storage.peripheral>;
@@ -234,7 +234,7 @@ class EepromState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
 
 } // namespace detail
 
-template <typename Io, typename Assignment = firmware::Hardware> class Eeprom {
+template <typename Io, typename Assignment> class Eeprom {
     using State = detail::EepromState<Io, Assignment>;
 
   public:

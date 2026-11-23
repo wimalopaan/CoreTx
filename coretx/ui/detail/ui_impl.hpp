@@ -31,16 +31,6 @@ constexpr int touch_zone(const int x, const int y) noexcept {
 inline constexpr std::array<std::string_view, analog_count> analog_names{
     "AIL", "ELE", "THR", "RUD", "VRA", "VRB", "SA",  "SB",
     "SC",  "SD",  "VRC", "VRD", "VRE", "VRF", "VRG", "A16"};
-inline constexpr std::array<std::string_view, switch_count> switch_names{
-    "SA",  "SB",  "SC",  "SD",  "VRA", "VRB",
-#if defined(CORETX_I6S) && CORETX_I6S
-    "SWI", "SWJ", "SWK", "SWL", "SWM", "SG",  "SH", "SN",
-    "SO",  "SP",  "SE",  "SF",  "T3",  "T4"
-#else
-    "VRC", "VRD", "VRE", "VRF", "VRG", "SE",  "SF", "SG",
-    "SH",  "SI",  "T1",  "T2",  "T3",  "T4"
-#endif
-};
 inline constexpr std::array<std::string_view, 11> input_fields{
     "SOURCE", "WEIGHT %", "EXPO %", "OFFSET %", "TRIM",  "SIDE",
     "INVERT", "TARGET",   "SWITCH", "SW POS",   "SW NOT"};
@@ -200,8 +190,9 @@ constexpr void indexed_label(Framebuffer &display, const int x, const int y,
     display.number(right, y, static_cast<std::int32_t>(index + 1), ink);
 }
 
+// Switch sources need the board's names; without them they are shown as "?".
 constexpr void draw_source(Framebuffer &display, const int x, const int y, const Source &source,
-                           const bool ink) noexcept {
+                           const bool ink, const SwitchNames *const names) noexcept {
     switch (source.kind) {
     case SourceKind::analog:
         display.text(x, y, source.index < analog_count ? analog_names[source.index] : "?", ink);
@@ -214,7 +205,8 @@ constexpr void draw_source(Framebuffer &display, const int x, const int y, const
             (source.index < (switch_count + logical_switch_count)))
             indexed_label(display, x, y, "L", source.index - switch_count, ink);
         else
-            display.text(x, y, source.index < switch_count ? switch_names[source.index] : "?", ink);
+            display.text(
+                x, y, names && (source.index < switch_count) ? (*names)[source.index] : "?", ink);
         break;
     }
     case SourceKind::maximum:
@@ -224,13 +216,15 @@ constexpr void draw_source(Framebuffer &display, const int x, const int y, const
 }
 
 constexpr void control_label(Framebuffer &display, const int y, const std::size_t index,
-                             const bool ink, const std::size_t analogs) noexcept {
+                             const bool ink, const std::size_t analogs,
+                             const SwitchNames *const names) noexcept {
     if (index < analogs) {
         display.text(1, y, analog_names[index], ink);
     } else if (index < (analogs + switch_count)) {
         draw_source(
             display, 1, y,
-            {SourceKind::switch_position, static_cast<std::uint8_t>(index - analogs), false}, ink);
+            {SourceKind::switch_position, static_cast<std::uint8_t>(index - analogs), false}, ink,
+            names);
     } else {
         indexed_label(display, 1, y, "TRM", index - analogs - switch_count, ink);
     }
@@ -257,7 +251,7 @@ constexpr void draw_trim(Framebuffer &display, const int y, const TrimSource &so
                     {SourceKind::analog,
                      static_cast<std::uint8_t>(static_cast<unsigned>(source) -
                                                static_cast<unsigned>(TrimSource::stick1))},
-                    ink);
+                    ink, nullptr);
     }
 }
 
@@ -295,6 +289,15 @@ constexpr bool Framebuffer::pixel_at(const int x, const int y) const noexcept {
 
 constexpr void Framebuffer::rectangle(const int x, const int y, const int w, const int h,
                                       const bool ink) noexcept {
+    fill(x, y, w, h, ink ? Fill::set : Fill::clear);
+}
+
+constexpr void Framebuffer::invert(const int x, const int y, const int w, const int h) noexcept {
+    fill(x, y, w, h, Fill::invert);
+}
+
+constexpr void Framebuffer::fill(const int x, const int y, const int w, const int h,
+                                 const Fill mode) noexcept {
     if ((w <= 0) || (h <= 0) || (x >= width) || (y >= height))
         return;
     const int left = std::max(x, 0);
@@ -311,8 +314,9 @@ constexpr void Framebuffer::rectangle(const int x, const int y, const int w, con
         const auto mask = static_cast<std::uint8_t>((0xFFU << first) & (0xFFU >> (8U - last)));
         for (int column = left; column < right; ++column) {
             auto &byte = pixels_[static_cast<std::size_t>(page * width + column)];
-            byte = ink ? static_cast<std::uint8_t>(byte | mask)
-                       : static_cast<std::uint8_t>(byte & ~mask);
+            byte = mode == Fill::set     ? static_cast<std::uint8_t>(byte | mask)
+                   : mode == Fill::clear ? static_cast<std::uint8_t>(byte & ~mask)
+                                         : static_cast<std::uint8_t>(byte ^ mask);
         }
     }
 }
@@ -1076,7 +1080,7 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
         }
         if (page_ == Page::controls) {
             const auto analogs = control_analog_count();
-            detail::control_label(display, y, line, ink, analogs);
+            detail::control_label(display, y, line, ink, analogs, switch_names_);
             int current{};
             int range{resolution};
             if (line < analogs) {
@@ -1104,7 +1108,7 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
                 input ? model.inputs[line].destination : model.mixes[line].destination;
             const auto source = input ? model.inputs[line].source : model.mixes[line].source;
             detail::indexed_label(display, 1, y, input ? "I" : "CH", destination, ink);
-            detail::draw_source(display, 31, y, source, ink);
+            detail::draw_source(display, 31, y, source, ink, switch_names_);
             const auto condition =
                 input ? model.inputs[line].condition : model.mixes[line].condition;
             const int extra = detail::extra_field(page_, field);
@@ -1116,7 +1120,8 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
             } else if (extra == 1) {
                 if (condition.enabled) {
                     detail::draw_source(display, 98, y,
-                                        {SourceKind::switch_position, condition.index, false}, ink);
+                                        {SourceKind::switch_position, condition.index, false}, ink,
+                                        switch_names_);
                 } else {
                     display.text(104, y, "OFF", ink);
                 }
@@ -1135,7 +1140,7 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
             } else if (extra == 3) {
                 display.text(104, y, condition.inverted ? "YES" : "NO", ink);
             } else if (field == 0) {
-                detail::draw_source(display, 98, y, source, ink);
+                detail::draw_source(display, 98, y, source, ink, switch_names_);
             } else if (input) {
                 const auto &item = model.inputs[line];
                 switch (field) {

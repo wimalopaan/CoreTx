@@ -152,6 +152,16 @@ PC13 is a control signal, not a module supply rating.
 path at runtime. Disable external RF before changing this setting.
 `CORETX_MULTISWITCH=ON` adds dashboards and SET4 commands when CRSF is compiled in.
 
+The module configuration menu repeats unanswered parameter reads. The TX module
+answers over the wire: 0.5 s per request, 3 requests. Receivers and other remote
+devices answer over the RF link, so a request is repeated every 1 s and the
+message _CRSF response timeout #n_ (parameter number `n`) appears only after 10 s
+without a reply. Late replies are still accepted. Writes are not repeated: if a changed value is
+not acknowledged in time, the parameter is read back with the same timeout and
+retries, and the read value must match.
+`CORETX_CRSF_REMOTE_TIMEOUT_MS` (default 1000) and `CORETX_CRSF_REMOTE_RETRIES`
+(default 9) adjust the remote values.
+
 === LCD and buzzer
 
 [cols="2,3",options="header"]
@@ -337,9 +347,20 @@ There is no i6X key matrix or physical trim-key bank; trims are adjusted in the 
 
 I2C1 uses the 48 MHz system clock and timing value `0x00B01A4B`.
 It is independent of the EEPROM I2C speed option.
-Initialization holds reset for 20 ms and waits 60 ms after release.
-The controller's reset defaults are retained; CoreTX does not force registers
-`0xA4`, `0x80` or `0x88`.
+Initialization holds reset for 20 ms and waits 300 ms after release; the controller answers register reads with zeros before that.
+Afterwards CoreTX writes `0x86 = 0x00`, keeping the controller in active mode
+instead of its idle monitor mode, and sets the touch threshold `0x80`;
+`0xA4` and `0x88` keep their reset defaults.
+
+.Touch sensitivity
+The threshold `0x80` is the minimum capacitance change the FT6236 accepts as contact;
+lower values are more sensitive. The panel resets to 31 (`0x1F`), where light or very
+short taps were lost, so CoreTX uses 22. Much lower values risk phantom touches from
+noise or moisture; higher values require firmer presses. Set it with
+`-DCORETX_I6S_TOUCH_THRESHOLD=<10..60>` (default 22). After changing it, the touch diagnostic
+image shows the active value as `TH` in hex (22 = `16`).
+The touch diagnostic image shows these registers together with per-stroke report count,
+largest report gap, duration, travel and lift type.
 
 Transfers are cooperative, limited to 300 us/512 steps per service call.
 A fresh interrupt starts a read without waiting for the normal polling interval.
@@ -348,7 +369,17 @@ idle touch is not continuously polled.
 A 300 ms stale-contact timeout releases the gesture, and failed transport is
 retried after 250 ms.
 Dashboard horizontal swipes change pages, vertical swipes scroll within a page;
-MultiSwitch elements support their corresponding tap/hold actions.
+MultiSwitch elements support their corresponding tap/hold actions. A toggle tile switches
+as soon as the finger rests on it for 100 ms within the tap slop, or on an earlier lift;
+a swipe that starts on a tile leaves the slop first and does not toggle it.
+Swipes need 12 px horizontal or 10 px vertical travel; a flick released within 300 ms
+needs only 8/7 px. The dominant axis must exceed the other by half, and travel below
+12 px never cancels a tap. A touched CRSF row/button or MultiSwitch tile is shown
+inverted immediately, and every recognized action clicks while Trim beep is enabled.
+Contacts starting in the top 15 px (CRSF Back/OK) are always taps unless they travel
+12 px, because the panel edge distorts short taps into apparent flicks. The Back and OK
+hit areas extend beyond the drawn boxes: x < 40 / x >= 88 in the header and
+x < 36 / x >= 92 down to y = 14.
 
 === Internal A7105 / AFHDS 2A
 
@@ -390,6 +421,16 @@ DMA completion and RX progress are polled; no USART/DMA ISR is used.
 The runtime *External module* option must also be Yes; it reserves PB6/PB7.
 `CORETX_MULTISWITCH=ON` adds dashboards and SET4 commands when CRSF is compiled in.
 
+The module configuration menu repeats unanswered parameter reads. The TX module
+answers over the wire: 0.5 s per request, 3 requests. Receivers and other remote
+devices answer over the RF link, so a request is repeated every 1 s and the
+message _CRSF response timeout #n_ (parameter number `n`) appears only after 10 s
+without a reply. Late replies are still accepted. Writes are not repeated: if a changed value is
+not acknowledged in time, the parameter is read back with the same timeout and
+retries, and the read value must match.
+`CORETX_CRSF_REMOTE_TIMEOUT_MS` (default 1000) and `CORETX_CRSF_REMOTE_RETRIES`
+(default 9) adjust the remote values.
+
 === LCD and buzzer
 
 [cols="2,3",options="header"]
@@ -425,8 +466,10 @@ An internal-flash DFU backup does *not* contain this EEPROM.
 of the two power buttons.
 After boot the buttons must first be released.
 Hold both buttons for 1.5 s to request shutdown.
-CoreTX immediately disables RF, completes pending storage writes, switches the
-LEDs off and only then releases the latch.
+CoreTX immediately disables RF, plays a falling three-tone signal
+(1760/1320/880 Hz) and collapses the screen to a line and then a dot (0.8 s).
+It completes pending storage writes, switches the LEDs off and releases the latch
+only after both have finished.
 On a storage error it remains powered instead of cutting power during a failed save.
 USB power may keep the device physically powered even after the latch is released.
 For the first flash from factory firmware, temporarily bridge *R60* and use the

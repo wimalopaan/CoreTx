@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "boards/common/hardware.hpp"
 #include "boards/common/trims.hpp"
 #include "coretx/core/controls.hpp"
 #include "coretx/core/input_setup.hpp"
@@ -8,6 +9,7 @@
 #include "coretx/ui/input.hpp"
 #include "platform/stm32f072/adc.hpp"
 
+#include <memory>
 #include <span>
 
 namespace coretx::firmware {
@@ -30,8 +32,11 @@ static_assert((analog_indices.size() <= calibration_count) &&
     return raw < 2048 ? SwitchPosition::up : SwitchPosition::down;
 }
 
-inline constexpr Model diagnostic_model = [] {
-    Model model{};
+// Builds the diagnostic model in caller-owned storage. Firmware code uses this instead of
+// diagnostic_model so that the mostly empty 1 KB model image is not kept in flash.
+constexpr void make_diagnostic_model(Model &model) noexcept {
+    std::destroy_at(&model);
+    std::construct_at(&model);
     model.inputs.resize<analog_indices.size()>();
     model.mixes.resize<control_names.size()>();
     for (std::size_t i = 0; i < model.inputs.size(); ++i) {
@@ -49,6 +54,11 @@ inline constexpr Model diagnostic_model = [] {
                                    static_cast<std::uint8_t>(i - analog_indices.size()), false};
         line.carry_trim = true;
     }
+}
+// Compile-time reference for tests and host tools; odr-using it in firmware costs flash.
+inline constexpr Model diagnostic_model = [] {
+    Model model{};
+    make_diagnostic_model(model);
     return model;
 }();
 static_assert(static_cast<bool>(validate(diagnostic_model)));
@@ -70,7 +80,10 @@ class Diagnostics {
     };
 
     constexpr explicit Diagnostics(const bool sb_three_position = false) noexcept
-        : input_setup_(sb_three_position) {
+        : Diagnostics(sb_three_position, diagnostic_model) {}
+    // The firmware passes the model storage's active model, which starts as the diagnostic model.
+    constexpr Diagnostics(const bool sb_three_position, const Model &model) noexcept
+        : input_setup_(sb_three_position), model_(&model) {
         setup_.mapping[0].reversed = true;
         setup_.mapping[1].reversed = true;
         setup_.calibration[4] = {0, 2048, 4095};
@@ -93,7 +106,7 @@ class Diagnostics {
         for (std::size_t i = 0; i < analog_indices.size(); ++i) {
             raw_.analogs[i] = samples[analog_indices[i]];
             if (phase_ == CalibrationPhase::range) {
-                auto &axis = draft_.calibration[i];
+                auto &axis = draft_[i];
                 axis.minimum = std::min(axis.minimum, raw_.analogs[i]);
                 axis.maximum = std::max(axis.maximum, raw_.analogs[i]);
             }
@@ -105,7 +118,7 @@ class Diagnostics {
                 auxiliary_samples_[i] = samples[indices[i]];
             const auto mode = input_setup_.modes[i];
             if (auxiliary_enabled(i) && is_pot(mode) && (phase_ == CalibrationPhase::range)) {
-                auto &axis = input_draft_.calibration[i];
+                auto &axis = input_draft_[i];
                 axis.minimum = std::min(axis.minimum, auxiliary_samples_[i]);
                 axis.maximum = std::max(axis.maximum, auxiliary_samples_[i]);
             }
@@ -205,22 +218,23 @@ class Diagnostics {
             return;
         }
         if (phase_ == CalibrationPhase::center) {
-            draft_ = setup_;
-            input_draft_ = input_setup_;
+            draft_ = setup_.calibration;
+            input_draft_ = input_setup_.calibration;
             for (std::size_t i = 0; i < analog_indices.size(); ++i) {
                 const auto sample = raw_.analogs[i];
-                draft_.calibration[i] = {sample, sample, sample};
+                draft_[i] = {sample, sample, sample};
             }
             for (std::size_t i = 0; i < auxiliary_count; ++i)
                 if (auxiliary_enabled(i) && is_pot(input_setup_.modes[i])) {
                     const auto sample = auxiliary_samples_[i];
-                    input_draft_.calibration[i] = {sample, sample, sample};
+                    input_draft_[i] = {sample, sample, sample};
                 }
             phase_ = CalibrationPhase::range;
             calibration_error_ = CalibrationError::none;
             return;
         }
-        auto candidate = draft_;
+        auto candidate = setup_;
+        candidate.calibration = draft_;
         for (std::size_t i = 0; i < analog_indices.size(); ++i) {
             auto &axis = candidate.calibration[i];
             if (i >= 4) {
@@ -245,7 +259,7 @@ class Diagnostics {
         for (std::size_t i = 0; i < auxiliary_count; ++i) {
             if (!auxiliary_enabled(i) || !is_pot(input_setup_.modes[i]))
                 continue;
-            auto &axis = input_draft_.calibration[i];
+            auto &axis = input_draft_[i];
             if (input_setup_.modes[i] == InputMode::pot)
                 axis.center =
                     static_cast<std::uint16_t>((std::uint32_t{axis.minimum} + axis.maximum) / 2U);
@@ -261,7 +275,7 @@ class Diagnostics {
                 candidate.calibration[i] = axis;
         }
         setup_ = candidate;
-        input_setup_ = input_draft_;
+        input_setup_.calibration = input_draft_;
         custom_inputs_ = true;
         detent_side_ = {};
         calibrated_ = true;
@@ -315,7 +329,6 @@ class Diagnostics {
             refresh(true);
     }
     [[nodiscard]] constexpr const ControlSetup &setup() const noexcept { return setup_; }
-    [[nodiscard]] constexpr const ControlSetup &draft() const noexcept { return draft_; }
     [[nodiscard]] constexpr const PreparedControls &prepared() const noexcept { return prepared_; }
     [[nodiscard]] constexpr const Evaluation &evaluation() const noexcept { return evaluation_; }
     constexpr void use_model(const Model &model) noexcept {
@@ -383,14 +396,13 @@ class Diagnostics {
     [[nodiscard]] constexpr std::optional<CalibrationRow>
     calibration_row(std::size_t row) const noexcept {
         if (row < 4)
-            return CalibrationRow{control_names[row], raw_.analogs[row], draft_.calibration[row]};
+            return CalibrationRow{control_names[row], raw_.analogs[row], draft_[row]};
         row -= 4;
         for (std::size_t i = 0; i < auxiliary_count; ++i) {
             if (!auxiliary_enabled(i) || !is_pot(input_setup_.modes[i]))
                 continue;
             if (row == 0)
-                return CalibrationRow{auxiliary_names[i], auxiliary_samples_[i],
-                                      input_draft_.calibration[i]};
+                return CalibrationRow{auxiliary_names[i], auxiliary_samples_[i], input_draft_[i]};
             --row;
         }
         return {};
@@ -403,9 +415,9 @@ class Diagnostics {
         return digital_pin_mask() != 0;
     }
     [[nodiscard]] constexpr bool digital_enabled(const std::size_t index) const noexcept {
-        return features::extended_inputs && (index < (features::i6s ? digital_input_count : 2U)) &&
+        return features::extended_inputs && (index < board::digital_inputs) &&
                (input_setup_.digital_mode(index) != DigitalInputMode::off) &&
-               (!features::i6s || (index < 2) || (index == 4) || !input_setup_.external_module);
+               !(board::external_module_input(index) && input_setup_.external_module);
     }
     [[nodiscard]] constexpr std::uint8_t digital_pin_mask() const noexcept {
         std::uint8_t result{};
@@ -442,7 +454,7 @@ class Diagnostics {
     }
     constexpr void observe_digital(const std::uint8_t pressed, const TimestampUs now) noexcept {
         bool changed{};
-        for (std::size_t i = 0; i < (features::i6s ? 5U : 2U); ++i) {
+        for (std::size_t i = 0; i < board::digital_inputs; ++i) {
             const auto previous = raw_.switches[11 + i];
             auto position = SwitchPosition::middle;
             if (digital_enabled(i)) {
@@ -496,7 +508,7 @@ class Diagnostics {
                 result |= 1U << (auxiliary_count + i);
         if (rear_inputs_)
             result |= 3U << physical_switch_count;
-        if constexpr (!features::i6s)
+        if constexpr (board::trim_buttons)
             result |= std::uint32_t{model_->trim_switches} << physical_switch_count;
         return result;
     }
@@ -577,7 +589,7 @@ class Diagnostics {
         if (rear_inputs_)
             controls.active_switches |= 3U << physical_switch_count;
         controls.trims = model_->trims;
-        if constexpr (!features::i6s) {
+        if constexpr (board::trim_buttons) {
             controls.active_switches |= std::uint32_t{model_->trim_switches}
                                         << physical_switch_count;
             for (std::size_t i = 0; i < trim_count; ++i)
@@ -607,7 +619,8 @@ class Diagnostics {
     }
 
     ControlSetup setup_{};
-    ControlSetup draft_{};
+    // Only calibration values change while calibrating.
+    std::array<AnalogCalibration, calibration_count> draft_{};
     StockSamples samples_{};
     RawControls raw_{};
     PreparedControls prepared_{};
@@ -626,7 +639,7 @@ class Diagnostics {
     bool valid_{};
     bool output_valid_{};
     InputSetup input_setup_{};
-    InputSetup input_draft_{};
+    std::array<AnalogCalibration, auxiliary_count> input_draft_{};
     std::array<std::uint16_t, auxiliary_count> auxiliary_samples_{};
     std::array<std::uint16_t, 2> frozen_pots_{};
     std::array<std::int8_t, auxiliary_count> detent_side_{};
@@ -638,7 +651,7 @@ class Diagnostics {
     bool refresh_deferred_{};
     bool refresh_pending_{};
     bool refresh_commit_pending_{};
-    const Model *model_{&diagnostic_model};
+    const Model *model_{};
 };
 
 } // namespace coretx::firmware

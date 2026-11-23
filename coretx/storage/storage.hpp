@@ -61,14 +61,23 @@ struct Selection {
     }
 };
 
+[[nodiscard]] constexpr Status validate(const Model &model, const ControlSetup &setup) noexcept;
 [[nodiscard]] constexpr Status validate(const State &state) noexcept;
 [[nodiscard]] constexpr std::uint32_t crc32(const std::span<const std::uint8_t> &data) noexcept;
+[[nodiscard]] constexpr Status encode(const Model &model, const ControlSetup &setup,
+                                      std::uint32_t generation, Record &record) noexcept;
 [[nodiscard]] constexpr Status encode(const State &state, std::uint32_t generation,
                                       Record &record) noexcept;
+// Decodes in place without a State temporary; failed decoding may leave partial values.
+[[nodiscard]] constexpr SlotInfo decode_parts(const std::span<const std::uint8_t> &record,
+                                              Model &model, ControlSetup &setup) noexcept;
 // Failed decoding leaves state unchanged.
 [[nodiscard]] constexpr SlotInfo decode(const std::span<const std::uint8_t> &record,
                                         State &state) noexcept;
 [[nodiscard]] constexpr SlotInfo inspect(const std::span<const std::uint8_t> &record) noexcept;
+// Chooses the newer valid slot; identical tells whether equal generations have equal contents.
+[[nodiscard]] constexpr Selection select_slots(SlotInfo first, SlotInfo second,
+                                               bool identical) noexcept;
 [[nodiscard]] constexpr Selection select(const std::span<const std::uint8_t> &first,
                                          const std::span<const std::uint8_t> &second) noexcept;
 // Scratch is overwritten even on failure; success leaves the selected state.

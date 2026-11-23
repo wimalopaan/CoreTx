@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "boards/common/multiswitch_ui.hpp"
+#include "boards/i6s/multiswitch_touch.hpp"
 
 #include <cstdio>
 
@@ -209,17 +210,40 @@ constexpr bool touch_buttons() {
         sample.contacts = 1;
         sample.x = static_cast<std::uint8_t>(3 + (i % 4) * 32);
         sample.y = static_cast<std::uint8_t>(16 + (i / 4) * 18);
-        if ((service(true, 0) != Key::none) || navigation.tapped())
+        if ((service(true, 0) != Key::none) || navigation.tapped() || (navigation.pressed() != i))
             return false;
         sample.contacts = 0;
-        if ((service(true, 0) != Key::none) || (navigation.tapped() != i))
+        if ((service(true, 0) != Key::none) || (navigation.tapped() != i) || navigation.pressed())
             return false;
         service();
         if (navigation.tapped())
             return false;
     }
+    // A resting finger toggles before the lift, exactly once.
+    sample = {0, 0, 3, 16, 1, fw::i6s::Gesture::none};
+    service(true, 0);
+    now += fw::MultiSwitchTouch::toggle_hold.count();
+    if ((service(true, 0) != Key::none) || (navigation.tapped() != 0) || navigation.pressed())
+        return false;
+    service(true, 0);
+    sample.contacts = 0;
+    if ((service(true, 0) != Key::none) || navigation.tapped())
+        return false;
+    // A swipe leaves the tap slop before the hold time and does not toggle.
+    sample = {0, 0, 3, 16, 1, fw::i6s::Gesture::none};
+    service(true, 0);
+    sample.x = 40;
+    service(true, 0);
+    now += fw::MultiSwitchTouch::toggle_hold.count();
+    service(true, 0);
+    sample.contacts = 0;
+    service(true, 0);
+    if (navigation.tapped())
+        return false;
+    service();
     sample = {0, 0, 34, 16, 1, fw::i6s::Gesture::none};
-    if ((service() != Key::none) || (navigation.held() != 1))
+    // Momentary tiles report holding instead of a pending toggle.
+    if ((service() != Key::none) || (navigation.held() != 1) || navigation.pressed())
         return false;
     sample.x = 70;
     if ((service() != Key::ok) || navigation.held())
@@ -340,6 +364,12 @@ constexpr bool fast_touch_swipes() {
     return true;
 }
 
+// Switch index physical_switch_count is T1 on the i6X and SE on the i6S.
+constexpr auto first_extra_label = [] {
+    const auto name = fw::switch_names[coretx::physical_switch_count];
+    return std::array<char, 3>{name[0], name[1], 'v'};
+}();
+
 constexpr bool bound_tile_rendering() {
     coretx::MultiSwitchPage page{};
     page.address = 42;
@@ -356,8 +386,8 @@ constexpr bool bound_tile_rendering() {
         {true, coretx::switch_count, SwitchPosition::down, false},
         {true, coretx::switch_count + 1, SwitchPosition::up, true},
     }};
-    constexpr std::array<std::string_view, 8> labels{"SA^", "SBv",   "SC-", "VRA4",
-                                                     "T1v", "!VRA4", "L11", "!L20"};
+    constexpr std::array<std::string_view, 8> labels{
+        "SA^", "SBv", "SC-", "VRA4", {first_extra_label.data(), 3}, "!VRA4", "L11", "!L20"};
     for (std::size_t i = 0; i < conditions.size(); ++i)
         if (!page.controls[i].set_condition(conditions[i]))
             return false;

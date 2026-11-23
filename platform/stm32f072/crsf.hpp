@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "boards/common/radio_board.hpp"
 #include "coretx/features.hpp"
 #include "coretx/radio/crsf.hpp"
 #include "coretx/radio/crsf_config.hpp"
 #include "coretx/radio/multiswitch.hpp"
+#include "platform/stm32f072/radio_gpio.hpp"
 
 #include <optional>
 
@@ -69,11 +69,11 @@ template <typename Assignment> struct CrsfRegisters {
     static constexpr auto clear_tx = Tx::clear;
     static constexpr auto clear_rx_boundaries = Rx::half | Rx::complete;
 };
-using crsf_registers = CrsfRegisters<firmware::Hardware>;
 
 namespace detail {
 
-template <typename Io, typename Assignment = firmware::Hardware>
+// Client is the CRSF parameter client (crsf::config::BasicClient) with the board's table limits.
+template <typename Io, typename Assignment, typename Client>
 class CrsfState : CrsfRegisters<Assignment> {
     using Registers = CrsfRegisters<Assignment>;
     using Uart = typename Registers::Uart;
@@ -234,7 +234,7 @@ class CrsfState : CrsfRegisters<Assignment> {
     [[nodiscard]] constexpr const coretx::crsf::Telemetry &telemetry() const noexcept {
         return telemetry_;
     }
-    [[nodiscard]] constexpr coretx::crsf::config::Client &config() noexcept { return config_; }
+    [[nodiscard]] constexpr Client &config() noexcept { return config_; }
     [[nodiscard]] constexpr std::uint32_t receive_overruns() const noexcept {
         return receive_overruns_;
     }
@@ -487,7 +487,7 @@ class CrsfState : CrsfRegisters<Assignment> {
     coretx::crsf::config::Frame frame_{};
     std::array<std::uint8_t, receive_buffer_size> receive_buffer_{};
     coretx::crsf::Telemetry telemetry_{};
-    coretx::crsf::config::Client config_{};
+    Client config_{};
     std::size_t receive_tail_{};
     std::size_t receive_head_{};
     std::size_t active_{crsf_default_baudrate_index};
@@ -515,7 +515,7 @@ class CrsfState : CrsfRegisters<Assignment> {
 
 } // namespace detail
 
-template <typename Io, typename Assignment = firmware::Hardware> class Crsf {
+template <typename Io, typename Assignment, typename Client> class Crsf {
   public:
     Crsf() = delete;
 
@@ -544,9 +544,7 @@ template <typename Io, typename Assignment = firmware::Hardware> class Crsf {
     [[nodiscard]] static const coretx::crsf::Telemetry &telemetry() noexcept {
         return state().telemetry();
     }
-    [[nodiscard]] static coretx::crsf::config::Client &config() noexcept {
-        return state().config();
-    }
+    [[nodiscard]] static Client &config() noexcept { return state().config(); }
     [[nodiscard]] static std::uint32_t receive_overruns() noexcept {
         return state().receive_overruns();
     }
@@ -556,13 +554,14 @@ template <typename Io, typename Assignment = firmware::Hardware> class Crsf {
     }
 
   private:
-    static detail::CrsfState<Io, Assignment> &state() noexcept {
+    static detail::CrsfState<Io, Assignment, Client> &state() noexcept {
         if (!state_storage_)
             state_storage_.emplace();
         return *state_storage_;
     }
     // Construct in place so the zero-filled transport/configuration buffers stay in BSS.
-    inline static constinit std::optional<detail::CrsfState<Io, Assignment>> state_storage_{};
+    inline static constinit std::optional<detail::CrsfState<Io, Assignment, Client>>
+        state_storage_{};
 };
 
 } // namespace coretx::firmware

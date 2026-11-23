@@ -5,6 +5,8 @@
 #include "boards/i6s/touch_navigation.hpp"
 #include "platform/stm32f072/gpio.hpp"
 
+#include <array>
+
 namespace coretx::firmware::i6s {
 
 enum class TouchError : std::uint8_t {
@@ -18,6 +20,8 @@ enum class TouchError : std::uint8_t {
     packet
 };
 enum class TouchEvent : std::uint8_t { none, sample, failed };
+// FT6236 registers read as zero until its firmware has booted; writes earlier are lost.
+inline constexpr DurationUs touch_boot_time{300'001};
 
 template <typename Assignment>
 struct TouchRegisters : stm32f072::I2cTraits<Assignment::touch.peripheral> {
@@ -130,6 +134,49 @@ class TouchState : TouchRegisters<Assignment> {
     [[nodiscard]] constexpr std::uint32_t frames() const noexcept { return frames_; }
     [[nodiscard]] constexpr const auto &packet() const noexcept { return bytes_; }
     [[nodiscard]] constexpr std::size_t packet_bytes() const noexcept { return position_; }
+    // Blocking diagnostic access between reports; a failure enters normal recovery.
+    [[nodiscard]] constexpr std::optional<std::uint8_t>
+    read_register(const std::uint8_t index) noexcept {
+        if ((stage_ != Stage::idle) || transfer_)
+            return std::nullopt;
+        const auto wait = [](const std::uint32_t mask) constexpr -> TouchError {
+            const auto started = Io::now_us();
+            for (;;) {
+                const auto flags = Io::read(isr);
+                if ((flags & I2C_ISR_NACKF) != 0)
+                    return TouchError::nack;
+                if ((flags & (I2C_ISR_BERR | I2C_ISR_ARLO | I2C_ISR_OVR)) != 0)
+                    return TouchError::bus;
+                if ((flags & mask) != 0)
+                    return TouchError::none;
+                if ((Io::now_us() - started) >= 2'000_us)
+                    return TouchError::timeout;
+            }
+        };
+        Io::write(icr, clear_flags);
+        Io::write(cr2, address | (1U << I2C_CR2_NBYTES_Pos) | I2C_CR2_START);
+        auto error = wait(I2C_ISR_TXIS);
+        if (error == TouchError::none) {
+            Io::write(txdr, index);
+            error = wait(I2C_ISR_TC);
+        }
+        if (error == TouchError::none) {
+            Io::write(cr2, address | (1U << I2C_CR2_NBYTES_Pos) | I2C_CR2_START | I2C_CR2_RD_WRN |
+                               I2C_CR2_AUTOEND);
+            error = wait(I2C_ISR_RXNE);
+        }
+        std::uint8_t value{};
+        if (error == TouchError::none) {
+            value = static_cast<std::uint8_t>(Io::read(rxdr));
+            error = wait(I2C_ISR_STOPF);
+        }
+        if (error != TouchError::none) {
+            (void)fail(error);
+            return std::nullopt;
+        }
+        Io::write(icr, I2C_ICR_STOPCF);
+        return value;
+    }
 
   private:
     [[nodiscard]] constexpr TouchEvent advance(const TimestampUs now) noexcept {
@@ -168,7 +215,41 @@ class TouchState : TouchRegisters<Assignment> {
             }
             break;
         case Stage::boot:
-            if ((now - since_) >= 60'001_us) {
+            if ((now - since_) >= touch_boot_time) {
+                Io::write(icr, clear_flags);
+                transfer_ = true;
+                position_ = 0;
+                stage_ = Stage::configure;
+            }
+            break;
+        case Stage::configure:
+            if ((flags & I2C_ISR_BUSY) == 0) {
+                Io::write(cr2,
+                          address | (2U << I2C_CR2_NBYTES_Pos) | I2C_CR2_START | I2C_CR2_AUTOEND);
+                stage_ = Stage::configure_register;
+            }
+            break;
+        case Stage::configure_register:
+            if ((flags & I2C_ISR_TXIS) != 0) {
+                Io::write(txdr, configuration[position_].index);
+                stage_ = Stage::configure_value;
+            }
+            break;
+        case Stage::configure_value:
+            if ((flags & I2C_ISR_TXIS) != 0) {
+                Io::write(txdr, configuration[position_].value);
+                stage_ = Stage::configure_stop;
+            }
+            break;
+        case Stage::configure_stop:
+            if ((flags & I2C_ISR_STOPF) != 0) {
+                Io::write(icr, I2C_ICR_STOPCF);
+                if (++position_ < configuration.size()) {
+                    stage_ = Stage::configure;
+                    break;
+                }
+                position_ = 0;
+                transfer_ = false;
                 ready_ = true;
                 Io::write(pending, Edge::line);
                 since_ = now - 8'000_us;
@@ -254,6 +335,10 @@ class TouchState : TouchRegisters<Assignment> {
     enum class Stage : std::uint8_t {
         reset_low,
         boot,
+        configure,
+        configure_register,
+        configure_value,
+        configure_stop,
         idle,
         bus_wait,
         reg,
@@ -264,6 +349,21 @@ class TouchState : TouchRegisters<Assignment> {
     };
     inline static constexpr auto reset = Assignment::touch_reset;
     inline static constexpr std::uint32_t address = 0x38U << 1;
+    struct Setting {
+        std::uint8_t index, value;
+    };
+    // Written once after boot, in this order:
+    // - 0x86 CTRL = 0: stay in active scanning; the idle monitor mode (reset default 1) misses
+    //   short first taps.
+    // - 0x80 TH_GROUP = touch sensitivity: the minimum capacitance change that counts as contact.
+    //   Lower values are more sensitive. The i6S panel resets to 31 (0x1F), where light or very
+    //   short taps were lost; 22 (as used by i6s_cpp) detects them. Values far below risk phantom
+    //   contacts from noise or moisture, higher values need firmer presses. Set it with the CMake
+    //   cache variable CORETX_I6S_TOUCH_THRESHOLD (default 22, 10..60) and verify a change with
+    //   the touch diagnostic image, which shows the register as "TH" in hex (22 = 0x16).
+    inline static constexpr std::uint8_t touch_threshold = firmware::tuning::i6s_touch_threshold;
+    inline static constexpr std::array<Setting, 2> configuration{
+        {{0x86, 0x00}, {0x80, touch_threshold}}};
     inline static constexpr std::uint32_t clear_flags =
         I2C_ICR_NACKCF | I2C_ICR_STOPCF | I2C_ICR_BERRCF | I2C_ICR_ARLOCF | I2C_ICR_OVRCF;
     constexpr void start(const TimestampUs now) noexcept {
@@ -316,6 +416,10 @@ template <typename Io, typename Assignment = Hardware> class Touch {
     [[nodiscard]] static std::uint32_t frames() noexcept { return state_.frames(); }
     [[nodiscard]] static const auto &packet() noexcept { return state_.packet(); }
     [[nodiscard]] static std::size_t packet_bytes() noexcept { return state_.packet_bytes(); }
+    [[nodiscard]] static std::optional<std::uint8_t>
+    read_register(const std::uint8_t index) noexcept {
+        return state_.read_register(index);
+    }
 
   private:
     inline static constinit detail::TouchState<Io, Assignment> state_{};

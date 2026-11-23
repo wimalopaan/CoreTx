@@ -3,6 +3,7 @@
 
 #include "boards/common/controls.hpp"
 #include "boards/common/radio_storage.hpp"
+#include "boards/common/switch_names.hpp"
 #include "coretx/ui/translation.hpp"
 #include "coretx/ui/ui.hpp"
 
@@ -136,9 +137,8 @@ class InputMenu {
             const std::string_view label =
                 calibration                        ? tr::menu_calibration
                 : item.kind == Kind::analog_enable ? tr::menu_extra_analog
-                : item.kind == Kind::digital
-                    ? coretx::ui::detail::switch_names[auxiliary_count + item.index]
-                    : auxiliary_names[item.index];
+                : item.kind == Kind::digital       ? switch_names[auxiliary_count + item.index]
+                                                   : auxiliary_names[item.index];
             display.text(0, y, label, ink);
             if (!calibration) {
                 const int field = editing_ && (selected_ == i) ? draft_ : value(diagnostics, i);
@@ -154,8 +154,8 @@ class InputMenu {
         const auto selected = entry(diagnostics, selected_);
         display.small_text(0, 58,
                            notice_ != nullptr ? notice_
-                           : editing_ && features::i6s && (selected.kind == Kind::digital) &&
-                                   (selected.index < 2) && (draft_ != 0)
+                           : editing_ && (selected.kind == Kind::digital) &&
+                                   board::swd_input(selected.index) && (draft_ != 0)
                                ? tr::inputs_swd_warning
                            : editing_ && (selected.kind == Kind::digital) &&
                                    (draft_ == static_cast<int>(DigitalInputMode::three_position))
@@ -172,8 +172,7 @@ class InputMenu {
     };
     [[nodiscard]] static constexpr bool digital_visible(const Diagnostics &diagnostics,
                                                         const std::size_t index) noexcept {
-        if (features::i6s && ((index == 2) || (index == 3)) &&
-            diagnostics.input_setup().external_module)
+        if (board::external_module_input(index) && diagnostics.input_setup().external_module)
             return false;
         return ((index != 1) && (index != 3)) ||
                (diagnostics.input_setup().digital_mode(index - 1) !=
@@ -191,7 +190,7 @@ class InputMenu {
             return {Kind::analog, row};
         row -= analogs;
         if constexpr (features::extended_inputs)
-            for (std::size_t i = 0; i < (features::i6s ? digital_input_count : 2U); ++i) {
+            for (std::size_t i = 0; i < board::digital_inputs; ++i) {
                 if (!digital_visible(diagnostics, i))
                     continue;
                 if (row == 0)
@@ -204,7 +203,7 @@ class InputMenu {
         std::size_t result = 7 + (diagnostics.input_setup().extra_analog ? extra_adc_count : 0);
         if constexpr (features::extended_inputs) {
             ++result;
-            for (std::size_t i = 0; i < (features::i6s ? digital_input_count : 2U); ++i)
+            for (std::size_t i = 0; i < board::digital_inputs; ++i)
                 result += digital_visible(diagnostics, i) ? 1U : 0U;
         }
         return result;

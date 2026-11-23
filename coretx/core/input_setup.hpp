@@ -40,8 +40,8 @@ struct InputSetup {
         values.fill({0, 2048, 4095});
         return values;
     }();
-    constexpr explicit InputSetup(const bool i6s = false) noexcept {
-        if (i6s)
+    constexpr explicit InputSetup(const bool sb_three_position = false) noexcept {
+        if (sb_three_position)
             modes[1] = InputMode::three_position;
     }
     [[nodiscard]] constexpr DigitalInputMode digital_mode(const std::size_t index) const noexcept {

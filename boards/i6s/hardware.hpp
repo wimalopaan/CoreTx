@@ -10,6 +10,9 @@ struct Hardware {
     static constexpr std::string_view name = "I6S";
     static constexpr bool sb_three_position = true;
     static constexpr bool power_latch = true;
+    static constexpr bool trim_buttons = false;
+    // PB6/PB7 share the external module bay and are unusable while a module is fitted.
+    static constexpr std::uint8_t external_module_digital_mask = (1U << 2) | (1U << 3);
     static constexpr Pin hold_power{GPIOB_BASE, 15};
     static constexpr Pin power_button{GPIOB_BASE, 14};
     static constexpr std::array power_leds{Pin{GPIOD_BASE, 10}, Pin{GPIOD_BASE, 11}};

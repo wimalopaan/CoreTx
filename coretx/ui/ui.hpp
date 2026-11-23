@@ -3,9 +3,13 @@
 
 #include "coretx/core/controls.hpp"
 
+#include <array>
 #include <string_view>
 
 namespace coretx::ui {
+
+// Display names of the switch sources; the board defines them because the auxiliary inputs differ.
+using SwitchNames = std::array<std::string_view, switch_count>;
 
 class Framebuffer {
   public:
@@ -29,12 +33,15 @@ class Framebuffer {
     constexpr void pixel(int x, int y, bool ink = true) noexcept;
     [[nodiscard]] constexpr bool pixel_at(int x, int y) const noexcept;
     constexpr void rectangle(int x, int y, int width, int height, bool ink = true) noexcept;
+    constexpr void invert(int x, int y, int width, int height) noexcept;
     constexpr void text(int x, int y, const std::string_view &value, bool ink = true) noexcept;
     constexpr void number(int right, int y, std::int32_t value, bool ink = true) noexcept;
     constexpr void unsigned_number(int right, int y, std::uint32_t value, bool ink = true) noexcept;
     [[nodiscard]] constexpr const auto &bytes() const noexcept { return pixels_; }
 
   private:
+    enum class Fill : std::uint8_t { clear, set, invert };
+    constexpr void fill(int x, int y, int w, int h, Fill mode) noexcept;
     constexpr void render_number(int right, int y, std::uint32_t magnitude, bool negative,
                                  bool ink) noexcept;
     // Display page order: byte x + (y / 8) * 128, bit y % 8.
@@ -70,9 +77,12 @@ struct PointerEvent {
 class Interface {
   public:
     constexpr void open(const Page page) noexcept {
+        const auto names = switch_names_;
         *this = {};
+        switch_names_ = names;
         page_ = page;
     }
+    constexpr void set_switch_names(const SwitchNames &names) noexcept { switch_names_ = &names; }
     [[nodiscard]] constexpr std::size_t selected_row(const Model &model) const noexcept {
         return row(model);
     }
@@ -181,6 +191,7 @@ class Interface {
     std::uint16_t analog_sources_{0xFFFF};
     std::uint32_t switch_sources_{(1U << switch_count) - 1U};
     std::uint16_t six_position_sources_{};
+    const SwitchNames *switch_names_{};
 };
 
 [[nodiscard]] constexpr Model simulator_model() noexcept;

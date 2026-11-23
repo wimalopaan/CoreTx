@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "boards/common/slot_transfer.hpp"
 #include "coretx/radio/afhds2a.hpp"
 #include "coretx/storage/storage.hpp"
 #include "platform/stm32f072/eeprom.hpp"
@@ -127,22 +128,16 @@ template <typename Memory> class RadioStorage {
     }
     constexpr void service(const TimestampUs now, const StorageProbeResult probe) noexcept {
         if (stage_ == Stage::wait) {
-            if ((probe.state == StorageProbeState::idle) ||
-                (probe.state == StorageProbeState::scanning))
+            const auto selection = select_memory<Memory>(probe);
+            if (selection == ProbeSelection::wait)
                 return;
-            loaded_ = true;
-            if (probe.state != StorageProbeState::found) {
-                finish(RadioStorageStatus::missing);
-                return;
-            }
-            if (std::popcount(probe.addresses) != 1) {
-                finish(RadioStorageStatus::multiple);
+            if (selection != ProbeSelection::selected) {
+                finish(selection == ProbeSelection::missing ? RadioStorageStatus::missing
+                                                            : RadioStorageStatus::multiple);
                 return;
             }
-            Memory::select(static_cast<std::uint8_t>(StorageProbeResult::first_address +
-                                                     std::countr_zero(probe.addresses)));
-            loaded_ = false;
             stage_ = Stage::load_first;
+            transfer_.read(address(0), record_);
         }
         if (stage_ == Stage::ready) {
             if (!dirty_ || !writable_)
@@ -151,88 +146,50 @@ template <typename Memory> class RadioStorage {
             record_ = radio_storage::encode(settings_, has_active_ ? generation_ + 1U : 0U);
             pending_settings_ = settings_;
             status_ = RadioStorageStatus::saving;
-            stage_ = Stage::invalidate;
+            stage_ = Stage::write;
+            transfer_.write(address(target_), record_, 1);
         }
-        if (pending_) {
-            Memory::service(now);
-            if (Memory::busy())
+        for (;;) {
+            switch (transfer_.service(now)) {
+            case Transfer::Result::busy:
                 return;
-            pending_ = false;
-            if (Memory::error() != I2cError::none) {
+            case Transfer::Result::failed:
                 writable_ = false;
                 finish(RadioStorageStatus::io_error);
                 return;
+            case Transfer::Result::mismatch:
+                writable_ = false;
+                finish(RadioStorageStatus::verify);
+                return;
+            case Transfer::Result::done:
+                break;
             }
-            switch (stage_) {
-            case Stage::load_first:
+            if (stage_ == Stage::load_first) {
                 first_ = radio_storage::decode(record_);
                 stage_ = Stage::load_second;
-                break;
-            case Stage::load_second:
+                transfer_.read(address(1), record_);
+                continue;
+            }
+            if (stage_ == Stage::load_second) {
                 load(radio_storage::decode(record_));
                 return;
-            case Stage::invalidate:
-                stage_ = Stage::body;
-                break;
-            case Stage::body:
-                stage_ = Stage::commit;
-                break;
-            case Stage::commit:
-                stage_ = Stage::verify;
-                break;
-            case Stage::verify:
-                if (record_ !=
-                    radio_storage::encode(pending_settings_, has_active_ ? generation_ + 1U : 0U)) {
-                    writable_ = false;
-                    finish(RadioStorageStatus::verify);
-                    return;
-                }
-                generation_ = has_active_ ? generation_ + 1U : 0U;
-                active_ = target_;
-                has_active_ = true;
-                dirty_ = settings_ != pending_settings_;
-                finish(RadioStorageStatus::saved);
-                return;
-            case Stage::wait:
-            case Stage::ready:
-                break;
             }
-        }
-        const auto address = static_cast<std::uint16_t>(radio_storage::base_address +
-                                                        (stage_ == Stage::load_second  ? 1U
-                                                         : stage_ == Stage::load_first ? 0U
-                                                                                       : target_) *
-                                                            radio_storage::record_size);
-        bool started{};
-        if ((stage_ == Stage::load_first) || (stage_ == Stage::load_second) ||
-            (stage_ == Stage::verify))
-            started = Memory::read(address, record_);
-        else if (stage_ == Stage::invalidate)
-            started = Memory::write(address, invalid_);
-        else if (stage_ == Stage::body)
-            started = Memory::write(static_cast<std::uint16_t>(address + 1),
-                                    std::span{record_}.subspan(1));
-        else if (stage_ == Stage::commit)
-            started = Memory::write(address, std::span{record_}.first(1));
-        if (!started) {
-            writable_ = false;
-            finish(RadioStorageStatus::io_error);
-        } else {
-            pending_ = true;
+            generation_ = has_active_ ? generation_ + 1U : 0U;
+            active_ = target_;
+            has_active_ = true;
+            dirty_ = settings_ != pending_settings_;
+            finish(RadioStorageStatus::saved);
+            return;
         }
     }
 
   private:
-    enum class Stage : std::uint8_t {
-        wait,
-        load_first,
-        load_second,
-        ready,
-        invalidate,
-        body,
-        commit,
-        verify
-    };
+    enum class Stage : std::uint8_t { wait, load_first, load_second, ready, write };
+    using Transfer = SlotTransfer<Memory>;
+    [[nodiscard]] static constexpr std::uint16_t address(const std::size_t slot) noexcept {
+        return static_cast<std::uint16_t>(radio_storage::base_address +
+                                          slot * radio_storage::record_size);
+    }
     constexpr void finish(const RadioStorageStatus status) noexcept {
         status_ = status;
         stage_ = Stage::ready;
@@ -279,13 +236,12 @@ template <typename Memory> class RadioStorage {
     RadioSettings pending_settings_{};
     radio_storage::Record record_{};
     radio_storage::Decoded first_{};
-    inline static constexpr std::array<std::uint8_t, 1> invalid_{0};
+    Transfer transfer_{};
     std::uint32_t generation_{};
     std::size_t active_{};
     std::size_t target_{};
     Stage stage_{};
     RadioStorageStatus status_{};
-    bool pending_{};
     bool loaded_{};
     bool writable_{};
     bool dirty_{};

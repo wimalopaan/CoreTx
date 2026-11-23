@@ -128,6 +128,22 @@ Die folgenden Projektoptionen gelten ohne Überschreibung durch Preset/Cache:
 |`CORETX_I2C_FAST_MODE` |`ON`
 |EEPROM-I2C2 mit etwa 400 kHz; OFF wählt 100 kHz.
  Der Touch-Bus des i6S bleibt unverändert.
+|`CORETX_CRSF_REMOTE_TIMEOUT_MS` |`1000`
+|CRSF-Parameterlese-Timeout je Anfrage für Empfänger und andere Geräte hinter der Funkstrecke,
+ 100..10000 ms. Das TX-Modul selbst behält 500 ms.
+|`CORETX_CRSF_REMOTE_RETRIES` |`9`
+|Wiederholungen einer unbeantworteten entfernten Parameteranfrage, 0..50. Der Standard ergibt
+ 10 Anfragen, _CRSF-Antwort fehlt #n_ erscheint also nach etwa 10 s.
+ Das TX-Modul selbst behält 2 Wiederholungen.
+|`CORETX_CRSF_PARAMETER_IDS` |`256`
+|Höchste CRSF-Parameter-ID + 1, die das Menü aufnehmen kann, 32..256. Kostet fünf Byte RAM je ID;
+ Geräte mit höheren IDs melden _CRSF-Speichergrenze_. 256 deckt jedes Gerät ab.
+|`CORETX_CRSF_CACHE_BYTES` |`1280`
+|RAM-Cache für geladene CRSF-Parametereinträge, 512..4096 Byte. Kleinere Caches laden beim
+ Blättern öfter nach, begrenzen aber sonst nichts.
+|`CORETX_I6S_TOUCH_THRESHOLD` |`22`
+|i6S-FT6236-Touchschwelle (Register 0x80), 10..60; kleiner ist empfindlicher.
+ Siehe _Touch-Empfindlichkeit_ in PERIPHERALS_de.adoc.
 |`CORETX_BOARD` |`I6X`
 |Board-Auswahl: `I6X` oder `I6S`; das i6s-Preset wählt `I6S`.
  Bestimmt auch Board-Merkmale in nativen Tests.

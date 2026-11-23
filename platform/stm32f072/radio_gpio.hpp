@@ -45,4 +45,14 @@ template <typename Io, A7105Pins Pins> constexpr void internal_front_end_off() n
     configure<Io>(Pins.tx_enable, false);
 }
 
+// Switches the external module supply off and leaves its enable pin as a driven output.
+template <typename Io, typename Assignment> constexpr void external_module_off() noexcept {
+    namespace reg = stm32f072::registers;
+    Io::write(reg::rcc_ahbenr,
+              Io::read(reg::rcc_ahbenr) | gpio_clock(Assignment::external_module_power));
+    (void)Io::read(reg::rcc_ahbenr);
+    drive<Io>(Assignment::external_module_power, !Assignment::external_module_active_high);
+    configure<Io>(Assignment::external_module_power, false);
+}
+
 } // namespace coretx::firmware

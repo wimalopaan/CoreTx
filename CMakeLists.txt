@@ -14,6 +14,26 @@ option(CORETX_MULTISWITCH "Enable MultiSwitch dashboards and SET4 commands (requ
 option(CORETX_EXTENDED_INPUTS "Enable optional i6X/i6S analog and digital hardware inputs" ON)
 option(CORETX_SECURE_UI "Require RF OFF for protected UI operations" OFF)
 option(CORETX_I2C_FAST_MODE "Use 400 kHz Fast mode instead of 100 kHz for storage I2C" ON)
+set(CORETX_CRSF_REMOTE_TIMEOUT_MS "1000" CACHE STRING
+    "CRSF parameter read timeout per request for receivers/remote devices in ms (100..10000)")
+set(CORETX_CRSF_REMOTE_RETRIES "9" CACHE STRING
+    "CRSF parameter read repetitions for receivers/remote devices (0..50)")
+set(CORETX_CRSF_PARAMETER_IDS "256" CACHE STRING
+    "CRSF parameter IDs 0..n-1 held in the configuration tree tables (32..256)")
+set(CORETX_CRSF_CACHE_BYTES "1280" CACHE STRING
+    "CRSF parameter definition cache in bytes (512..4096)")
+set(CORETX_I6S_TOUCH_THRESHOLD "22" CACHE STRING
+    "i6S FT6236 touch threshold TH_GROUP, lower is more sensitive (10..60)")
+function(coretx_check_range name minimum maximum)
+    if(NOT "${${name}}" MATCHES "^[0-9]+$" OR ${name} LESS ${minimum} OR ${name} GREATER ${maximum})
+        message(FATAL_ERROR "${name} must be an integer in ${minimum}..${maximum}")
+    endif()
+endfunction()
+coretx_check_range(CORETX_CRSF_REMOTE_TIMEOUT_MS 100 10000)
+coretx_check_range(CORETX_CRSF_REMOTE_RETRIES 0 50)
+coretx_check_range(CORETX_CRSF_PARAMETER_IDS 32 256)
+coretx_check_range(CORETX_CRSF_CACHE_BYTES 512 4096)
+coretx_check_range(CORETX_I6S_TOUCH_THRESHOLD 10 60)
 set(CORETX_EDGETX_SOURCE "" CACHE PATH "Optional EdgeTX checkout to verify against the snapshot")
 set(TRANSLATION "EN" CACHE STRING "Menu language")
 set_property(CACHE TRANSLATION PROPERTY STRINGS EN DE)
@@ -55,6 +75,11 @@ target_compile_definitions(coretx INTERFACE
     CORETX_EXTENDED_INPUTS=$<BOOL:${CORETX_EXTENDED_INPUTS}>
     CORETX_SECURE_UI=$<BOOL:${CORETX_SECURE_UI}>
     CORETX_I2C_FAST_MODE=$<BOOL:${CORETX_I2C_FAST_MODE}>
+    CORETX_CRSF_REMOTE_TIMEOUT_MS=${CORETX_CRSF_REMOTE_TIMEOUT_MS}
+    CORETX_CRSF_REMOTE_RETRIES=${CORETX_CRSF_REMOTE_RETRIES}
+    CORETX_CRSF_PARAMETER_IDS=${CORETX_CRSF_PARAMETER_IDS}
+    CORETX_CRSF_CACHE_BYTES=${CORETX_CRSF_CACHE_BYTES}
+    CORETX_I6S_TOUCH_THRESHOLD=${CORETX_I6S_TOUCH_THRESHOLD}
 )
 if(NOT CORETX_STM32F072 AND TRANSLATION STREQUAL "DE")
     target_compile_definitions(coretx INTERFACE CORETX_LANGUAGE_DE)

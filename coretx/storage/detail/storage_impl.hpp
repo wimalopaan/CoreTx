@@ -120,6 +120,12 @@ struct Reader {
     }
 };
 
+// Lets the codec use model and setup objects that do not live in one State.
+template <typename ModelType, typename SetupType> struct StateView {
+    ModelType &model;
+    SetupType &setup;
+};
+
 namespace packed_model {
 inline constexpr std::size_t input_bytes = 7;
 inline constexpr std::size_t mix_bytes = 6;
@@ -387,8 +393,9 @@ record_crc(const std::span<const std::uint8_t> &record) noexcept {
     return ~crc;
 }
 
+template <typename Snapshot>
 [[nodiscard]] constexpr SlotInfo decode_into(const std::span<const std::uint8_t> &record,
-                                             State &state) noexcept {
+                                             Snapshot &state) noexcept {
     if (record.empty()) {
         return {{Error::empty}, 0};
     }
@@ -432,19 +439,23 @@ record_crc(const std::span<const std::uint8_t> &record) noexcept {
     if (payload.position != length) {
         return {{Error::length, 6}, 0};
     }
-    return {validate(state), generation};
+    return {validate(state.model, state.setup), generation};
 }
 
 } // namespace detail
 
-constexpr Status validate(const State &state) noexcept {
-    if (!coretx::validate(state.model)) {
+constexpr Status validate(const Model &model, const ControlSetup &setup) noexcept {
+    if (!coretx::validate(model)) {
         return {Error::model};
     }
-    if (!coretx::validate(state.setup)) {
+    if (!coretx::validate(setup)) {
         return {Error::setup};
     }
     return {};
+}
+
+constexpr Status validate(const State &state) noexcept {
+    return validate(state.model, state.setup);
 }
 
 constexpr std::uint32_t crc32(const std::span<const std::uint8_t> &data) noexcept {
@@ -455,13 +466,14 @@ constexpr std::uint32_t crc32(const std::span<const std::uint8_t> &data) noexcep
     return ~crc;
 }
 
-constexpr Status encode(const State &state, const std::uint32_t generation,
-                        Record &record) noexcept {
-    if (const auto status = validate(state); !status) {
+constexpr Status encode(const Model &model, const ControlSetup &setup,
+                        const std::uint32_t generation, Record &record) noexcept {
+    if (const auto status = validate(model, setup); !status) {
         return status;
     }
     record.fill(0xFF);
     detail::Writer payload{std::span{record}.subspan(header_size)};
+    const detail::StateView<const Model, const ControlSetup> state{model, setup};
     if (!detail::transfer(payload, state)) {
         return {Error::length};
     }
@@ -474,6 +486,17 @@ constexpr Status encode(const State &state, const std::uint32_t generation,
     detail::Writer checksum{std::span{record}.subspan(detail::checksum_offset, 4)};
     checksum.word(detail::record_crc(record));
     return {};
+}
+
+constexpr Status encode(const State &state, const std::uint32_t generation,
+                        Record &record) noexcept {
+    return encode(state.model, state.setup, generation, record);
+}
+
+constexpr SlotInfo decode_parts(const std::span<const std::uint8_t> &record, Model &model,
+                                ControlSetup &setup) noexcept {
+    detail::StateView<Model, ControlSetup> state{model, setup};
+    return detail::decode_into(record, state);
 }
 
 constexpr SlotInfo decode(const std::span<const std::uint8_t> &record, State &state) noexcept {
@@ -490,10 +513,8 @@ constexpr SlotInfo inspect(const std::span<const std::uint8_t> &record) noexcept
     return detail::decode_into(record, candidate);
 }
 
-namespace detail {
-constexpr Selection select_records(const std::span<const std::uint8_t> &first,
-                                   const std::span<const std::uint8_t> &second, const SlotInfo a,
-                                   const SlotInfo b) noexcept {
+constexpr Selection select_slots(const SlotInfo a, const SlotInfo b,
+                                 const bool identical) noexcept {
     Selection result{{}, {a.status, b.status}, 0, a.generation};
     // Never overwrite an intact record from a newer, unsupported format.
     if ((a.status.code == Error::version) || (b.status.code == Error::version)) {
@@ -507,8 +528,7 @@ constexpr Selection select_records(const std::span<const std::uint8_t> &first,
         result.generation = b.generation;
     } else if (b) {
         const std::uint32_t distance = b.generation - a.generation;
-        if ((distance == 0x80000000U) ||
-            ((distance == 0) && !std::equal(first.begin(), first.end(), second.begin()))) {
+        if ((distance == 0x80000000U) || ((distance == 0) && !identical)) {
             result.status = {Error::generation};
         } else if ((distance != 0) && (distance < 0x80000000U)) {
             result.slot = 1;
@@ -517,13 +537,12 @@ constexpr Selection select_records(const std::span<const std::uint8_t> &first,
     }
     return result;
 }
-} // namespace detail
 
 constexpr Selection select(const std::span<const std::uint8_t> &first,
                            const std::span<const std::uint8_t> &second) noexcept {
     const auto a = inspect(first);
     const auto b = inspect(second);
-    return detail::select_records(first, second, a, b);
+    return select_slots(a, b, std::equal(first.begin(), first.end(), second.begin(), second.end()));
 }
 
 constexpr Selection select_into(const std::span<const std::uint8_t> &first,
@@ -531,7 +550,8 @@ constexpr Selection select_into(const std::span<const std::uint8_t> &first,
                                 State &scratch) noexcept {
     const auto a = detail::decode_into(first, scratch);
     const auto b = detail::decode_into(second, scratch);
-    auto result = detail::select_records(first, second, a, b);
+    auto result =
+        select_slots(a, b, std::equal(first.begin(), first.end(), second.begin(), second.end()));
     if (result && (result.slot == 0))
         result.status = detail::decode_into(first, scratch).status;
     return result;

@@ -3,6 +3,7 @@
 
 #include "boards/common/model_storage.hpp"
 #include "boards/common/multiswitch_ui.hpp"
+#include "boards/common/switch_names.hpp"
 #include "coretx/ui/translation.hpp"
 #include "coretx/ui/ui.hpp"
 
@@ -259,8 +260,8 @@ class Menu {
                 notice_ = store.message();
                 return {};
             }
-            const auto physical = features::i6s ? selected_ : selected_ / 2;
-            const bool mode = !features::i6s && ((selected_ % 2) == 0);
+            const auto physical = board::trim_buttons ? selected_ / 2 : selected_;
+            const bool mode = board::trim_buttons && ((selected_ % 2) == 0);
             const auto axis = trim_axis(diagnostics.setup(), physical);
             if (axis == trim_count) {
                 notice_ = coretx::ui::tr::inputs_invalid;
@@ -278,7 +279,7 @@ class Menu {
                              : model.trims[axis].value();
                     editing_ = true;
                 } else
-                    move_selection(key, features::i6s ? trim_count : (trim_count * 2));
+                    move_selection(key, board::trim_buttons ? (trim_count * 2) : trim_count);
             } else if ((key == Key::up) || (key == Key::down)) {
                 draft_value_ = std::clamp(draft_value_ + (key == Key::up ? 1 : -1),
                                           mode ? 0 : int{TrimSteps::minimum},
@@ -757,8 +758,8 @@ class Menu {
         if (screen_ == MenuScreen::trims) {
             for (std::size_t i = first;
                  (i < row_count()) && (i < (first + menu_detail::visible_rows)); ++i) {
-                const auto physical = features::i6s ? i : i / 2;
-                const bool mode = !features::i6s && ((i % 2) == 0);
+                const auto physical = board::trim_buttons ? i / 2 : i;
+                const bool mode = board::trim_buttons && ((i % 2) == 0);
                 const auto axis = trim_axis(diagnostics.setup(), physical);
                 const int y =
                     menu_detail::list_y + static_cast<int>(i - first) * menu_detail::row_height;
@@ -768,7 +769,8 @@ class Menu {
                 display.text(22, y, mode ? tr::trim_mode : tr::trim_value, ink);
                 if (!mode && (axis < trim_count))
                     coretx::ui::detail::draw_source(
-                        display, 56, y, {SourceKind::analog, static_cast<std::uint8_t>(axis)}, ink);
+                        display, 56, y, {SourceKind::analog, static_cast<std::uint8_t>(axis)}, ink,
+                        &switch_names);
                 const int value =
                     editing_ && (i == selected_) ? draft_value_
                     : mode ? static_cast<int>(
@@ -1116,7 +1118,7 @@ class Menu {
                     {index < analog_count ? SourceKind::analog : SourceKind::switch_position,
                      static_cast<std::uint8_t>(index < analog_count ? index : index - analog_count),
                      false},
-                    ink);
+                    ink, &switch_names);
             else
                 display.text(111, y, "--", ink);
         } else {
@@ -1133,12 +1135,12 @@ class Menu {
         return row == 0 ? 0 : features::a7105 ? row : 3;
     }
     [[nodiscard]] constexpr std::size_t row_count() const noexcept {
-        return screen_ == MenuScreen::root          ? 3
-               : screen_ == MenuScreen::radio       ? menu_detail::external_module_row + 1
-               : screen_ == MenuScreen::models      ? models::count
-               : screen_ == MenuScreen::setup       ? menu_detail::trim_row + 1
-               : screen_ == MenuScreen::trims       ? features::i6s ? trim_count : (trim_count * 2)
-               : screen_ == MenuScreen::multiswitch ? multiswitch_page_count + 1
+        return screen_ == MenuScreen::root     ? 3
+               : screen_ == MenuScreen::radio  ? menu_detail::external_module_row + 1
+               : screen_ == MenuScreen::models ? models::count
+               : screen_ == MenuScreen::setup  ? menu_detail::trim_row + 1
+               : screen_ == MenuScreen::trims  ? board::trim_buttons ? (trim_count * 2) : trim_count
+               : screen_ == MenuScreen::multiswitch        ? multiswitch_page_count + 1
                : screen_ == MenuScreen::multiswitch_page   ? 9
                : screen_ == MenuScreen::multiswitch_button ? 5
                : (screen_ == MenuScreen::dashboard_channels) ||
@@ -1242,7 +1244,7 @@ class Menu {
                     const auto source = page == coretx::ui::Page::inputs
                                             ? model.inputs[editor_.selected_row(model)].source
                                             : model.mixes[editor_.selected_row(model)].source;
-                    coretx::ui::detail::draw_source(display, 98, y, source, ink);
+                    coretx::ui::detail::draw_source(display, 98, y, source, ink, &switch_names);
                 } else if ((page == coretx::ui::Page::mixes) && (i == 3))
                     display.text(116, y, value == 0 ? "+=" : value == 1 ? "*=" : ":=", ink);
                 else if ((page == coretx::ui::Page::inputs) && (i == 4)) {
@@ -1251,7 +1253,8 @@ class Menu {
                     else
                         coretx::ui::detail::draw_source(
                             display, 104, y,
-                            {SourceKind::analog, static_cast<std::uint8_t>(value - 2)}, ink);
+                            {SourceKind::analog, static_cast<std::uint8_t>(value - 2)}, ink,
+                            &switch_names);
                 } else if ((page == coretx::ui::Page::inputs) && (i == 5))
                     display.text(110, y, value == 0 ? "+/-" : value == 1 ? "-" : "+", ink);
                 else if (((page == coretx::ui::Page::outputs) && (i == 3)) ||
@@ -1276,7 +1279,7 @@ class Menu {
                                                         {SourceKind::switch_position,
                                                          static_cast<std::uint8_t>(value - 1),
                                                          false},
-                                                        ink);
+                                                        ink, &switch_names);
                 } else if ((i ==
                             static_cast<std::size_t>(page == coretx::ui::Page::inputs ? 9 : 8)) &&
                            (page != coretx::ui::Page::outputs))
@@ -1298,7 +1301,8 @@ class Menu {
                         coretx::ui::detail::indexed_label(
                             display, 0, y, page == coretx::ui::Page::inputs ? "I" : "CH",
                             line.destination, ink);
-                        coretx::ui::detail::draw_source(display, 30, y, line.source, ink);
+                        coretx::ui::detail::draw_source(display, 30, y, line.source, ink,
+                                                        &switch_names);
                         display.number(92, y, line.weight_percent.value(), ink);
                         display.compact();
                         menu_detail::condition(display, 108, y + 2, line.condition, ink);
