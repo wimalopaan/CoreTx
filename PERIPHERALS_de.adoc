@@ -471,6 +471,9 @@ Eine DFU-Sicherung des internen Flash enthält dieses EEPROM *nicht*.
 
 *PB15* ist die aktive HIGH-Selbsthaltung. *PB14* ist das gemeinsame aktive
 LOW-Signal der beiden Einschalttasten.
+Beim Kaltstart beide Tasten durchgehend 3 s halten. Erst dann setzt CoreTX PB15
+und startet die LCD- und HF-Initialisierung. Loslassen einer Taste setzt die
+Wartezeit zurück; Watchdog-/Software-Resets überspringen sie.
 Nach dem Start müssen die Tasten zunächst losgelassen werden.
 Beide Tasten 1,5 s halten, um das Abschalten anzufordern.
 CoreTX deaktiviert sofort die HF, spielt eine absteigende Tonfolge
@@ -487,6 +490,8 @@ Nach Installation von CoreTX mit Einschalt-DFU beide hinteren Tasten
 *SE/SF (PA9/PA10)* beim Einschalten mit den vorderen Einschalttasten halten.
 ROM-DFU startet dann ohne Brücke vor Watchdog-/EEPROM-Initialisierung;
 PB15 bleibt HIGH und GPIOB wird bei der Übergabe nicht zurückgesetzt.
+Das LCD zeigt nach der Übergabe weiter `DFU-Bootloader`; der Hardware-Einstieg
+über die Boot-Pins umgeht diese Anzeige.
 Siehe link:BUILDING_de.adoc#dfu-update[Einschalt-DFU und Wiederherstellung].
 
 === Interrupts und ungenutzte Ressourcen

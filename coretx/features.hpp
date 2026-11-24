@@ -8,7 +8,7 @@
     !defined(CORETX_SECURE_UI) || !defined(CORETX_I2C_FAST_MODE) ||                                \
     !defined(CORETX_CRSF_REMOTE_TIMEOUT_MS) || !defined(CORETX_CRSF_REMOTE_RETRIES) ||             \
     !defined(CORETX_CRSF_PARAMETER_IDS) || !defined(CORETX_CRSF_CACHE_BYTES) ||                    \
-    !defined(CORETX_I6S_TOUCH_THRESHOLD)
+    !defined(CORETX_I6S_TOUCH_THRESHOLD) || !defined(CORETX_MODUL_TANKMIX)
 #error "Define firmware features through the coretx CMake target"
 #endif
 
@@ -20,6 +20,7 @@ namespace coretx::firmware::features {
 inline constexpr bool a7105 = CORETX_A7105 != 0;
 inline constexpr bool crsf = CORETX_CRSF != 0;
 inline constexpr bool multiswitch = crsf && (CORETX_MULTISWITCH != 0);
+inline constexpr bool tankmix = CORETX_MODUL_TANKMIX != 0;
 inline constexpr bool i6s = CORETX_I6S != 0;
 inline constexpr bool extended_inputs = CORETX_EXTENDED_INPUTS != 0;
 inline constexpr bool secure_ui = CORETX_SECURE_UI != 0;

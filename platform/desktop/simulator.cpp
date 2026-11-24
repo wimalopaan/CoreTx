@@ -235,7 +235,10 @@ bool queue_editor_smoke_events(SDL_Window *const window) {
     constexpr SDL_Point plus{80, 56};
     constexpr SDL_Point row2{110, 28};
     constexpr SDL_Point row3{110, 36};
-    if (!clicks(window, {page, page, ok, plus, ok}) || !queue_key(window, SDL_SCANCODE_M) ||
+    for (std::size_t i = 0; i < coretx::ui::page_count - 3; ++i)
+        if (!click(window, page.x, page.y))
+            return false;
+    if (!clicks(window, {ok, plus, ok}) || !queue_key(window, SDL_SCANCODE_M) ||
         !queue_key(window, SDL_SCANCODE_ESCAPE)) {
         return false;
     }

@@ -11,6 +11,7 @@ option(CORETX_ADC_COHERENT_SNAPSHOTS "Use two DMA halves for coherent I6X ADC sc
 option(CORETX_A7105 "Enable internal A7105 / AFHDS 2A" ON)
 option(CORETX_CRSF "Enable external CRSF module" ON)
 option(CORETX_MULTISWITCH "Enable MultiSwitch dashboards and SET4 commands (requires CRSF)" ON)
+option(CORETX_MODUL_TANKMIX "Enable the managed tank mixer module" ON)
 option(CORETX_EXTENDED_INPUTS "Enable optional i6X/i6S analog and digital hardware inputs" ON)
 option(CORETX_SECURE_UI "Require RF OFF for protected UI operations" OFF)
 option(CORETX_I2C_FAST_MODE "Use 400 kHz Fast mode instead of 100 kHz for storage I2C" ON)
@@ -71,6 +72,7 @@ target_compile_definitions(coretx INTERFACE
     CORETX_A7105=$<BOOL:${CORETX_A7105}>
     CORETX_CRSF=$<BOOL:${CORETX_CRSF}>
     CORETX_MULTISWITCH=$<AND:$<BOOL:${CORETX_CRSF}>,$<BOOL:${CORETX_MULTISWITCH}>>
+    CORETX_MODUL_TANKMIX=$<OR:$<BOOL:${CORETX_MODUL_TANKMIX}>,$<BOOL:$<TARGET_PROPERTY:CORETX_CONVERTER>>>
     CORETX_I6S=$<BOOL:${CORETX_I6S}>
     CORETX_EXTENDED_INPUTS=$<BOOL:${CORETX_EXTENDED_INPUTS}>
     CORETX_SECURE_UI=$<BOOL:${CORETX_SECURE_UI}>
@@ -181,6 +183,10 @@ if(BUILD_TESTING)
     target_compile_options(coretx_storage_tests PRIVATE
         $<$<CXX_COMPILER_ID:Clang>:-fconstexpr-steps=4000000>)
     add_test(NAME coretx_storage COMMAND coretx_storage_tests)
+    add_executable(coretx_model_converter_tests tests/model_converter_test.cpp)
+    target_link_libraries(coretx_model_converter_tests PRIVATE coretx coretx_stm32f072_cmsis)
+    set_property(TARGET coretx_model_converter_tests PROPERTY CORETX_CONVERTER TRUE)
+    add_test(NAME coretx_model_converter COMMAND coretx_model_converter_tests)
     if(UNIX)
         add_executable(coretx_file_storage_tests tests/file_storage_test.cpp)
         target_link_libraries(coretx_file_storage_tests PRIVATE coretx_file_storage coretx_ui)

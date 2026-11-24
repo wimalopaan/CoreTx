@@ -23,6 +23,14 @@ inline constexpr std::size_t channel_count = 16;
 inline constexpr std::size_t max_input_lines = 16;
 inline constexpr std::size_t max_mix_lines = 24;
 inline constexpr std::size_t logical_switch_count = 8;
+inline constexpr std::size_t curve_count = 4;
+
+struct Curve {
+    // The outer x coordinates are fixed at -100 and +100 percent.
+    std::array<std::int8_t, 3> x{-50, 0, 50};
+    std::array<std::int8_t, 5> y{-100, -50, 0, 50, 100};
+    constexpr bool operator==(const Curve &) const noexcept = default;
+};
 
 struct InputWeightTag;
 struct MixWeightTag;
@@ -120,6 +128,9 @@ struct LogicalSwitch {
 
 struct LogicalState {
     std::uint8_t latches{};
+#if CORETX_MODUL_TANKMIX
+    bool tank_reverse{};
+#endif
 };
 
 struct LogicalFrame {
@@ -130,6 +141,16 @@ struct LogicalFrame {
 enum class InputSide : std::uint8_t { both, negative, positive };
 enum class TrimSource : std::uint8_t { automatic, none, stick1, stick2, stick3, stick4 };
 enum class Multiplex : std::uint8_t { add, multiply, replace };
+enum class MixRole : std::uint8_t { manual, tank_drive, tank_forward, tank_reverse };
+
+struct TankMixer {
+    // Retain storage metadata in module-free builds for lossless inactive-model roundtrips.
+    bool enabled{};
+    std::uint8_t drive_input{0}, steering_input{1}, left_channel{0}, right_channel{1},
+        steering_percent{100}, hysteresis_percent{3};
+    bool reverse_steering{true};
+    constexpr bool operator==(const TankMixer &) const noexcept = default;
+};
 
 struct InputLine {
     std::uint8_t destination{};
@@ -140,6 +161,8 @@ struct InputLine {
     InputWeight weight_percent{InputWeight::constant<100>()};
     InputOffset offset_percent{};
     ExpoPercent expo_percent{};
+    // 0 disables the curve; 1..4 select a model curve.
+    std::uint8_t curve{};
 };
 
 struct MixLine {
@@ -150,6 +173,8 @@ struct MixLine {
     bool carry_trim{true};
     MixWeight weight_percent{MixWeight::constant<100>()};
     MixOffset offset_percent{};
+    std::uint8_t curve{};
+    MixRole role{MixRole::manual};
 };
 
 struct Output {
@@ -264,8 +289,13 @@ struct Model {
     // Active lines must be grouped in ascending destination order.
     FixedVector<InputLine, max_input_lines> inputs{};
     FixedVector<MixLine, max_mix_lines> mixes{};
-    std::array<Output, channel_count> outputs{};
+    // Explicit elements avoid partial runtime aggregate initialization with GCC 16.
+    std::array<Output, channel_count> outputs{
+        Output{}, Output{}, Output{}, Output{}, Output{}, Output{}, Output{}, Output{},
+        Output{}, Output{}, Output{}, Output{}, Output{}, Output{}, Output{}, Output{}};
     std::array<LogicalSwitch, logical_switch_count> logical_switches{};
+    // Explicit elements avoid partial runtime aggregate initialization with GCC 16.
+    std::array<Curve, curve_count> curves{Curve{}, Curve{}, Curve{}, Curve{}};
     // 0 disables a slot; 1..16 select a channel.
     std::array<std::uint8_t, 8> dashboard_channels{1, 2, 3, 4, 5, 6, 7, 8};
     std::array<MultiSwitchPage, multiswitch_page_count> multiswitch{};
@@ -273,6 +303,7 @@ struct Model {
     bool multiswitch_beep : 1 {true};
     std::array<TrimSteps, trim_count> trims{};
     std::uint8_t trim_switches{};
+    TankMixer tank{};
 };
 
 struct Controls {
@@ -290,6 +321,9 @@ struct Frame {
     std::array<MixValue, channel_count> mixes{};
     std::array<std::int16_t, channel_count> channels{};
     LogicalFrame logical{};
+#if CORETX_MODUL_TANKMIX
+    bool tank_reverse{};
+#endif
 };
 
 enum class ErrorCode : std::uint8_t {
@@ -308,7 +342,12 @@ enum class ErrorCode : std::uint8_t {
     logical_cycle,
     dashboard_settings,
     multiswitch_settings,
-    multiswitch_duplicate
+    multiswitch_duplicate,
+    curve_settings,
+    tank_settings,
+    tank_conflict,
+    capacity,
+    tank_unavailable
 };
 
 enum class Stage : std::uint8_t { model, inputs, mixes, outputs, controls };
@@ -333,6 +372,14 @@ struct Evaluation {
 };
 
 [[nodiscard]] constexpr Status validate(const Model &model) noexcept;
+#if CORETX_MODUL_TANKMIX
+// Atomically replaces only module-owned lines; manual lines on enabled tank outputs conflict.
+[[nodiscard]] constexpr Status configure_tank(Model &model, const TankMixer &tank) noexcept;
+[[nodiscard]] constexpr bool tank_mix_active(MixRole role, const Frame &frame) noexcept;
+#endif
+// Percent coordinates are rounded to resolution units; values outside the endpoints saturate.
+[[nodiscard]] constexpr std::int32_t evaluate_curve(const Curve &curve,
+                                                    std::int32_t input) noexcept;
 // No output frame may be published unless status reports success.
 [[nodiscard]] constexpr Evaluation evaluate(const Model &model, const Controls &controls) noexcept;
 [[nodiscard]] constexpr Evaluation evaluate(const Model &model, const Controls &controls,

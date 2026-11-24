@@ -62,7 +62,7 @@ evaluate_runtime(const coretx::Model &model, const coretx::Controls &controls) n
 } // namespace
 
 extern "C" [[noreturn]] int main() noexcept {
-    coretx::firmware::i6s::hold_power<Mmio, Hardware>();
+    Board::prepare_power();
     coretx::firmware::external_module_off<Mmio, Hardware>();
     coretx::firmware::internal_front_end_off<Mmio, Hardware::radio>();
     const auto boot_ready = Board::bootloader_startup();

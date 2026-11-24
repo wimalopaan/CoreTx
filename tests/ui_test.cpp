@@ -31,7 +31,7 @@ constexpr void press(Interface &ui, coretx::Model &model, coretx::Controls &cont
 
 constexpr void go(Interface &ui, coretx::Model &model, coretx::Controls &controls,
                   const Page &page) {
-    for (int i = 0; (ui.page() != page) && (i < 5); ++i) {
+    for (std::size_t i = 0; (ui.page() != page) && (i < coretx::ui::page_count); ++i) {
         ui.handle(Key::next_page, model, controls);
     }
 }
@@ -455,7 +455,8 @@ void touch_scrolling() {
     tap(ui, model, state, 110, 20);
     check(!ui.editing(), "monitor values remain read-only by touch");
     tap(ui, model, state, 110, 56);
-    check(ui.page() == Page::controls, "monitor touch page button");
+    check(ui.page() == Page::curves, "monitor touch page button opens curves");
+    press(ui, model, state, Key::next_page);
 
     model.inputs.resize<0>();
     go(ui, model, state, Page::inputs);
@@ -787,8 +788,10 @@ void rendering() {
     auto state = coretx::ui::simulator_controls();
     Interface ui{};
     Framebuffer display{};
-    for (int page = 0; page < 5; ++page) {
-        for (int field = 0; field < 11; ++field) {
+    for (std::size_t page = 0; page < coretx::ui::page_count; ++page) {
+        const int fields =
+            ui.page() == Page::controls ? 1 : coretx::ui::detail::field_count(ui.page());
+        for (int field = 0; field < fields; ++field) {
             for (int row = 0; row < 25; ++row) {
                 ui.render(model, state, coretx::evaluate(model, state), display);
                 press(ui, model, state, Key::down);
@@ -805,7 +808,7 @@ void rendering() {
     model.inputs[0].source.index = 255;
     const auto invalid = coretx::evaluate(model, state);
     check(!invalid, "invalid source detected");
-    for (int page = 0; page < 5; ++page) {
+    for (std::size_t page = 0; page < coretx::ui::page_count; ++page) {
         ui.render(model, state, invalid, display);
         Framebuffer expected{};
         expected.text(1, 18, "CALCULATION ERROR");
@@ -826,6 +829,176 @@ void rendering() {
     }
 }
 
+void curves() {
+    auto model = coretx::ui::simulator_model();
+    auto state = coretx::ui::simulator_controls();
+    Interface ui{};
+    ui.open_curve(2);
+    check(ui.page() == Page::curves && ui.selected_curve() == 2,
+          "curve editor opens selected model curve");
+    press(ui, model, state, Key::down);
+    press(ui, model, state, Key::left);
+    edit(ui, model, state, Key::right, 20, true);
+    check(model.curves[2].x[0] == -1 && static_cast<bool>(coretx::validate(model)),
+          "inner X cannot reach its next neighbor");
+    edit(ui, model, state, Key::left, 20, true);
+    check(model.curves[2].x[0] == -99, "inner X cannot reach fixed endpoint");
+    press(ui, model, state, Key::enter);
+    press(ui, model, state, Key::right, 2, true);
+    press(ui, model, state, Key::back);
+    check(model.curves[2].x[0] == -99 && !ui.editing(), "cancel restores curve point");
+    press(ui, model, state, Key::up);
+    press(ui, model, state, Key::enter);
+    check(!ui.editing() && ui.field_value(model) == -100, "outer X stays read-only");
+    press(ui, model, state, Key::down, 4);
+    press(ui, model, state, Key::enter);
+    check(!ui.editing() && ui.field_value(model) == 100, "positive outer X stays read-only");
+    press(ui, model, state, Key::right);
+    edit(ui, model, state, Key::left, 20, true);
+    check(model.curves[2].y[4] == -100 && ui.take_changed(), "endpoint Y is editable and bounded");
+    press(ui, model, state, Key::menu);
+    check(ui.selected_curve() == 3 && !ui.take_changed(), "curve selection is not a model edit");
+    press(ui, model, state, Key::menu);
+    check(ui.selected_curve() == 0, "curve selection wraps across four curves");
+
+    Framebuffer before{}, after{};
+    ui.render(model, state, coretx::evaluate(model, state), before);
+    tap(ui, model, state, 52, 29);
+    check(ui.editing() && ui.selected_row(model) == 2 && ui.selected_field() == 1,
+          "touch selects point Y in the compact list");
+    press(ui, model, state, Key::right, 5, true);
+    press(ui, model, state, Key::enter);
+    ui.render(model, state, coretx::evaluate(model, state), after);
+    check(model.curves[0].y[2] == 50 && !same_region(before, after, 75, 17, 53, 30),
+          "curve preview follows edited point values");
+    tap(ui, model, state, 110, 29);
+    check(!ui.editing() && model.curves[0].y[2] == 50, "curve graph is read-only");
+    swipe(ui, model, state, 40, 20);
+    check(!ui.editing(), "dragging curve points does not enter editing");
+    tap(ui, model, state, 66, 7);
+    check(ui.selected_curve() == 1, "touch curve header selects next curve");
+
+    ui.open(Page::inputs);
+    press(ui, model, state, Key::right, 11);
+    edit(ui, model, state, Key::right, 4);
+    check(model.inputs[0].curve == 4 && model.inputs[0].destination == 0 &&
+              !model.inputs[0].condition.enabled,
+          "input curve selector leaves target and condition untouched");
+    ui.open(Page::mixes);
+    press(ui, model, state, Key::right, 10);
+    edit(ui, model, state, Key::right, 4);
+    check(model.mixes[0].curve == 4 && model.mixes[0].destination == 0 &&
+              !model.mixes[0].condition.enabled,
+          "mixer can reuse the same model curve");
+    edit(ui, model, state, Key::left, 4);
+    check(model.mixes[0].curve == 0, "curve selection can be disabled");
+}
+
+#if CORETX_MODUL_TANKMIX
+void tank_mixer() {
+    auto model = coretx::ui::simulator_model();
+    auto controls = coretx::ui::simulator_controls();
+    Interface ui{};
+    ui.open(Page::tank);
+    press(ui, model, controls, Key::enter);
+    press(ui, model, controls, Key::right);
+    press(ui, model, controls, Key::enter);
+    check(!model.tank.enabled && ui.editing() && ui.notice() != nullptr &&
+              (model.mixes.size() == 8),
+          "tank activation reports occupied channels without changing model");
+    press(ui, model, controls, Key::back);
+    press(ui, model, controls, Key::down, 3);
+    edit(ui, model, controls, Key::right, 8);
+    press(ui, model, controls, Key::down);
+    edit(ui, model, controls, Key::right, 8);
+    press(ui, model, controls, Key::up, 4);
+    edit(ui, model, controls, Key::right);
+    check(model.tank.enabled && (model.mixes.size() == 14) && ui.take_changed(),
+          "tank activation adds six module-owned lines on free channels");
+    press(ui, model, controls, Key::down, 5);
+    edit(ui, model, controls, Key::left, 4, true);
+    check(model.tank.steering_percent == 60 && (model.mixes[9].weight_percent.value() == 60) &&
+              (model.mixes[10].weight_percent.value() == -60),
+          "tank steering percentage manages direction-dependent weights");
+    press(ui, model, controls, Key::down);
+    edit(ui, model, controls, Key::left, 20, true);
+    check(model.tank.hysteresis_percent == 1, "hysteresis cannot be disabled accidentally");
+    edit(ui, model, controls, Key::right, 20, true);
+    check(model.tank.hysteresis_percent == 20, "hysteresis upper editor bound");
+    press(ui, model, controls, Key::down);
+    check(ui.field_value(model) == 1, "steering reversal defaults to ON");
+    press(ui, model, controls, Key::enter);
+    press(ui, model, controls, Key::left);
+    press(ui, model, controls, Key::back);
+    check(model.tank.reverse_steering, "cancel preserves reversal option");
+    edit(ui, model, controls, Key::left);
+    check(!model.tank.reverse_steering && (model.mixes.size() == 14),
+          "steering reversal can be disabled without removing managed lines");
+    edit(ui, model, controls, Key::right);
+    ui.open(Page::mixes);
+    press(ui, model, controls, Key::down, 8);
+    for (int field = 0; field < coretx::ui::detail::field_count(Page::mixes); ++field) {
+        press(ui, model, controls, Key::enter);
+        check(!ui.editing() && ui.notice() != nullptr, "all managed mix fields are read-only");
+        press(ui, model, controls, Key::right);
+    }
+    for (const auto action :
+         {LineAction::duplicate, LineAction::erase, LineAction::move_up, LineAction::move_down}) {
+        const auto result = coretx::ui::detail::edit_lines(model.mixes, 8, action);
+        check(result.error != nullptr && (model.mixes.size() == 14),
+              "line mutation helper rejects managed rows");
+    }
+    const auto added = coretx::ui::detail::edit_lines(model.mixes, 8, LineAction::add);
+    check(added.error == nullptr && (model.mixes.size() == 15) &&
+              (model.mixes[added.selected].role == coretx::MixRole::manual) &&
+              (model.mixes[added.selected].destination == 0) &&
+              static_cast<bool>(coretx::validate(model)),
+          "adding from a managed row chooses an unreserved channel");
+    check(coretx::ui::detail::edit_lines(model.mixes, added.selected, LineAction::erase).error ==
+              nullptr,
+          "new manual row remains independently removable");
+    const auto retarget = coretx::ui::detail::retarget(model.mixes, 8, 15);
+    check(retarget.error != nullptr && (model.mixes[8].destination == 8),
+          "retarget helper rejects managed row");
+    const auto reserved = coretx::ui::detail::retarget(model.mixes, 0, 8);
+    check(reserved.error != nullptr && (model.mixes[0].destination == 0),
+          "manual rows cannot enter reserved tank channels");
+    ui.open(Page::mixes);
+    press(ui, model, controls, Key::right, 6);
+    press(ui, model, controls, Key::enter);
+    press(ui, model, controls, Key::right, 8);
+    press(ui, model, controls, Key::enter);
+    check(ui.editing() && (model.mixes[0].destination == 0) && ui.notice() != nullptr,
+          "target editor reports channel reservation without mutating list");
+    press(ui, model, controls, Key::back);
+    press(ui, model, controls, Key::down, 9);
+    Framebuffer forward{}, reverse{};
+    coretx::LogicalState state{};
+    controls.analogs[0] = 512;
+    auto evaluation = coretx::evaluate(model, controls, state);
+    ui.render(model, controls, evaluation, forward);
+    controls.analogs[0] = -512;
+    evaluation = coretx::evaluate(model, controls, state);
+    ui.render(model, controls, evaluation, reverse);
+    check(!same_region(forward, reverse, 100, 17, 28, 30),
+          "managed row indicators display module direction conditions and live activation");
+    ui.open(Page::outputs);
+    press(ui, model, controls, Key::down, 8);
+    edit(ui, model, controls, Key::right);
+    check(model.outputs[8].minimum_permille.value() == -990,
+          "tank outputs remain normally editable");
+    ui.open(Page::inputs);
+    press(ui, model, controls, Key::right);
+    edit(ui, model, controls, Key::left);
+    check(model.inputs[0].weight_percent.value() == 99, "tank inputs remain normally editable");
+    ui.open(Page::tank);
+    edit(ui, model, controls, Key::left);
+    check(!model.tank.enabled && (model.mixes.size() == 8) && (model.tank.left_channel == 8) &&
+              (model.tank.steering_percent == 60),
+          "disabling removes owned lines and retains module configuration");
+}
+
+#endif
 } // namespace
 
 int main() {
@@ -858,5 +1031,9 @@ int main() {
     targets_and_conditions();
     touch_actions();
     rendering();
+    curves();
+#if CORETX_MODUL_TANKMIX
+    tank_mixer();
+#endif
     return failures == 0 ? 0 : 1;
 }

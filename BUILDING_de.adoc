@@ -64,6 +64,60 @@ höherem Ressourcenbedarf. `touch-diagnostic` ist ein eigenständiger Touchtest 
 HF- oder EEPROM-Zugriffe. `measurement` ist Messfirmware, nicht die normale
 Senderanwendung. Diese Abbilder nicht mit der normalen Betriebsfirmware verwechseln.
 
+[[model-converter]]
+== Modellspeicher-Wiederherstellung und Konverter
+
+Vor der HF-Freigabe prüft die Hauptfirmware das Modellverzeichnis und beide Bänke
+aller acht Modellplätze. Native Modellformate 6 bis 9 bleiben lesbar.
+Ein unbekanntes Format, nicht wiederherstellbare Modelldaten, ein fehlendes
+benötigtes Modul oder eine unvollständige Konvertierung/Initialisierung sperren
+Normalbetrieb und Modell-Schreibzugriffe. Das LCD zeigt den Grund und, soweit
+erkennbar, die gespeicherte beziehungsweise unterstützte Version:
+
+1. *Aus / extern konvertieren* ist vorausgewählt. Keine Änderung der Modelldaten.
+   Die i6S gibt die Selbsthaltung frei; die i6X fordert zum mechanischen Ausschalten auf.
+2. *ALLE Modelle neu* verlangt eine zweite Bestätigung mit Vorauswahl Abbrechen.
+   Alle Modellplätze und das Verzeichnis werden gelöscht, danach entsteht ein
+   Vierkanal-Grundmodell ohne Empfängerbindung und mit HF AUS. Kalibrierung sowie
+   Sender- und Eingangseinstellungen bleiben erhalten.
+
+Ein unterbrochener Reset bleibt bis zur ausdrücklich erneut gestarteten Initialisierung
+gesperrt. Solange die Wiederherstellung offen ist, keine ältere Firmware verwenden,
+die den Migrationsmarker ignoriert.
+
+Jeder normale Board-Build erzeugt zusätzlich ein *englisches HF-AUS-Wartungsabbild*:
+`build-i6x/coretx-i6x-converter.bin` beziehungsweise
+`build-i6s/coretx-i6s-converter.bin`, dazu HEX/ELF/Ressourcenbericht.
+Diese Abbilder sind keine Betriebsfirmware.
+
+* Das *externe EEPROM* sichern, nicht nur den internen Flash.
+* Den zum Sender passenden Konverter über <<dfu-update,ROM-DFU>> flashen.
+* Normal einschalten (i6S: beide vorderen Tasten 3 s halten). Quellversionen,
+  Zielformat 9 und Modellanzahl prüfen. Tasten zunächst loslassen, dann mit OK
+  (i6X) beziehungsweise der linken Rücktaste (i6S) bestätigen; Zurück/rechte
+  Rücktaste bricht ab.
+* Versorgung bis zum Abschluss der Konvertierung und Rückleseprüfung stabil halten.
+* Ausschalten, erneut ROM-DFU starten und die passende normale Firmware flashen.
+
+Der Konverter hebt native CoreTX-Modellformate 6/7/8 auf 9 an, erhält Modellnamen,
+Empfängereinstellungen und aktive Modellauswahl und setzt eine unterbrochene
+Konvertierung über Journal und Migrationsmarker fort. Er importiert keine
+Flysky-Werks-/EdgeTX-EEPROMs, repariert keine beliebig beschädigten Daten und
+konvertiert zukünftige Formate nicht abwärts. Unbekannte Formate und mehrdeutige
+Journale werden vor Beginn der Konvertierung abgewiesen.
+
+=== Speicherkompatibilität weiterpflegen
+
+Bei jeder Modellformatänderung müssen gemeinsamer Codec, Konverter und unabhängige
+Altformat-Testdatensätze zusammen aktualisiert werden. Die explizite
+`converter_target`-Zusicherung und das Testformat-Verzeichnis verhindern einen
+unbemerkten Formatwechsel beim Bauen. Die Host-Tests `coretx_model_converter`,
+`coretx_i6x_menu` und `coretx_application` einschließlich Schreib-/Reset-Abbrüchen
+ausführen und die Konverter für beide Sender bauen.
+Beide Firmware-Workflows bauen und veröffentlichen die Konverter-BIN/HEX bei jedem
+Release; der i6X-Workflow prüft Migration und Wiederherstellung mit abgeschaltetem
+Kettenmischer der Hauptfirmware.
+
 == Host-Simulator und Tests
 
 Die Presets `build` und `sanitize` aktivieren den SDL3-Simulator:
@@ -119,6 +173,11 @@ Die folgenden Projektoptionen gelten ohne Überschreibung durch Preset/Cache:
 |Externes UART-CRSF-Modul.
 |`CORETX_MULTISWITCH` |`ON`
 |MultiSwitch-Dashboards und SET4-Befehle; nur mit `CORETX_CRSF=ON` wirksam.
+|`CORETX_MODUL_TANKMIX` |`ON`
+|Kettenmischer, Einstellungsmenü und interne Richtungsbedingungen einkompilieren.
+ Bei `OFF` werden Modelle mit aktivem Modul abgewiesen und Schreibzugriffe
+ gesperrt, statt andere Kanalausgaben zu erzeugen. Inaktive Moduleinstellungen
+ bleiben für verlustfreie Übernahme im Speicherformat erhalten.
 |`CORETX_EXTENDED_INPUTS` |`ON`
 |Unterstützung für zusätzliche Analog-/Digitaleingänge einkompilieren.
  Einzelne Erweiterungseingänge stehen in den Sendereinstellungen zunächst auf Off.
@@ -298,7 +357,7 @@ weder Öffnen noch Boot-Brücke erforderlich:
 |FS-i6X |Beide *horizontalen Trimmtasten nach innen*: linke Horizontaltrimmung
  nach rechts, rechte Horizontaltrimmung nach links. Unabhängig vom Stickmode.
 |FS-i6S |Beide *hinteren Tasten SE/SF* (PA9/PA10), dann beide vorderen
- Einschalttasten zum normalen Einschalten. Rücktasten und Einschalttasten unterscheiden!
+ Einschalttasten 3 s halten. Rücktasten und Einschalttasten unterscheiden!
 |===
 
 1. Ausschalten und zunächst USB abziehen, damit der MCU tatsächlich spannungslos wird.
@@ -312,10 +371,16 @@ weder Öffnen noch Boot-Brücke erforderlich:
 CoreTX tastet die Tasten beim Kaltstart entprellt ab, hält HF aus und wechselt
 *vor Watchdog-Start und EEPROM-Zugriffen* in den STM32-ROM-Bootloader.
 Beim i6S bleibt die PB15-Selbsthaltung während der Übergabe aktiv.
+Vor der Übergabe erscheint `DFU-Bootloader` auf dem LCD und bleibt im ROM-DFU sichtbar.
+Der Hardware-Einstieg über die Boot-Pins umgeht CoreTX und kann diese Meldung nicht anzeigen.
 Die Kombination funktioniert auch in den i6S-Abbildern touch-trace,
 touch-diagnostic und measurement.
 Watchdog-/Software-Resets nutzen diese Abkürzung bewusst nicht: Ein bereits
 laufender Watchdog lässt sich für eine zuverlässige DFU-Sitzung nicht stoppen.
+
+Auch beim normalen i6S-Kaltstart müssen beide vorderen Einschalttasten durchgehend
+3 s gedrückt bleiben. Loslassen einer Taste setzt die Wartezeit zurück; HF und LCD
+bleiben bis zum Ablauf aus. Watchdog-/Software-Resets wiederholen diese Einschaltverzögerung nicht.
 
 Dies ist ein Sprung in das MCU-ROM, kein eigener CoreTX-Flash-Bootloader und kein
 USB-Neustartbefehl aus der laufenden Anwendung. Bei Werksfirmware, älteren

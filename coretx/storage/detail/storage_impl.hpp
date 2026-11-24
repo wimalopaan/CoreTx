@@ -147,7 +147,7 @@ inline constexpr std::size_t maximum_payload =
     max_mix_lines * packed_model::mix_bytes + channel_count * packed_model::output_bytes + 64 +
     multiswitch_page_count * 51 + 1 +
     multiswitch_page_count * multiswitch_function_count * sizeof(MultiSwitchControl) + trim_count +
-    1;
+    1 + curve_count * 8 + max_input_lines + max_mix_lines + 4 + (max_mix_lines + 3) / 4;
 static_assert((header_size + maximum_payload) <= slot_size);
 
 template <typename Archive> class PackedFields {
@@ -207,7 +207,8 @@ template <typename Archive> class PackedFields {
 };
 
 template <typename Archive, typename ModelType>
-constexpr bool transfer_model_lines(Archive &archive, ModelType &model) noexcept {
+constexpr bool transfer_model_lines(Archive &archive, ModelType &model,
+                                    const bool packed_curves = false) noexcept {
     namespace bits = packed_model;
     const auto common = [&](auto &fields, auto &line, const unsigned destination_bits) constexpr {
         fields.field(destination_bits, line.destination);
@@ -230,6 +231,8 @@ constexpr bool transfer_model_lines(Archive &archive, ModelType &model) noexcept
         fields.field(line.weight_percent);
         fields.field(line.offset_percent);
         fields.field(line.expo_percent);
+        if (packed_curves)
+            fields.field(3, line.curve);
         if (!fields.finish())
             return false;
     }
@@ -240,6 +243,12 @@ constexpr bool transfer_model_lines(Archive &archive, ModelType &model) noexcept
         fields.field(bits::flag_bits, line.carry_trim);
         fields.field(line.weight_percent);
         fields.field(line.offset_percent);
+        if (packed_curves) {
+            auto curve = static_cast<std::uint8_t>(line.curve & 3U);
+            fields.field(2, curve);
+            if constexpr (!std::is_const_v<ModelType>)
+                line.curve = curve;
+        }
         if (!fields.finish())
             return false;
     }
@@ -256,18 +265,30 @@ constexpr bool transfer_model_lines(Archive &archive, ModelType &model) noexcept
 }
 
 template <typename Archive, typename Snapshot>
-constexpr bool transfer_multiswitch(Archive &archive, Snapshot &model) noexcept {
+constexpr bool transfer_multiswitch(Archive &archive, Snapshot &model,
+                                    const bool packed_labels = false) noexcept {
     for (auto &page : model.multiswitch) {
         auto address = static_cast<std::uint16_t>(page.address);
         archive.field(address);
         archive.field(page.momentary);
-        for (auto &label : page.labels)
-            for (auto &character : label) {
-                auto byte = static_cast<std::uint8_t>(character);
-                archive.field(byte);
-                if constexpr (!std::is_const_v<Snapshot>)
-                    character = static_cast<char>(byte);
+        if (packed_labels) {
+            for (std::size_t group = 0; group < 6; ++group) {
+                PackedFields fields{archive, 7};
+                for (std::size_t i = 0; i < 8; ++i) {
+                    const auto index = group * 8 + i;
+                    fields.field(7, page.labels[index / 6][index % 6]);
+                }
+                if (!fields.finish())
+                    return false;
             }
+        } else
+            for (auto &label : page.labels)
+                for (auto &character : label) {
+                    auto byte = static_cast<std::uint8_t>(character);
+                    archive.field(byte);
+                    if constexpr (!std::is_const_v<Snapshot>)
+                        character = static_cast<char>(byte);
+                }
         if constexpr (!std::is_const_v<Snapshot>)
             page.address = static_cast<std::int16_t>(address);
     }
@@ -353,8 +374,79 @@ constexpr bool transfer_dashboard_options(Archive &archive, Snapshot &model,
 }
 
 template <typename Archive, typename Snapshot>
-constexpr bool transfer(Archive &archive, Snapshot &state,
-                        const bool sound_options = true) noexcept {
+constexpr bool transfer_curves(Archive &archive, Snapshot &model, const bool curve_options,
+                               const bool line_selections = true) noexcept {
+    if (!curve_options) {
+        if constexpr (!std::is_const_v<Snapshot>) {
+            model.curves.fill(Curve{});
+            for (auto &line : model.inputs)
+                line.curve = 0;
+            for (auto &line : model.mixes)
+                line.curve = 0;
+        }
+        return archive.good;
+    }
+    for (auto &curve : model.curves) {
+        const auto coordinate = [&](auto &value) constexpr {
+            auto byte = static_cast<std::uint8_t>(value);
+            archive.field(byte);
+            if constexpr (!std::is_const_v<Snapshot>)
+                value = static_cast<std::int8_t>(byte < 128 ? static_cast<int>(byte)
+                                                            : static_cast<int>(byte) - 256);
+        };
+        for (auto &x : curve.x)
+            coordinate(x);
+        for (auto &y : curve.y)
+            coordinate(y);
+    }
+    if (line_selections) {
+        for (auto &line : model.inputs)
+            archive.field(line.curve);
+        for (auto &line : model.mixes)
+            archive.field(line.curve);
+    }
+    return archive.good;
+}
+
+template <typename Archive, typename Snapshot>
+constexpr bool transfer_tank(Archive &archive, Snapshot &model,
+                             const bool enabled = true) noexcept {
+    if (!enabled) {
+        if constexpr (!std::is_const_v<Snapshot>) {
+            model.tank = {};
+            for (auto &line : model.mixes)
+                line.role = MixRole::manual;
+        }
+        return archive.good;
+    }
+    PackedFields fields{archive, 4};
+    fields.field(1, model.tank.enabled);
+    fields.field(3, model.tank.drive_input);
+    fields.field(3, model.tank.steering_input);
+    fields.field(4, model.tank.left_channel);
+    fields.field(4, model.tank.right_channel);
+    fields.field(7, model.tank.steering_percent);
+    fields.field(5, model.tank.hysteresis_percent);
+    // A clear bit preserves reversal for existing format-9 records.
+    bool reversal_disabled = !model.tank.reverse_steering;
+    fields.field(1, reversal_disabled);
+    if (!fields.finish())
+        return false;
+    if constexpr (!std::is_const_v<Snapshot>)
+        model.tank.reverse_steering = !reversal_disabled;
+    for (std::size_t group = 0; group < model.mixes.size(); group += 4) {
+        PackedFields roles{archive, 1};
+        for (auto i = group; (i < group + 4) && (i < model.mixes.size()); ++i)
+            roles.field(2, model.mixes[i].role);
+        if (!roles.finish())
+            return false;
+    }
+    return archive.good;
+}
+
+template <typename Archive, typename Snapshot>
+constexpr bool transfer(Archive &archive, Snapshot &state, const bool sound_options = true,
+                        const bool curve_options = true, const bool tank_options = true) noexcept {
     if (!transfer_model_counts(archive, state.model))
         return false;
     for (auto &calibration : state.setup.calibration) {
@@ -370,7 +462,9 @@ constexpr bool transfer(Archive &archive, Snapshot &state,
            transfer_model_extension(archive, state.model) &&
            transfer_multiswitch(archive, state.model) &&
            transfer_dashboard_options(archive, state.model, sound_options) &&
-           transfer_multiswitch_controls(archive, state.model);
+           transfer_multiswitch_controls(archive, state.model) &&
+           transfer_curves(archive, state.model, curve_options) &&
+           transfer_tank(archive, state.model, tank_options);
 }
 
 [[nodiscard]] constexpr std::uint32_t crc_byte(std::uint32_t crc,
@@ -433,7 +527,7 @@ template <typename Snapshot>
         return {{Error::length, 6}, 0};
     }
     Reader payload{record.subspan(header_size, length)};
-    if (!transfer(payload, state, version >= 7)) {
+    if (!transfer(payload, state, version >= 7, version >= 8, version >= 9)) {
         return {{Error::field, header_size + payload.error_offset}, 0};
     }
     if (payload.position != length) {
@@ -445,8 +539,9 @@ template <typename Snapshot>
 } // namespace detail
 
 constexpr Status validate(const Model &model, const ControlSetup &setup) noexcept {
-    if (!coretx::validate(model)) {
-        return {Error::model};
+    if (const auto status = coretx::validate(model); !status) {
+        return {status.code == ErrorCode::tank_unavailable ? Error::module_unavailable
+                                                           : Error::model};
     }
     if (!coretx::validate(setup)) {
         return {Error::setup};
@@ -519,6 +614,9 @@ constexpr Selection select_slots(const SlotInfo a, const SlotInfo b,
     // Never overwrite an intact record from a newer, unsupported format.
     if ((a.status.code == Error::version) || (b.status.code == Error::version)) {
         result.status = {Error::version};
+    } else if ((a.status.code == Error::module_unavailable) ||
+               (b.status.code == Error::module_unavailable)) {
+        result.status = {Error::module_unavailable};
     } else if (!a && !b) {
         result.status = {(a.status.code == Error::empty) && (b.status.code == Error::empty)
                              ? Error::empty
@@ -585,6 +683,8 @@ constexpr const char *error_message(const Error &error) noexcept {
         return "neither storage slot is valid";
     case Error::generation:
         return "ambiguous storage generations";
+    case Error::module_unavailable:
+        return "model requires tank mixer module";
     }
     return "unknown storage error";
 }

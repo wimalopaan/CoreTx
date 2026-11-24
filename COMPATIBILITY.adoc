@@ -89,6 +89,19 @@ input/mixer/output arithmetic rather than these board-specific decoders.
   produced valid indices, enum values and line order.
 * Input/mixer configuration contains only supported fields. There is no
   best-effort import of an arbitrary EdgeTX model.
+* Four shared five-point piecewise linear curves support editable inner X
+  coordinates and all Y coordinates in integer percent. Outer X coordinates
+  are fixed at -100/+100%. Curves run after input expo or mixer trim and before
+  weight/offset; values outside the curve domain use its endpoint Y value.
+  No curve selection preserves the original arithmetic, including values
+  outside that domain. This limited curve implementation is not covered by
+  the captured EdgeTX pipeline comparisons.
+* The tank mixer owns six normal mixer lines on two exclusively reserved
+  channels. Internal module roles activate the forward/reverse steering lines,
+  independently of user logical switches. Hysteresis uses the processed drive
+  input with strict symmetric thresholds and retains direction within the band;
+  startup defaults to forward. This module is a CoreTX extension, not part of
+  the captured EdgeTX reference.
 * Heli and Lua are permanently out of scope.
 
 These differences must stay visible when adding a model importer or comparing

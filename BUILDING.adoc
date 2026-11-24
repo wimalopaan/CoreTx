@@ -63,6 +63,53 @@ resource use. `touch-diagnostic` is a standalone touch test without RF or EEPROM
 access. `measurement` is bench firmware, not the normal transmitter application.
 Do not substitute these images for normal operation.
 
+[[model-converter]]
+== Model storage recovery and converter
+
+Before enabling RF, the main firmware checks the model directory and both banks
+of all eight model slots. Native model formats 6 through 9 remain readable.
+An unsupported format, unrecoverable model data, a missing required module or an
+unfinished conversion/reset blocks normal operation and all model writes.
+The LCD shows the reason and, when available, the stored/supported versions:
+
+1. *Off / external conversion* is the default. No model data is changed.
+   The i6S releases its power latch; the i6X asks you to use its mechanical switch.
+2. *Initialize ALL models* requires a second confirmation, initially set to Cancel.
+   This clears all model slots and the directory, then creates a four-channel
+   model with no receiver binding and RF OFF. Calibration and transmitter/input
+   settings are preserved.
+
+An interrupted reset remains blocked until initialization is explicitly repeated.
+Never use an older firmware that ignores the migration marker while recovery is pending.
+
+Each default board build also generates an *English, RF-OFF maintenance image*:
+`build-i6x/coretx-i6x-converter.bin` or `build-i6s/coretx-i6s-converter.bin`,
+with matching HEX/ELF/resource-report files. These are not operating firmware.
+
+* Back up the *external EEPROM*, not only internal flash.
+* Flash the converter matching the transmitter through <<dfu-update,ROM DFU>>.
+* Start normally (hold both front power buttons for 3 s on i6S). Inspect source
+  versions, target format 9 and model count. Release the controls, then confirm
+  with OK (i6X) or the left rear button (i6S); Cancel/right rear cancels.
+* Keep power stable until conversion and read-back verification finish.
+* Switch off, enter ROM DFU again and flash the matching normal firmware.
+
+The converter upgrades native CoreTX model formats 6/7/8 to 9, preserves model
+names, receiver settings and active-model selection, and resumes interrupted
+conversion using the journal and migration marker. It does not import Flysky
+factory/EdgeTX EEPROMs, repair arbitrary corrupt data or downgrade future formats.
+Unknown formats and ambiguous journals are refused without starting conversion.
+
+=== Maintaining storage compatibility
+
+Every model-format change must update the shared codec, converter and independent
+historical-version fixtures together. The explicit `converter_target` assertion
+and fixture-version manifest prevent an unnoticed format bump from building.
+Run `coretx_model_converter`, `coretx_i6x_menu` and `coretx_application` host tests,
+including interrupted writes/resets, and build both boards' converter images.
+Both firmware workflows build and publish the converter BIN/HEX alongside every
+release; the i6X workflow also runs migration/recovery tests with the main tank module OFF.
+
 == Host simulator and tests
 
 The `build` and `sanitize` presets enable the SDL3 simulator:
@@ -118,6 +165,11 @@ The following are project options and their defaults when not overridden by a pr
 |External UART CRSF support.
 |`CORETX_MULTISWITCH` |`ON`
 |MultiSwitch dashboards and SET4 commands; effective only with `CORETX_CRSF=ON`.
+|`CORETX_MODUL_TANKMIX` |`ON`
+|Compile the tank mixer, its configuration UI and internal direction conditions.
+ With `OFF`, models using the module are rejected and writes are blocked rather
+ than falling back to different channel behavior. Inactive module settings
+ remain in the storage format for lossless roundtrips.
 |`CORETX_EXTENDED_INPUTS` |`ON`
 |Compile additional analog/digital input support.
  Individual expansion inputs still default to Off in radio setup.
@@ -294,7 +346,7 @@ bridge is needed for routine updates:
 |Board |Hold while switching on
 |FS-i6X |Both *horizontal trim buttons inward*: left horizontal trim to the right,
  right horizontal trim to the left. The combination is independent of stick mode.
-|FS-i6S |Both *rear buttons SE/SF* (PA9/PA10), then both front power buttons
+|FS-i6S |Both *rear buttons SE/SF* (PA9/PA10), then hold both front power buttons for 3 s
  for normal power-on. The rear buttons are not the front power buttons.
 |===
 
@@ -309,10 +361,16 @@ bridge is needed for routine updates:
 CoreTX samples and debounces the keys at cold startup, keeps RF off and enters the
 STM32 ROM bootloader *before starting the watchdog or accessing EEPROM*.
 On i6S the PB15 power latch remains active during handoff.
+The LCD displays `DFU-Bootloader` before the handoff and retains the message in ROM DFU.
+Hardware boot-pin entry bypasses CoreTX and cannot display this message.
 The same combination works in the i6S touch-trace, standalone touch-diagnostic
 and measurement images.
 Watchdog/software resets deliberately do not use this shortcut: an already
 running watchdog cannot be stopped for a reliable DFU session.
+
+Normal i6S cold startup also requires both front power buttons to be held continuously
+for 3 s. Releasing either button restarts the delay; RF and the LCD remain off until
+the delay has elapsed. Watchdog/software resets do not repeat the power-on delay.
 
 This is a jump into the MCU's ROM, not a separate CoreTX flash bootloader or a
 USB runtime reboot command. Factory firmware, older CoreTX builds without this

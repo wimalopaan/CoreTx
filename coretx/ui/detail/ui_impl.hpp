@@ -31,12 +31,17 @@ constexpr int touch_zone(const int x, const int y) noexcept {
 inline constexpr std::array<std::string_view, analog_count> analog_names{
     "AIL", "ELE", "THR", "RUD", "VRA", "VRB", "SA",  "SB",
     "SC",  "SD",  "VRC", "VRD", "VRE", "VRF", "VRG", "A16"};
-inline constexpr std::array<std::string_view, 11> input_fields{
-    "SOURCE", "WEIGHT %", "EXPO %", "OFFSET %", "TRIM",  "SIDE",
-    "INVERT", "TARGET",   "SWITCH", "SW POS",   "SW NOT"};
-inline constexpr std::array<std::string_view, 10> mix_fields{
-    "SOURCE", "WEIGHT %", "OFFSET %", "MODE",   "TRIM",
-    "INVERT", "TARGET",   "SWITCH",   "SW POS", "SW NOT"};
+inline constexpr std::array<std::string_view, 12> input_fields{
+    "SOURCE", "WEIGHT %", "EXPO %", "OFFSET %", "TRIM",   "SIDE",
+    "INVERT", "TARGET",   "SWITCH", "SW POS",   "SW NOT", "CURVE"};
+inline constexpr std::array<std::string_view, 11> mix_fields{
+    "SOURCE", "WEIGHT %", "OFFSET %", "MODE",   "TRIM", "INVERT",
+    "TARGET", "SWITCH",   "SW POS",   "SW NOT", "CURVE"};
+inline constexpr std::array<std::string_view, 2> curve_fields{"X %", "Y %"};
+#if CORETX_MODUL_TANKMIX
+inline constexpr std::array<std::string_view, 8> tank_fields{
+    "ENABLED", "DRIVE", "STEERING", "LEFT CH", "RIGHT CH", "STEER %", "HYST %", "STEER REV"};
+#endif
 inline constexpr std::array<std::string_view, 4> output_fields{"MIN 0.1%", "MAX 0.1%", "SUB 0.1%",
                                                                "REVERSE"};
 inline constexpr std::array<std::string_view, 3> monitor_fields{"INPUT", "MIX", "OUTPUT"};
@@ -44,17 +49,58 @@ inline constexpr std::array<std::string_view, 5> action_names{"ADD", "DUPLICATE"
                                                               "MOVE UP", "MOVE DOWN"};
 
 constexpr int extra_field(const Page &page, const std::uint8_t field) noexcept {
-    return page == Page::inputs  ? static_cast<int>(field) - 7
-           : page == Page::mixes ? static_cast<int>(field) - 6
-                                 : -1;
+    return (page == Page::inputs) && (field >= 7) && (field <= 10) ? static_cast<int>(field) - 7
+           : (page == Page::mixes) && (field >= 6) && (field <= 9) ? static_cast<int>(field) - 6
+                                                                   : -1;
 }
 
+struct ActionResult {
+    std::size_t selected{};
+    const char *error{};
+};
+
+#if CORETX_MODUL_TANKMIX
+constexpr std::string_view tank_label(const MixRole role) noexcept {
+    return role == MixRole::tank_drive     ? "TANK DRIVE"
+           : role == MixRole::tank_forward ? "TANK FWD"
+                                           : "TANK REV";
+}
+
+constexpr int tank_value(const TankMixer &tank, const std::size_t row) noexcept {
+    switch (row) {
+    case 0:
+        return tank.enabled;
+    case 1:
+        return tank.drive_input;
+    case 2:
+        return tank.steering_input;
+    case 3:
+        return tank.left_channel;
+    case 4:
+        return tank.right_channel;
+    case 5:
+        return tank.steering_percent;
+    case 6:
+        return tank.hysteresis_percent;
+    default:
+        return tank.reverse_steering;
+    }
+}
+#endif
+
 template <typename Line, std::size_t Capacity>
-constexpr std::size_t retarget(FixedVector<Line, Capacity> &lines, const std::size_t selected,
-                               const int destination) noexcept {
+constexpr ActionResult retarget(FixedVector<Line, Capacity> &lines, const std::size_t selected,
+                                const int destination) noexcept {
     const auto count = lines.size();
+    if constexpr (CORETX_MODUL_TANKMIX && std::is_same_v<Line, MixLine>) {
+        if (lines[selected].role != MixRole::manual)
+            return {selected, "TANK READ ONLY"};
+        for (const auto &line : lines)
+            if ((line.role != MixRole::manual) && (line.destination == destination))
+                return {selected, "TANK CHANNEL"};
+    }
     if (lines[selected].destination == destination) {
-        return selected;
+        return {selected, nullptr};
     }
     auto line = lines[selected];
     line.destination = static_cast<std::uint8_t>(destination);
@@ -69,18 +115,18 @@ constexpr std::size_t retarget(FixedVector<Line, Capacity> &lines, const std::si
         lines[i] = lines[i - 1];
     }
     lines[insertion] = line;
-    return insertion;
+    return {insertion, nullptr};
 }
-
-struct ActionResult {
-    std::size_t selected{};
-    const char *error{};
-};
 
 template <typename Line, std::size_t Capacity>
 constexpr ActionResult edit_lines(FixedVector<Line, Capacity> &lines, const std::size_t selected,
                                   const LineAction &action) noexcept {
     const auto count = lines.size();
+    if constexpr (CORETX_MODUL_TANKMIX && std::is_same_v<Line, MixLine>) {
+        if ((count != 0) && (lines[selected].role != MixRole::manual) &&
+            (action != LineAction::add))
+            return {selected, "TANK READ ONLY"};
+    }
     if ((action == LineAction::add) || (action == LineAction::duplicate)) {
         if (count == Capacity) {
             return {selected, "LIST FULL"};
@@ -99,6 +145,22 @@ constexpr ActionResult edit_lines(FixedVector<Line, Capacity> &lines, const std:
                 line.trim = TrimSource::none;
             }
             line.destination = count == 0 ? 0 : lines[selected].destination;
+            if constexpr (CORETX_MODUL_TANKMIX && std::is_same_v<Line, MixLine>) {
+                if ((count != 0) && (lines[selected].role != MixRole::manual)) {
+                    std::size_t destination{};
+                    for (; destination < channel_count; ++destination) {
+                        bool reserved{};
+                        for (const auto &existing : lines)
+                            reserved = reserved || ((existing.role != MixRole::manual) &&
+                                                    (existing.destination == destination));
+                        if (!reserved)
+                            break;
+                    }
+                    if (destination == channel_count)
+                        return {selected, "NO FREE CHANNEL"};
+                    line.destination = static_cast<std::uint8_t>(destination);
+                }
+            }
             while ((insertion < count) && (lines[insertion].destination <= line.destination)) {
                 ++insertion;
             }
@@ -146,6 +208,12 @@ constexpr int field_count(const Page &page) noexcept {
         return static_cast<int>(output_fields.size());
     case Page::monitor:
         return static_cast<int>(monitor_fields.size());
+    case Page::curves:
+        return static_cast<int>(curve_fields.size());
+#if CORETX_MODUL_TANKMIX
+    case Page::tank:
+        return 1;
+#endif
     case Page::controls:
         return 0;
     }
@@ -402,6 +470,12 @@ constexpr std::size_t Interface::row_count(const Model &model) const noexcept {
         return channel_count;
     case Page::monitor:
         return fields_[4] == 0 ? input_count : channel_count;
+    case Page::curves:
+        return 5;
+#if CORETX_MODUL_TANKMIX
+    case Page::tank:
+        return detail::tank_fields.size();
+#endif
     }
     return 0;
 }
@@ -430,6 +504,10 @@ constexpr void Interface::reveal_row(const Model &model) noexcept {
 
 constexpr int Interface::value(const Model &model, const std::uint8_t field) const noexcept {
     const auto selected = row(model);
+#if CORETX_MODUL_TANKMIX
+    if (page_ == Page::tank)
+        return detail::tank_value(editing_ ? tank_draft_ : model.tank, selected);
+#endif
     const int extra = detail::extra_field(page_, field);
     if (extra >= 0) {
         const auto condition = page_ == Page::inputs ? model.inputs[selected].condition
@@ -464,6 +542,8 @@ constexpr int Interface::value(const Model &model, const std::uint8_t field) con
             return static_cast<int>(line.side);
         case 6:
             return line.source.inverted;
+        case 11:
+            return line.curve;
         }
     } else if (page_ == Page::mixes) {
         const auto &line = model.mixes[selected];
@@ -480,6 +560,8 @@ constexpr int Interface::value(const Model &model, const std::uint8_t field) con
             return line.carry_trim;
         case 5:
             return line.source.inverted;
+        case 10:
+            return line.curve;
         }
     } else if (page_ == Page::outputs) {
         const auto &output = model.outputs[selected];
@@ -493,12 +575,53 @@ constexpr int Interface::value(const Model &model, const std::uint8_t field) con
         case 3:
             return output.reversed;
         }
+    } else if (page_ == Page::curves) {
+        const auto &curve = model.curves[curve_slot_];
+        return field == 1      ? curve.y[selected]
+               : selected == 0 ? -100
+               : selected == 4 ? 100
+                               : curve.x[selected - 1];
     }
     return 0;
 }
 
 constexpr void Interface::set_value(Model &model, const int value) noexcept {
     const auto selected = row(model);
+    if (managed_mix(model)) {
+        notice_ = "TANK READ ONLY";
+        return;
+    }
+#if CORETX_MODUL_TANKMIX
+    if (page_ == Page::tank) {
+        switch (selected) {
+        case 0:
+            tank_draft_.enabled = value != 0;
+            break;
+        case 1:
+            tank_draft_.drive_input = static_cast<std::uint8_t>(value);
+            break;
+        case 2:
+            tank_draft_.steering_input = static_cast<std::uint8_t>(value);
+            break;
+        case 3:
+            tank_draft_.left_channel = static_cast<std::uint8_t>(value);
+            break;
+        case 4:
+            tank_draft_.right_channel = static_cast<std::uint8_t>(value);
+            break;
+        case 5:
+            tank_draft_.steering_percent = static_cast<std::uint8_t>(value);
+            break;
+        case 6:
+            tank_draft_.hysteresis_percent = static_cast<std::uint8_t>(value);
+            break;
+        case 7:
+            tank_draft_.reverse_steering = value != 0;
+            break;
+        }
+        return;
+    }
+#endif
     const auto field = fields_[detail::page_index(page_)];
     const int extra = detail::extra_field(page_, field);
     if (extra >= 0) {
@@ -553,6 +676,9 @@ constexpr void Interface::set_value(Model &model, const int value) noexcept {
         case 6:
             line.source.inverted = value != 0;
             break;
+        case 11:
+            line.curve = static_cast<std::uint8_t>(value);
+            break;
         }
     } else if (page_ == Page::mixes) {
         auto &line = model.mixes[selected];
@@ -575,6 +701,9 @@ constexpr void Interface::set_value(Model &model, const int value) noexcept {
         case 5:
             line.source.inverted = value != 0;
             break;
+        case 10:
+            line.curve = static_cast<std::uint8_t>(value);
+            break;
         }
     } else if (page_ == Page::outputs) {
         auto &output = model.outputs[selected];
@@ -592,6 +721,12 @@ constexpr void Interface::set_value(Model &model, const int value) noexcept {
             output.reversed = value != 0;
             break;
         }
+    } else if (page_ == Page::curves) {
+        auto &curve = model.curves[curve_slot_];
+        if (field == 1)
+            curve.y[selected] = static_cast<std::int8_t>(value);
+        else if ((selected > 0) && (selected < 4))
+            curve.x[selected - 1] = static_cast<std::int8_t>(value);
     }
 }
 
@@ -630,6 +765,8 @@ constexpr void Interface::change(Model &model, const int direction, const bool c
             maximum = static_cast<int>(TrimSource::stick4);
         } else if (field == 5) {
             maximum = static_cast<int>(InputSide::positive);
+        } else if (field == 11) {
+            maximum = static_cast<int>(curve_count);
         }
     } else if (page_ == Page::mixes) {
         if (field == 0) {
@@ -640,6 +777,8 @@ constexpr void Interface::change(Model &model, const int direction, const bool c
             step = coarse ? 10 : 1;
         } else if (field == 3) {
             maximum = static_cast<int>(Multiplex::replace);
+        } else if (field == 10) {
+            maximum = static_cast<int>(curve_count);
         }
     } else if ((page_ == Page::outputs) && (field < 3)) {
         const auto &output = model.outputs[row(model)];
@@ -650,7 +789,31 @@ constexpr void Interface::change(Model &model, const int direction, const bool c
                   : field == 1 ? TravelPermille::maximum
                                : SubtrimPermille::maximum;
         step = coarse ? 100 : 10;
+    } else if (page_ == Page::curves) {
+        minimum = -100;
+        maximum = 100;
+        step = coarse ? 10 : 1;
+        if (field == 0) {
+            const auto point = row(model);
+            if ((point == 0) || (point == 4))
+                return;
+            const auto &curve = model.curves[curve_slot_];
+            minimum = point == 1 ? -99 : curve.x[point - 2] + 1;
+            maximum = point == 3 ? 99 : curve.x[point] - 1;
+        }
     }
+#if CORETX_MODUL_TANKMIX
+    else if (page_ == Page::tank) {
+        const auto selected = row(model);
+        maximum = (selected == 0) || (selected == 7) ? 1
+                  : selected <= 2                    ? static_cast<int>(input_count) - 1
+                  : selected <= 4                    ? static_cast<int>(channel_count) - 1
+                  : selected == 5                    ? 100
+                                                     : 20;
+        minimum = selected == 6 ? 1 : 0;
+        step = coarse && (selected >= 5) ? 10 : 1;
+    }
+#endif
     int next = std::clamp(value(model) + direction * step, minimum, maximum);
     if ((extra == 1) || (line_page() && (field == 0))) {
         for (;;) {
@@ -686,11 +849,23 @@ constexpr bool Interface::line_page() const noexcept {
 }
 
 constexpr void Interface::begin_edit(const Model &model) noexcept {
-    if (line_page() && !validate(model)) {
-        dialog_ = Dialog::actions;
+    if (managed_mix(model)) {
+        notice_ = "TANK READ ONLY";
+        return;
+    }
+    if ((line_page() || (page_ == Page::curves)) && !validate(model)) {
+        if (line_page())
+            dialog_ = Dialog::actions;
         notice_ = "INVALID MODEL";
         return;
     }
+#if CORETX_MODUL_TANKMIX
+    if (page_ == Page::tank)
+        tank_draft_ = model.tank;
+#endif
+    if ((page_ == Page::curves) && (selected_field() == 0) &&
+        ((row(model) == 0) || (row(model) == 4)))
+        return;
     saved_value_ = value(model);
     pending_destination_ = saved_value_;
     if (line_page()) {
@@ -701,6 +876,13 @@ constexpr void Interface::begin_edit(const Model &model) noexcept {
 }
 
 constexpr void Interface::cancel_edit(Model &model) noexcept {
+#if CORETX_MODUL_TANKMIX
+    if (page_ == Page::tank) {
+        editing_ = false;
+        notice_ = nullptr;
+        return;
+    }
+#endif
     set_value(model, saved_value_);
     if (line_page()) {
         auto &condition = page_ == Page::inputs ? model.inputs[row(model)].condition
@@ -711,19 +893,38 @@ constexpr void Interface::cancel_edit(Model &model) noexcept {
 }
 
 constexpr void Interface::commit_edit(Model &model) noexcept {
-    model_changed_ = model_changed_ || (value(model) != saved_value_);
+#if CORETX_MODUL_TANKMIX
+    if (page_ == Page::tank) {
+        const bool changed = tank_draft_ != model.tank;
+        const auto status = configure_tank(model, tank_draft_);
+        notice_ = status ? nullptr : error_message(status.code);
+        if (!status)
+            return;
+        model_changed_ = model_changed_ || changed;
+        editing_ = false;
+        return;
+    }
+#endif
     if (detail::extra_field(page_, fields_[detail::page_index(page_)]) == 0) {
         const auto selected = row(model);
         const auto next = page_ == Page::inputs
                               ? detail::retarget(model.inputs, selected, pending_destination_)
                               : detail::retarget(model.mixes, selected, pending_destination_);
-        rows_[detail::page_index(page_)] = static_cast<std::uint8_t>(next);
+        notice_ = next.error;
+        if (notice_)
+            return;
+        rows_[detail::page_index(page_)] = static_cast<std::uint8_t>(next.selected);
     }
+    model_changed_ = model_changed_ || (value(model) != saved_value_);
     editing_ = false;
     reveal_row(model);
 }
 
 constexpr void Interface::perform_action(Model &model) noexcept {
+    if (managed_mix(model) && (action_ != LineAction::add)) {
+        notice_ = "TANK READ ONLY";
+        return;
+    }
     if (!validate(model)) {
         notice_ = "INVALID MODEL";
         return;
@@ -816,14 +1017,16 @@ constexpr void Interface::handle(const Key &key, Model &model, Controls &control
             cancel_edit(model);
         }
         if (key != Key::back) {
-            page_ =
-                static_cast<Page>((static_cast<int>(index) + (key == Key::next_page ? 1 : 4)) % 5);
+            page_ = static_cast<Page>((index + (key == Key::next_page ? 1 : page_count - 1)) %
+                                      page_count);
         }
         reveal_row(model);
         return;
     }
     if (key == Key::menu) {
-        if (line_page() && !editing_) {
+        if ((page_ == Page::curves) && !editing_) {
+            curve_slot_ = static_cast<std::uint8_t>((curve_slot_ + 1U) % curve_count);
+        } else if (line_page() && !editing_) {
             dialog_ = Dialog::actions;
             action_ = LineAction::add;
             notice_ = nullptr;
@@ -900,14 +1103,25 @@ constexpr void Interface::handle_pointer(const PointerEvent &event, Model &model
         return;
     }
     const int origin_zone = detail::touch_zone(pointer_x_, pointer_y_);
+    const int dx = event.x - pointer_x_;
+    const int dy = event.y - pointer_y_;
+    if ((dx <= -4) || (dx >= 4) || (dy <= -4) || (dy >= 4))
+        pointer_dragged_ = true;
+    if ((page_ == Page::curves) && (pointer_y_ >= detail::header_height) &&
+        (pointer_y_ < detail::footer_y)) {
+        if ((event.kind == PointerKind::release) && !pointer_dragged_ && !editing_ &&
+            (event.x < 70) && (event.y >= 17) && (event.y < 47)) {
+            rows_[detail::page_index(page_)] = static_cast<std::uint8_t>((event.y - 17) / 6);
+            fields_[detail::page_index(page_)] = event.x < 42 ? 0 : 1;
+            dispatch(Key::enter);
+        }
+        if (event.kind == PointerKind::release)
+            pointer_active_ = false;
+        return;
+    }
     if ((origin_zone < 6) && (detail::touch_zone(event.x, event.y) != origin_zone)) {
         pointer_active_ = false;
         return;
-    }
-    const int dx = event.x - pointer_x_;
-    const int dy = event.y - pointer_y_;
-    if ((dx <= -4) || (dx >= 4) || (dy <= -4) || (dy >= 4)) {
-        pointer_dragged_ = true;
     }
     if (pointer_dragged_ && !editing_ && (dialog_ == Dialog::none) &&
         (pointer_y_ >= detail::header_height) && (pointer_y_ < detail::footer_y) &&
@@ -950,6 +1164,8 @@ constexpr void Interface::handle_pointer(const PointerEvent &event, Model &model
     if (event.y < detail::header_height) {
         if (event.x < detail::header_split) {
             dispatch(Key::next_page);
+        } else if ((page_ == Page::curves) && (event.x < 80) && !editing_) {
+            dispatch(Key::menu);
         } else if (!editing_ && (page_ != Page::controls)) {
             dispatch(Key::right);
         } else if constexpr (std::is_same_v<State, RawControls>) {
@@ -995,6 +1211,57 @@ constexpr void Interface::handle(const PointerEvent &event, Model &model, Contro
     handle_pointer(event, model, controls, coarse);
 }
 
+constexpr void Interface::render_curve(const Model &model, Framebuffer &display, const int top,
+                                       const int height) const noexcept {
+    if (!validate(model)) {
+        display.small_text(0, top, "INVALID MODEL");
+        return;
+    }
+    const auto &curve = model.curves[curve_slot_];
+    const auto selected = row(model);
+    const auto field = selected_field();
+    const bool compact = display.character_width() == 4;
+    display.compact(true);
+    for (std::size_t point = 0; point < curve.y.size(); ++point) {
+        const int y = top + static_cast<int>(point) * (height / 5);
+        const int x = point == 0 ? -100 : point == 4 ? 100 : curve.x[point - 1];
+        detail::indexed_label(display, 0, y, "P", point, true);
+        for (int column = 0; column < 2; ++column) {
+            const bool selected_cell = (point == selected) && (column == field);
+            if (selected_cell)
+                display.rectangle(16 + column * 26, y, 24, height / 5);
+            display.number(38 + column * 26, y, column == 0 ? x : curve.y[point], !selected_cell);
+        }
+        if ((point == selected) && editing_)
+            display.text(66, y, "*");
+    }
+    constexpr int left = 76;
+    constexpr int width = 50;
+    const auto graph_y = [&](const int value) constexpr {
+        return top + (resolution - value) * (height - 1) / (2 * resolution);
+    };
+    for (int x = left; x <= left + width; x += 2)
+        display.pixel(x, graph_y(0));
+    for (int y = top; y < top + height; y += 2)
+        display.pixel(left + width / 2, y);
+    int previous = graph_y(evaluate_curve(curve, -resolution));
+    for (int column = 0; column <= width; ++column) {
+        const int input = -resolution + column * (2 * resolution) / width;
+        const int current = graph_y(evaluate_curve(curve, input));
+        for (int y = std::min(previous, current); y <= std::max(previous, current); ++y)
+            display.pixel(left + column, y);
+        previous = current;
+    }
+    for (std::size_t point = 0; point < curve.y.size(); ++point) {
+        const int x = point == 0 ? -100 : point == 4 ? 100 : curve.x[point - 1];
+        const int px = left + (x + 100) * width / 200;
+        const int py = top + (100 - curve.y[point]) * (height - 1) / 200;
+        const int marker_top = std::max(top, py - 1);
+        display.rectangle(px - 1, marker_top, 3, std::min(top + height, py + 2) - marker_top);
+    }
+    display.compact(compact);
+}
+
 constexpr void Interface::render(const Model &model, const Controls &controls,
                                  const Evaluation &evaluation,
                                  Framebuffer &display) const noexcept {
@@ -1002,7 +1269,17 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
     display.rectangle(0, 0, 128, detail::header_height);
     const auto index = detail::page_index(page_);
     const auto field = fields_[index];
-    constexpr std::array<std::string_view, 5> names{"CONTROLS", "INPUT", "MIXER", "OUTPUT", "MON"};
+    constexpr std::array<std::string_view, page_count> names{"CONTROLS",
+                                                             "INPUT",
+                                                             "MIXER",
+                                                             "OUTPUT",
+                                                             "MON",
+                                                             "CURVES"
+#if CORETX_MODUL_TANKMIX
+                                                             ,
+                                                             "TANK"
+#endif
+    };
     display.text(1, 4, names[index], false);
     display.rectangle(detail::header_split - 1, 0, 1, detail::header_height, false);
     constexpr int field_x = detail::header_split + 2;
@@ -1019,6 +1296,15 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
     case Page::monitor:
         display.text(field_x, 4, detail::monitor_fields[field], false);
         break;
+    case Page::curves:
+        detail::indexed_label(display, field_x, 4, "C", curve_slot_, false);
+        display.text(80, 4, detail::curve_fields[field], false);
+        break;
+#if CORETX_MODUL_TANKMIX
+    case Page::tank:
+        display.text(field_x, 4, evaluation.frame.tank_reverse ? "REV" : "FWD", false);
+        break;
+#endif
     case Page::controls:
         break;
     }
@@ -1068,6 +1354,10 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
         display.text(1, 38, error_message(evaluation.status.code));
         return;
     }
+    if (page_ == Page::curves) {
+        render_curve(model, display);
+        return;
+    }
     const auto selected = row(model);
     const auto first = first_row(model);
     for (std::size_t line = first;
@@ -1078,7 +1368,21 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
         if (!ink) {
             display.rectangle(0, y - 1, 128, detail::row_height);
         }
-        if (page_ == Page::controls) {
+#if CORETX_MODUL_TANKMIX
+        if (page_ == Page::tank) {
+            const auto &tank = editing_ && (line == selected) ? tank_draft_ : model.tank;
+            const int current = detail::tank_value(tank, line);
+            display.text(1, y, detail::tank_fields[line], ink);
+            if ((line == 0) || (line == 7))
+                display.text(104, y, current ? "ON" : "OFF", ink);
+            else if (line <= 4)
+                detail::indexed_label(display, 98, y, line <= 2 ? "I" : "CH",
+                                      static_cast<std::size_t>(current), ink);
+            else
+                display.number(126, y, current, ink);
+        } else
+#endif
+            if (page_ == Page::controls) {
             const auto analogs = control_analog_count();
             detail::control_label(display, y, line, ink, analogs, switch_names_);
             int current{};
@@ -1104,6 +1408,16 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
             display.number(126, y, current, ink);
         } else if ((page_ == Page::inputs) || (page_ == Page::mixes)) {
             const bool input = page_ == Page::inputs;
+#if CORETX_MODUL_TANKMIX
+            if (!input && (model.mixes[line].role != MixRole::manual)) {
+                const auto &mix = model.mixes[line];
+                detail::indexed_label(display, 1, y, "CH", mix.destination, ink);
+                display.small_text(31, y + 2, detail::tank_label(mix.role), ink);
+                display.text(104, y, tank_mix_active(mix.role, evaluation.frame) ? "ON" : "OFF",
+                             ink);
+                continue;
+            }
+#endif
             const auto destination =
                 input ? model.inputs[line].destination : model.mixes[line].destination;
             const auto source = input ? model.inputs[line].source : model.mixes[line].source;
@@ -1166,6 +1480,12 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
                 case 6:
                     display.text(104, y, source.inverted ? "YES" : "NO", ink);
                     break;
+                case 11:
+                    if (item.curve == 0)
+                        display.text(104, y, "OFF", ink);
+                    else
+                        detail::indexed_label(display, 110, y, "C", item.curve - 1U, ink);
+                    break;
                 }
             } else {
                 const auto &item = model.mixes[line];
@@ -1189,6 +1509,12 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
                 case 5:
                     display.text(104, y, source.inverted ? "YES" : "NO", ink);
                     break;
+                case 10:
+                    if (item.curve == 0)
+                        display.text(104, y, "OFF", ink);
+                    else
+                        detail::indexed_label(display, 110, y, "C", item.curve - 1U, ink);
+                    break;
                 }
             }
         } else {
@@ -1208,6 +1534,8 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
     if (row_count(model) == 0) {
         display.text(1, 20, "NO LINES");
     }
+    if (notice_)
+        display.small_text(1, 41, notice_);
 }
 
 constexpr Model simulator_model() noexcept {

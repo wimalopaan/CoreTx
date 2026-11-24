@@ -9,7 +9,7 @@ namespace coretx::firmware::stm32f072 {
 
 enum class BootloaderRequest : std::uint8_t { none, requested, error };
 
-// Only used at cold startup, before the PLL, application peripherals and IWDG.
+// Cold-start sampling uses the reset HSI clock, before application peripherals and IWDG.
 template <typename Io> struct Bootloader {
     Bootloader() = delete;
     inline static constexpr std::uintptr_t address = 0x1FFFC800;

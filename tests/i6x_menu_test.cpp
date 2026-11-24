@@ -82,6 +82,29 @@ bool boot(Store &store, const coretx::Model &legacy = fw::diagnostic_model) {
     return settle(store, legacy);
 }
 
+bool legacy_curve_record(const md::Data &data, const std::uint8_t version, md::Record &record) {
+    namespace codec = coretx::storage::detail;
+    if (!md::encode(data, 7, true, 0xFFFFFFFF, record))
+        return false;
+    record[4] = version;
+    std::fill(record.begin() + 34, record.end(), 0xFF);
+    codec::Writer out{std::span{record}.first(md::record_size - 4), 34};
+    if (!codec::transfer_model_counts(out, data.model) ||
+        !codec::transfer_model_lines(out, data.model, false) ||
+        !codec::transfer_model_extension(out, data.model) ||
+        !codec::transfer_multiswitch(out, data.model, version >= 8) ||
+        !codec::transfer_dashboard_options(out, data.model, true) ||
+        !codec::transfer_multiswitch_controls(out, data.model))
+        return false;
+    if ((version >= 8) && !md::transfer_curves(out, data.model, true))
+        return false;
+    if ((version >= 9) && !codec::transfer_tank(out, data.model))
+        return false;
+    codec::Writer crc{std::span{record}.last(4)};
+    crc.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
+    return out.good;
+}
+
 bool codec() {
     md::Data data{};
     data.radio = legacy_radio;
@@ -97,6 +120,7 @@ bool codec() {
             static_cast<coretx::SwitchPosition>(static_cast<int>(i % 9) - 1), (i % 2) != 0};
         data.model.inputs[i].side = static_cast<coretx::InputSide>(i % 3);
         data.model.inputs[i].trim = static_cast<coretx::TrimSource>(i % 6);
+        data.model.inputs[i].curve = static_cast<std::uint8_t>(i % 5);
     }
     for (std::size_t i = 0; i < data.model.mixes.size(); ++i) {
         data.model.mixes[i] = {};
@@ -107,6 +131,7 @@ bool codec() {
             true, static_cast<std::uint8_t>(i % 16),
             static_cast<coretx::SwitchPosition>(static_cast<int>(i % 9) - 1), (i % 2) != 0};
         data.model.mixes[i].carry_trim = (i % 2) == 0;
+        data.model.mixes[i].curve = static_cast<std::uint8_t>(i % 5);
     }
     data.model.outputs[15].reversed = true;
     data.model.dashboard_channels = {16, 0, 9, 2, 0, 15, 1, 8};
@@ -121,12 +146,16 @@ bool codec() {
     data.baud_index = 7;
     data.model.crsf_dashboard = true;
     data.model.multiswitch_beep = false;
+    data.model.curves[3] = {{-99, -17, 99}, {100, -100, 73, 0, -19}};
     for (std::size_t i = 0; i < data.model.multiswitch.size(); ++i) {
         auto &page = data.model.multiswitch[i];
         page.address = static_cast<std::int16_t>(i == 3 ? 255 : i);
         page.momentary = static_cast<std::uint8_t>(1U << i);
-        for (auto &label : page.labels)
-            label = {'L', 'I', 'G', 'H', 'T', 'S'};
+        for (std::size_t label = 0; label < page.labels.size(); ++label)
+            for (std::size_t character = 0; character < page.labels[label].size(); ++character) {
+                const auto code = (i * 48 + label * 6 + character) % 96;
+                page.labels[label][character] = code == 0 ? '\0' : static_cast<char>(31 + code);
+            }
     }
     auto &control = data.model.multiswitch[3].controls[7];
     control.set_address(127);
@@ -145,28 +174,52 @@ bool codec() {
         (restored.model.logical_switches[7].threshold != -1024))
         return false;
     if ((restored.model.multiswitch != data.model.multiswitch) || !restored.model.crsf_dashboard ||
-        restored.model.multiswitch_beep)
+        restored.model.multiswitch_beep || (restored.model.curves[3].x != data.model.curves[3].x) ||
+        (restored.model.curves[3].y != data.model.curves[3].y))
         return false;
-    record[4] = 6;
-    {
-        coretx::storage::detail::Writer checksum{std::span{record}.last(4)};
-        checksum.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
-    }
+    for (std::size_t i = 0; i < data.model.inputs.size(); ++i)
+        if (restored.model.inputs[i].curve != data.model.inputs[i].curve)
+            return false;
+    for (std::size_t i = 0; i < data.model.mixes.size(); ++i)
+        if (restored.model.mixes[i].curve != data.model.mixes[i].curve)
+            return false;
+    if (!legacy_curve_record(data, 6, record))
+        return false;
     if (md::decode(record, 7, tx, restored, info) != 2)
         return false;
     data.model.multiswitch_beep = true;
-    if (!md::encode(data, 7, true, 0xFFFFFFFF, record))
+    if (!legacy_curve_record(data, 6, record))
         return false;
-    record[4] = 6;
-    {
-        coretx::storage::detail::Writer checksum{std::span{record}.last(4)};
-        checksum.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
-    }
     restored.model.multiswitch_beep = false;
     if ((md::decode(record, 7, tx, restored, info) != 1) || !restored.model.multiswitch_beep ||
         !md::encode(restored, 7, true, info.generation, record) ||
         (restored.model.multiswitch != data.model.multiswitch))
         return false;
+    if ((restored.model.curves[3].x != coretx::Curve{}.x) ||
+        (restored.model.curves[3].y != coretx::Curve{}.y))
+        return false;
+    data.model.multiswitch_beep = false;
+    if (!legacy_curve_record(data, 7, record))
+        return false;
+    restored.model.curves[3] = data.model.curves[3];
+    restored.model.inputs[0].curve = restored.model.mixes[0].curve = 4;
+    if ((md::decode(record, 7, tx, restored, info) != 1) || restored.model.multiswitch_beep ||
+        (restored.model.curves[3].x != coretx::Curve{}.x) ||
+        (restored.model.curves[3].y != coretx::Curve{}.y))
+        return false;
+    for (const auto &line : restored.model.inputs)
+        if (line.curve != 0)
+            return false;
+    for (const auto &line : restored.model.mixes)
+        if (line.curve != 0)
+            return false;
+    if (!legacy_curve_record(data, 8, record) || (md::decode(record, 7, tx, restored, info) != 1) ||
+        (restored.model.curves[3].x != data.model.curves[3].x) ||
+        (restored.model.curves[3].y != data.model.curves[3].y) || restored.model.tank.enabled)
+        return false;
+    for (const auto &line : restored.model.mixes)
+        if (line.role != coretx::MixRole::manual)
+            return false;
     record = again;
     if ((md::decode(record, 6, tx, restored, info) != 2) ||
         (md::decode(record, 7, {0x87654321}, restored, info) != 2))
@@ -182,8 +235,67 @@ bool codec() {
     record[4] = md::format_version + 1;
     coretx::storage::detail::Writer checksum{std::span{record}.last(4)};
     checksum.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
-    return md::decode(record, 7, tx, restored, info) == 3;
+    if (md::decode(record, 7, tx, restored, info) != 3)
+        return false;
+    for (auto &line : data.model.inputs)
+        line.curve = 4;
+    for (auto &line : data.model.mixes)
+        line.curve = 4;
+    if (!md::encode(data, 7, true, 1, record) || (md::decode(record, 7, tx, restored, info) != 1))
+        return false;
+    for (const auto &line : restored.model.inputs)
+        if (line.curve != 4)
+            return false;
+    for (const auto &line : restored.model.mixes)
+        if (line.curve != 4)
+            return false;
+    data.model.multiswitch[0].labels[0][0] = '\x7f';
+    return !md::encode(data, 7, true, 1, record);
 }
+
+#if CORETX_MODUL_TANKMIX
+bool tank_codec() {
+    md::Data data{};
+    data.radio = legacy_radio;
+    data.model.inputs.resize<coretx::max_input_lines>();
+    data.model.mixes.resize<18>();
+    for (std::size_t i = 0; i < data.model.inputs.size(); ++i) {
+        data.model.inputs[i].destination = static_cast<std::uint8_t>(i / 2);
+        data.model.inputs[i].source.index = static_cast<std::uint8_t>(i);
+        data.model.inputs[i].curve = 4;
+    }
+    for (std::size_t i = 0; i < data.model.mixes.size(); ++i) {
+        data.model.mixes[i].destination = static_cast<std::uint8_t>(i / 2);
+        data.model.mixes[i].source.index = static_cast<std::uint8_t>(i % coretx::input_count);
+        data.model.mixes[i].curve = 4;
+    }
+    auto tank = data.model.tank;
+    tank.enabled = true;
+    tank.drive_input = 7;
+    tank.steering_input = 6;
+    tank.left_channel = 14;
+    tank.right_channel = 15;
+    tank.steering_percent = 73;
+    tank.hysteresis_percent = 20;
+    tank.reverse_steering = false;
+    if (!coretx::configure_tank(data.model, tank))
+        return false;
+    md::Record record{}, again{};
+    md::Data restored{};
+    md::Info info{};
+    if (!md::encode(data, 7, true, 11, record) ||
+        (md::decode(record, 7, tx, restored, info) != 1) || (restored.model.tank != tank) ||
+        !md::encode(restored, 7, true, info.generation, again) || (record != again) ||
+        (restored.model.mixes.size() != coretx::max_mix_lines))
+        return false;
+    for (std::size_t i = 0; i < restored.model.mixes.size(); ++i)
+        if ((restored.model.mixes[i].role != data.model.mixes[i].role) ||
+            (restored.model.mixes[i].curve != data.model.mixes[i].curve))
+            return false;
+    data.model.tank.enabled = false;
+    return !md::encode(data, 7, true, 11, record);
+}
+#endif
 
 bool obsolete_models_can_be_recreated() {
     md::Data data{};
@@ -197,7 +309,7 @@ bool obsolete_models_can_be_recreated() {
         coretx::storage::detail::Writer checksum{std::span{obsolete}.last(4)};
         checksum.word(coretx::storage::crc32(std::span{obsolete}.first(md::record_size - 4)));
         md::Info info{};
-        if (md::decode(obsolete, 0, tx, data, info) != 2)
+        if (md::decode(obsolete, 0, tx, data, info) != 3)
             return false;
     }
     struct Scenario {};
@@ -210,9 +322,8 @@ bool obsolete_models_can_be_recreated() {
     fw::ModelStorage<Test::Board> store{};
     store.initialize(tx);
     (void)settle(store);
-    return !store.editable() && store.can_initialize() &&
-           store.initialize_models(fw::diagnostic_model, legacy_radio) && settle(store) &&
-           store.editable() && (store.data().radio.output == RadioOutput::off);
+    return !store.editable() && store.can_initialize() && store.initialize_models() &&
+           settle(store) && store.editable() && (store.data().radio.output == RadioOutput::off);
 }
 
 bool active_first_loading() {
@@ -252,14 +363,15 @@ bool active_first_loading() {
         std::copy(directory.begin(), directory.end(), c.bytes.begin() + md::directory_base);
         Store store{};
         store.initialize(tx);
-        for (unsigned i = 0; !store.loaded() && (i < 100); ++i)
+        for (unsigned i = 0; !store.loaded() && (i < 1000); ++i) {
             tick(store);
-        if (!store.loaded() || !store.background_loading() || !store.busy() || !store.editable() ||
-            !store.take_changed() || (c.reads < 26) || (c.reads > 28) ||
-            (store.active() != active) || (store.entries()[active].bank != 1) ||
+            if (!store.loaded() && (store.editable() || store.take_changed() || store.save()))
+                return false;
+        }
+        if (!store.loaded() || store.background_loading() || store.busy() || !store.editable() ||
+            !store.take_changed() || (c.reads != 195) || (store.active() != active) ||
+            (store.entries()[active].bank != 1) ||
             (store.data().model.inputs[0].weight_percent.value() != 73))
-            return false;
-        if (store.select((active + 1) % md::count) || store.create(false))
             return false;
         fw::Diagnostics diagnostics{};
         diagnostics.use_model(store.data().model);
@@ -284,7 +396,7 @@ bool active_first_loading() {
             if (store.take_changed() || (store.data().model.inputs[0].weight_percent.value() != 73))
                 return false;
         }
-        if (!store.editable() || store.busy() || (c.reads != 194) || (c.writes != 0))
+        if (!store.editable() || store.busy() || (c.reads != 195) || (c.writes != 0))
             return false;
         for (const auto &entry : store.entries())
             if (!entry.valid || !entry.present)
@@ -319,19 +431,14 @@ bool background_loading_errors() {
         const auto before = c.bytes;
         Store store{};
         store.initialize(tx);
-        for (unsigned i = 0; !store.loaded() && (i < 100); ++i)
+        for (unsigned i = 0; !store.loaded() && (i < 1000); ++i)
             tick(store);
-        if (!store.background_loading() || !store.take_changed())
-            return false;
-        store.data().radio.receiver = {0x11223344};
-        if (!store.save())
-            return false;
         for (unsigned i = 0; store.background_loading() && (i < 300); ++i)
             tick(store);
         if (!store.loaded() || store.editable() || store.busy() || store.take_changed() ||
             store.save() || store.create(false) || (c.bytes != before) || (c.writes != 0) ||
             (store.data().model.inputs[0].weight_percent.value() != 73) ||
-            (store.data().radio.receiver.value != 0x11223344) ||
+            !store.recovery_required() || (store.data().radio.receiver != legacy_radio.receiver) ||
             (store.message() !=
              (future ? coretx::ui::tr::models_version : coretx::ui::tr::models_error)))
             return false;
@@ -599,7 +706,7 @@ bool dashboard_feature_gates() {
     };
     press(Key::down);
     press(Key::ok);
-    for (unsigned i = 0; i < 10; ++i)
+    for (std::size_t i = 0; i < fw::menu_detail::trim_row; ++i)
         press(Key::down);
     press(Key::ok);
     if (menu.screen() != fw::MenuScreen::trims)
@@ -907,8 +1014,7 @@ bool queued_save_and_directory_version() {
     Store future{};
     future.initialize(tx);
     (void)settle(future);
-    return !future.editable() && !future.save() && !future.can_initialize() &&
-           !future.initialize_models(fw::diagnostic_model, legacy_radio) && (before == c.bytes);
+    return !future.editable() && !future.save() && future.can_initialize() && (before == c.bytes);
 }
 
 bool trim_menu_persistence() {
@@ -1051,9 +1157,9 @@ bool initialize_foreign_memory() {
     Store store{};
     store.initialize(tx);
     (void)settle(store);
-    if (store.editable() || !store.can_initialize() ||
-        !store.initialize_models(fw::diagnostic_model, legacy_radio) || !settle(store) ||
-        (store.data().radio.output != RadioOutput::off) || !store.entries()[0].present)
+    if (store.editable() || !store.can_initialize() || !store.initialize_models() ||
+        !settle(store) || (store.data().radio.output != RadioOutput::off) ||
+        !store.entries()[0].present)
         return false;
     struct restoredScenario {};
     using restoredTest = coretx::test::FakeApplication<restoredScenario, Context, Memory>;
@@ -1062,7 +1168,78 @@ bool initialize_foreign_memory() {
     fw::ModelStorage<restoredTest::Board> restored{};
     return boot(restored) && (restored.active() == 0) &&
            std::equal(c.bytes.begin(), c.bytes.begin() + 2176, prefix.begin()) &&
-           (restored.data().radio.receiver == legacy_radio.receiver);
+           (restored.data().radio.receiver.value == 0) && (restored.data().model.mixes.size() == 4);
+}
+
+bool interrupted_model_reset() {
+    for (const unsigned cut : {1U, 2U, 5U, 50U, 400U, 440U, 450U, 470U}) {
+        struct Scenario {};
+        using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
+        using Store = fw::ModelStorage<Test::Board>;
+        Test::reset();
+        auto &c = Test::context;
+        std::fill(c.bytes.begin(), c.bytes.begin() + md::base, 0x37);
+        std::fill(c.bytes.begin() + md::base, c.bytes.begin() + md::directory_base, 0x55);
+        const auto before = c.bytes;
+        Store store{};
+        store.initialize(tx);
+        (void)settle(store);
+        if (!store.can_initialize() || !store.initialize_models())
+            return false;
+        for (unsigned i = 0; i < cut; ++i)
+            tick(store);
+        const bool marked = std::any_of(c.bytes.begin() + fw::model_migration::address,
+                                        c.bytes.begin() + fw::model_migration::address +
+                                            fw::model_migration::record_size,
+                                        [](const auto b) { return b != 0xFF; });
+        const auto interrupted = c.bytes;
+        Store reboot{};
+        reboot.initialize(tx);
+        (void)settle(reboot);
+        if (marked) {
+            if (reboot.editable() || !reboot.recovery_required() || reboot.save() ||
+                (c.bytes != interrupted) || !reboot.initialize_models() || !settle(reboot))
+                return false;
+        } else if (!reboot.editable())
+            return false;
+        if ((reboot.data().model.mixes.size() != 4) ||
+            (reboot.data().radio.output != RadioOutput::off) ||
+            (reboot.data().radio.receiver.value != 0) ||
+            !std::equal(c.bytes.begin(), c.bytes.begin() + md::base, before.begin()))
+            return false;
+    }
+    return true;
+}
+
+bool pending_migration_blocks_models() {
+    for (unsigned variant = 0; variant < 3; ++variant) {
+        struct Scenario {};
+        using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
+        Test::reset();
+        auto &c = Test::context;
+        md::Data data{};
+        data.radio = legacy_radio;
+        md::Record record{};
+        if (!md::encode(data, 0, true, 0, record))
+            return false;
+        std::copy(record.begin(), record.end(), c.bytes.begin() + md::base);
+        fw::model_migration::Record marker{};
+        fw::model_migration::encode(variant == 0 ? fw::model_migration::Kind::conversion
+                                                 : fw::model_migration::Kind::reset,
+                                    md::format_version, marker);
+        if (variant == 2)
+            marker[0] = 0; // A torn marker must also block startup, without guessing its meaning.
+        std::copy(marker.begin(), marker.end(), c.bytes.begin() + fw::model_migration::address);
+        const auto before = c.bytes;
+        fw::ModelStorage<Test::Board> store{};
+        store.initialize(tx);
+        (void)settle(store);
+        if (store.editable() || !store.recovery_required() || store.take_changed() ||
+            store.save() || (c.bytes != before) ||
+            (store.message() != coretx::ui::tr::models_migration))
+            return false;
+    }
+    return true;
 }
 
 bool stick_modes() {
@@ -1201,6 +1378,265 @@ bool editor_navigation() {
     upper.text(127, 63, "XYZ");
     return true;
 }
+
+bool curves_menu_persistence() {
+    struct Scenario {};
+    using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
+    using Store = fw::ModelStorage<Test::Board>;
+    Test::reset();
+    Store store{};
+    if (!boot(store))
+        return false;
+    store.data().model.inputs[0].curve = 4;
+    store.data().model.mixes[0].curve = 2;
+    if (!store.save() || !settle(store))
+        return false;
+    fw::Diagnostics diagnostics{};
+    diagnostics.use_model(store.data().model);
+    fw::Menu menu{};
+    menu.open();
+    const auto press = [&](const Key key) {
+        (void)menu.handle(key, store, diagnostics, RadioOutput::off);
+    };
+    press(Key::down);
+    press(Key::ok);
+    for (std::size_t i = 0; i < fw::menu_detail::curves_row; ++i)
+        press(Key::down);
+    press(Key::ok);
+    if (menu.screen() != fw::MenuScreen::curves)
+        return false;
+    for (int i = 0; i < 3; ++i)
+        press(Key::down);
+    press(Key::ok);
+    if (menu.screen() != fw::MenuScreen::editor)
+        return false;
+    press(Key::down);
+    press(Key::down);
+    press(Key::ok);
+    for (int i = 0; i < 5; ++i)
+        press(Key::up);
+    press(Key::ok);
+    if (!settle(store) || (store.data().model.curves[3].y[2] != 5))
+        return false;
+    press(Key::ok_long);
+    press(Key::ok);
+    for (int i = 0; i < 100; ++i)
+        press(Key::up);
+    if (store.data().model.curves[3].x[1] != 49)
+        return false;
+    press(Key::cancel);
+    if (menu.pending_model_edit() || (store.data().model.curves[3].x[1] != 0))
+        return false;
+    press(Key::ok);
+    for (int i = 0; i < 10; ++i)
+        press(Key::up);
+    press(Key::ok);
+    if (!settle(store))
+        return false;
+    press(Key::up);
+    press(Key::up);
+    press(Key::ok);
+    if (menu.pending_model_edit())
+        return false;
+    coretx::ui::Framebuffer display{};
+    menu.render(store, diagnostics, RadioOutput::off, display);
+    if ((display.character_width() != 6) || !display.pixel_at(125, 12))
+        return false;
+    press(Key::cancel);
+    if (menu.screen() != fw::MenuScreen::curves)
+        return false;
+    Store reboot{};
+    return boot(reboot) && (reboot.data().model.curves[3].x[1] == 10) &&
+           (reboot.data().model.curves[3].y[2] == 5) &&
+           (reboot.data().model.inputs[0].curve == 4) && (reboot.data().model.mixes[0].curve == 2);
+}
+
+#if CORETX_MODUL_TANKMIX
+bool tank_menu_persistence() {
+    struct Scenario {};
+    using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
+    using Store = fw::ModelStorage<Test::Board>;
+    Test::reset();
+    Store store{};
+    if (!boot(store))
+        return false;
+    fw::Diagnostics diagnostics{};
+    diagnostics.use_model(store.data().model);
+    fw::Menu menu{};
+    menu.open();
+    const auto press = [&](const Key key) {
+        (void)menu.handle(key, store, diagnostics, RadioOutput::off);
+    };
+    press(Key::down);
+    press(Key::ok);
+    for (std::size_t i = 0; i < fw::menu_detail::tank_row; ++i)
+        press(Key::down);
+    press(Key::ok);
+    if (menu.screen() != fw::MenuScreen::editor)
+        return false;
+    press(Key::ok);
+    press(Key::up);
+    press(Key::ok);
+    if (store.data().model.tank.enabled || !menu.pending_model_edit())
+        return false;
+    press(Key::cancel);
+    press(Key::down);
+    press(Key::down);
+    press(Key::down);
+    press(Key::ok);
+    for (int i = 0; i < 10; ++i)
+        press(Key::up);
+    press(Key::ok);
+    if (!settle(store))
+        return false;
+    press(Key::down);
+    press(Key::ok);
+    for (int i = 0; i < 10; ++i)
+        press(Key::up);
+    press(Key::ok);
+    if (!settle(store))
+        return false;
+    for (int i = 0; i < 4; ++i)
+        press(Key::up);
+    press(Key::ok);
+    press(Key::up);
+    press(Key::ok);
+    if (!settle(store) || !store.data().model.tank.enabled)
+        return false;
+    for (int i = 0; i < 5; ++i)
+        press(Key::down);
+    press(Key::ok);
+    for (int i = 0; i < 25; ++i)
+        press(Key::down);
+    press(Key::ok);
+    if (!settle(store) || (store.data().model.tank.steering_percent != 75))
+        return false;
+    press(Key::down);
+    press(Key::ok);
+    press(Key::up);
+    press(Key::up);
+    press(Key::ok);
+    if (!settle(store))
+        return false;
+    press(Key::down);
+    press(Key::ok);
+    press(Key::down);
+    press(Key::cancel);
+    if (!store.data().model.tank.reverse_steering)
+        return false;
+    press(Key::ok);
+    press(Key::down);
+    press(Key::ok);
+    if (!settle(store) || store.data().model.tank.reverse_steering)
+        return false;
+    Store reboot{};
+    if (!boot(reboot) || !reboot.data().model.tank.enabled ||
+        reboot.data().model.tank.reverse_steering ||
+        (reboot.data().model.tank.hysteresis_percent != 5) ||
+        (reboot.data().model.tank.steering_percent != 75))
+        return false;
+    diagnostics.use_model(reboot.data().model);
+    menu.open();
+    const auto next = [&](const Key key) {
+        (void)menu.handle(key, reboot, diagnostics, RadioOutput::off);
+    };
+    next(Key::down);
+    next(Key::ok);
+    next(Key::down);
+    next(Key::ok);
+    std::size_t managed{};
+    while ((managed < reboot.data().model.mixes.size()) &&
+           (reboot.data().model.mixes[managed].role == coretx::MixRole::manual)) {
+        next(Key::down);
+        ++managed;
+    }
+    if (managed == reboot.data().model.mixes.size())
+        return false;
+    next(Key::ok);
+    next(Key::ok);
+    if (menu.pending_model_edit())
+        return false;
+    next(Key::cancel);
+    next(Key::ok_long);
+    next(Key::down);
+    next(Key::ok);
+    if (reboot.data().model.mixes.size() != store.data().model.mixes.size())
+        return false;
+    coretx::ui::Framebuffer display{};
+    menu.render(reboot, diagnostics, RadioOutput::off, display);
+    next(Key::cancel);
+    next(Key::cancel);
+    for (std::size_t i = 1; i < fw::menu_detail::tank_row; ++i)
+        next(Key::down);
+    next(Key::ok);
+    next(Key::ok);
+    next(Key::down);
+    next(Key::ok);
+    if (!settle(reboot) || reboot.data().model.tank.enabled)
+        return false;
+    for (const auto &line : reboot.data().model.mixes)
+        if (line.role != coretx::MixRole::manual)
+            return false;
+    Store disabled{};
+    return boot(disabled) && !disabled.data().model.tank.enabled &&
+           (disabled.data().model.tank.steering_percent == 75) &&
+           (disabled.data().model.tank.left_channel == 10);
+}
+#else
+bool tank_module_disabled() {
+    struct Scenario {};
+    using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
+    using Store = fw::ModelStorage<Test::Board>;
+    namespace codec = coretx::storage::detail;
+    Test::reset();
+    Store store{};
+    if (!boot(store))
+        return false;
+    fw::Diagnostics diagnostics{};
+    diagnostics.use_model(store.data().model);
+    fw::Menu menu{};
+    menu.open();
+    const auto press = [&](const Key key) {
+        (void)menu.handle(key, store, diagnostics, RadioOutput::off);
+    };
+    press(Key::down);
+    press(Key::ok);
+    for (unsigned i = 0; i < 30; ++i)
+        press(Key::down);
+    press(Key::ok);
+    if (menu.screen() != fw::MenuScreen::curves)
+        return false;
+    md::Data data{};
+    data.radio = legacy_radio;
+    data.model.tank.steering_percent = 73;
+    data.model.tank.reverse_steering = false;
+    md::Record record{};
+    md::Data restored{};
+    md::Info info{};
+    if (!legacy_curve_record(data, 9, record) || (md::decode(record, 7, tx, restored, info) != 1) ||
+        (restored.model.tank != data.model.tank))
+        return false;
+    codec::Reader cursor{std::span{record}.first(md::record_size - 4), 34};
+    if (!codec::transfer_model_counts(cursor, restored.model) ||
+        !codec::transfer_model_lines(cursor, restored.model, true) ||
+        !codec::transfer_model_extension(cursor, restored.model) ||
+        !codec::transfer_multiswitch(cursor, restored.model, true) ||
+        !codec::transfer_dashboard_options(cursor, restored.model, true) ||
+        !codec::transfer_multiswitch_controls(cursor, restored.model) ||
+        !md::transfer_curves(cursor, restored.model, true))
+        return false;
+    record[cursor.position] |= 1;
+    codec::Writer crc{std::span{record}.last(4)};
+    crc.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
+    if (md::decode(record, 7, tx, restored, info) != 4)
+        return false;
+    std::copy(record.begin(), record.end(),
+              Test::context.bytes.begin() + md::base + 7 * 2 * md::record_size);
+    const auto before = Test::context.bytes;
+    Store reboot{};
+    return !boot(reboot) && !reboot.editable() && !reboot.save() && (Test::context.bytes == before);
+}
+#endif
 } // namespace
 
 int main() {
@@ -1212,10 +1648,11 @@ int main() {
         }
     };
     check(codec(), "bounded model codec, CRC, identity and version");
-    check(active_first_loading(),
-          "active banks load first; background scan publishes no second model");
-    check(background_loading_errors(),
-          "background errors preserve active model and block queued writes");
+#if CORETX_MODUL_TANKMIX
+    check(tank_codec(), "maximum-size firmware tank settings and module ownership roundtrip");
+#endif
+    check(active_first_loading(), "all model banks are checked before exposing the active model");
+    check(background_loading_errors(), "errors in inactive models block startup and all writes");
     check(obsolete_models_can_be_recreated(), "obsolete models rejected, explicit reset allowed");
     check(dashboard_feature_gates(), "dashboard pages and model menus follow feature options");
     check(trim_menu_persistence(), "trim modes, cancellation and values persist per model");
@@ -1229,9 +1666,18 @@ int main() {
     check(failures_and_wrap(), "verify failure, generation wrap and newer version protection");
     check(queued_save_and_directory_version(), "queued receiver save and future directory layout");
     check(initialize_foreign_memory(),
-          "explicit initialization preserves calibration and legacy RF");
+          "explicit initialization preserves global settings, clearing models and receiver IDs");
+    check(interrupted_model_reset(),
+          "interrupted model resets remain blocked and can be restarted");
+    check(pending_migration_blocks_models(), "pending or torn migration markers block startup");
     check(stick_modes(), "global stick modes preserve physical calibration and polarity");
     check(menu_scrolling(), "6x10 model actions scroll the fifth row into view");
     check(editor_navigation(), "compact menu, live editor, cancellation and RF-off gate");
+    check(curves_menu_persistence(), "curve point editor, X/Y selection, cancellation and reboot");
+#if CORETX_MODUL_TANKMIX
+    check(tank_menu_persistence(), "tank setup, owned read-only mixers, disable and reboot");
+#else
+    check(tank_module_disabled(), "tank-free menu and unsupported-model write protection");
+#endif
     return failed != 0;
 }

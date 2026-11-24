@@ -50,7 +50,19 @@ class Framebuffer {
     std::uint8_t clipped_page_{height / 8};
 };
 
-enum class Page : std::uint8_t { controls, inputs, mixes, outputs, monitor };
+enum class Page : std::uint8_t {
+    controls,
+    inputs,
+    mixes,
+    outputs,
+    monitor,
+    curves
+#if CORETX_MODUL_TANKMIX
+    ,
+    tank
+#endif
+};
+inline constexpr std::size_t page_count = 6 + CORETX_MODUL_TANKMIX;
 enum class Key : std::uint8_t {
     none,
     up,
@@ -83,6 +95,22 @@ class Interface {
         page_ = page;
     }
     constexpr void set_switch_names(const SwitchNames &names) noexcept { switch_names_ = &names; }
+    constexpr void open_curve(const std::uint8_t curve) noexcept {
+        open(Page::curves);
+        curve_slot_ = curve;
+    }
+    [[nodiscard]] constexpr std::uint8_t selected_curve() const noexcept { return curve_slot_; }
+    [[nodiscard]] constexpr bool managed_mix(const Model &model) const noexcept {
+#if CORETX_MODUL_TANKMIX
+        return (page_ == Page::mixes) && !model.mixes.empty() &&
+               (model.mixes[row(model)].role != MixRole::manual);
+#else
+        (void)model;
+        return false;
+#endif
+    }
+    constexpr void render_curve(const Model &model, Framebuffer &display, int top = 17,
+                                int height = 30) const noexcept;
     [[nodiscard]] constexpr std::size_t selected_row(const Model &model) const noexcept {
         return row(model);
     }
@@ -163,9 +191,13 @@ class Interface {
     constexpr void render_calibration(const RawControls &raw, Framebuffer &display) const noexcept;
 
     Page page_{Page::controls};
-    std::array<std::uint8_t, 5> rows_{};
-    std::array<std::uint8_t, 5> first_rows_{};
-    std::array<std::uint8_t, 5> fields_{0, 0, 0, 0, 2};
+    std::array<std::uint8_t, page_count> rows_{};
+    std::array<std::uint8_t, page_count> first_rows_{};
+    std::array<std::uint8_t, page_count> fields_{0, 0, 0, 0, 2, 1};
+    std::uint8_t curve_slot_{};
+#if CORETX_MODUL_TANKMIX
+    TankMixer tank_draft_{};
+#endif
     bool editing_{};
     bool model_changed_{};
     int saved_value_{};

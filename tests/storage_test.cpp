@@ -64,7 +64,7 @@ constexpr bool roundtrip() {
     store::Record record{};
     if (!store::encode(original, 0x12345678, record) || (record[0] != 'R') || (record[1] != 'C') ||
         (record[2] != 'C') || (record[3] != 'S') || (record[4] != store::format_version) ||
-        (record[5] != 0) || (record[6] != 4) || (record[7] != 3) || (record[8] != 0x78) ||
+        (record[5] != 0) || (record[6] != 86) || (record[7] != 3) || (record[8] != 0x78) ||
         (record[9] != 0x56) || (record[10] != 0x34) || (record[11] != 0x12) || (record[20] != 1) ||
         (record[22] != 0xFF) || (record[23] != 0xFF) || (record[66] != 7) || (record[67] != 1)) {
         return false;
@@ -304,7 +304,19 @@ constexpr bool sound_options() {
             (restored.model.multiswitch_beep != enabled) || !store::encode(restored, 7, upgraded) ||
             (upgraded != record))
             return false;
-        record[4] = 6;
+        // Recreate the prior payload, which has no curve extension.
+        const store::detail::StateView<const coretx::Model, const coretx::ControlSetup> old{
+            state.model, state.setup};
+        record.fill(0xFF);
+        store::detail::Writer payload{std::span{record}.subspan(store::header_size)};
+        if (!store::detail::transfer(payload, old, true, false, false))
+            return false;
+        store::detail::Writer header{std::span{record}.first(store::header_size)};
+        header.word(store::detail::magic);
+        header.field(std::uint16_t{6});
+        header.field(static_cast<std::uint16_t>(payload.position));
+        header.word(7);
+        header.word(0);
         reseal(record);
         const auto result = store::decode(record, restored);
         if (enabled) {
@@ -317,6 +329,195 @@ constexpr bool sound_options() {
     return true;
 }
 static_assert(sound_options());
+
+constexpr bool curve_storage() {
+    auto state = fixture();
+    for (std::size_t i = 0; i < state.model.curves.size(); ++i)
+        state.model.curves[i] = {{-75, -25, 60}, {80, -60, 30, -90, 50}};
+    for (std::size_t i = 0; i < state.model.inputs.size(); ++i)
+        state.model.inputs[i].curve = static_cast<std::uint8_t>(i % 5);
+    for (std::size_t i = 0; i < state.model.mixes.size(); ++i)
+        state.model.mixes[i].curve = static_cast<std::uint8_t>(i % 5);
+    store::Record record{}, again{};
+    store::State restored{};
+    if (!store::encode(state, 42, record) || !store::decode(record, restored) ||
+        (restored.model.curves != state.model.curves) || !store::encode(restored, 42, again) ||
+        (record != again))
+        return false;
+    for (std::size_t i = 0; i < state.model.inputs.size(); ++i)
+        if (restored.model.inputs[i].curve != state.model.inputs[i].curve)
+            return false;
+    for (std::size_t i = 0; i < state.model.mixes.size(); ++i)
+        if (restored.model.mixes[i].curve != state.model.mixes[i].curve)
+            return false;
+    // Corrupt the first inner x ordering and both kinds of serialized selection.
+    for (const auto offset : {store::header_size + 772 + 1, store::header_size + 772 + 32,
+                              store::header_size + 772 + 32 + coretx::max_input_lines}) {
+        auto damaged = record;
+        damaged[offset] = 127;
+        reseal(damaged);
+        if (store::decode(damaged, restored).status.code != store::Error::model)
+            return false;
+    }
+    const auto original = fixture();
+    for (std::uint16_t version = store::oldest_format_version; version < store::format_version;
+         ++version) {
+        record.fill(0xFF);
+        store::detail::Writer payload{std::span{record}.subspan(store::header_size)};
+        const store::detail::StateView<const coretx::Model, const coretx::ControlSetup> old{
+            original.model, original.setup};
+        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, false))
+            return false;
+        store::detail::Writer header{std::span{record}.first(store::header_size)};
+        header.word(store::detail::magic);
+        header.field(version);
+        header.field(static_cast<std::uint16_t>(payload.position));
+        header.word(42);
+        header.word(0);
+        reseal(record);
+        restored = state;
+        if (!store::decode_parts(record, restored.model, restored.setup) ||
+            (restored.model.curves != coretx::Model{}.curves))
+            return false;
+        for (const auto &line : restored.model.inputs)
+            if (line.curve != 0)
+                return false;
+        for (const auto &line : restored.model.mixes)
+            if (line.curve != 0)
+                return false;
+        restored = state;
+        if (!store::select_into(record, record, restored) ||
+            (restored.model.curves != coretx::Model{}.curves))
+            return false;
+    }
+    return true;
+}
+static_assert(curve_storage());
+
+#if CORETX_MODUL_TANKMIX
+constexpr bool tank_storage() {
+    auto state = fixture();
+    state.model.mixes.resize<18>();
+    for (auto &line : state.model.mixes) {
+        line = {};
+        line.destination = 15;
+    }
+    const coretx::TankMixer tank{true, 6, 7, 10, 11, 73, 20};
+    if (!coretx::configure_tank(state.model, tank) ||
+        (state.model.mixes.size() != coretx::max_mix_lines))
+        return false;
+    store::Record record{}, again{};
+    store::State restored{};
+    if (!store::encode(state, 42, record) || !store::decode(record, restored) ||
+        (restored.model.tank != tank) || !store::encode(restored, 42, again) || (record != again))
+        return false;
+    for (std::size_t i = 0; i < state.model.mixes.size(); ++i)
+        if (restored.model.mixes[i].role != state.model.mixes[i].role)
+            return false;
+    auto no_reversal = tank;
+    no_reversal.reverse_steering = false;
+    store::Record no_reversal_record{};
+    if (!coretx::configure_tank(state.model, no_reversal) ||
+        !store::encode(state, 42, no_reversal_record) ||
+        !store::decode(no_reversal_record, restored) || restored.model.tank.reverse_steering ||
+        !store::decode(record, restored) || !restored.model.tank.reverse_steering ||
+        !coretx::configure_tank(state.model, tank))
+        return false;
+    const auto length = static_cast<std::size_t>(record[6] | (std::uint16_t{record[7]} << 8));
+    const auto extension = store::header_size + length - 10;
+    // Reject reserved config bits, altered ownership and truncated extension.
+    for (const unsigned mutation : {0U, 1U, 2U}) {
+        auto damaged = record;
+        if (mutation == 0)
+            damaged[extension + 3] |= 0x80;
+        else if (mutation == 1)
+            damaged[extension + 4] &= 0xFC;
+        else {
+            damaged[store::header_size + length - 1] = 0xFF;
+            store::detail::Writer header{std::span{damaged}.subspan(6, 2)};
+            header.field(static_cast<std::uint16_t>(length - 1));
+        }
+        reseal(damaged);
+        if (store::decode(damaged, restored) || !store::encode(restored, 42, again) ||
+            (again != record))
+            return false;
+    }
+    // All supported old formats reset module state even during in-place decode.
+    const auto original = fixture();
+    for (std::uint16_t version = 6; version <= 8; ++version) {
+        store::Record old_record{};
+        old_record.fill(0xFF);
+        const store::detail::StateView<const coretx::Model, const coretx::ControlSetup> old{
+            original.model, original.setup};
+        store::detail::Writer payload{std::span{old_record}.subspan(store::header_size)};
+        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, false))
+            return false;
+        store::detail::Writer header{std::span{old_record}.first(store::header_size)};
+        header.word(store::detail::magic);
+        header.field(version);
+        header.field(static_cast<std::uint16_t>(payload.position));
+        header.word(42);
+        header.word(0);
+        reseal(old_record);
+        restored = state;
+        if (!store::decode_parts(old_record, restored.model, restored.setup) ||
+            (restored.model.tank != coretx::TankMixer{}))
+            return false;
+        for (const auto &line : restored.model.mixes)
+            if (line.role != coretx::MixRole::manual)
+                return false;
+    }
+    // Full serialized snapshots prove configuration failures leave the complete model intact.
+    auto conflict = tank;
+    conflict.left_channel = 15;
+    if ((coretx::configure_tank(state.model, conflict).code != coretx::ErrorCode::tank_conflict) ||
+        !store::encode(state, 42, again) || (again != record))
+        return false;
+    auto disabled = tank;
+    disabled.enabled = false;
+    if (!coretx::configure_tank(state.model, disabled))
+        return false;
+    state.model.mixes.resize<19>();
+    state.model.mixes[18].destination = 15;
+    if (!store::encode(state, 42, record) ||
+        (coretx::configure_tank(state.model, tank).code != coretx::ErrorCode::capacity) ||
+        !store::encode(state, 42, again) || (again != record))
+        return false;
+    // A final partially populated roles byte must have zero padding.
+    state.model.mixes.clear();
+    if (!state.model.mixes.try_push_back(coretx::MixLine{.destination = 15}) ||
+        !coretx::configure_tank(state.model, tank) || !store::encode(state, 42, record))
+        return false;
+    const auto short_length = static_cast<std::size_t>(record[6] | (std::uint16_t{record[7]} << 8));
+    record[store::header_size + short_length - 1] |= 0x80;
+    reseal(record);
+    return store::decode(record, restored).status.code == store::Error::field;
+}
+static_assert(tank_storage());
+#else
+constexpr bool tank_unavailable_storage() {
+    auto state = fixture();
+    state.model.tank.steering_percent = 73;
+    state.model.tank.reverse_steering = false;
+    store::Record record{};
+    store::State restored{};
+    if (!store::encode(state, 42, record) || !store::decode(record, restored) ||
+        (restored.model.tank != state.model.tank))
+        return false;
+    const auto length = static_cast<std::size_t>(record[6] | (std::uint16_t{record[7]} << 8));
+    const auto extension = store::header_size + length - 4 - (state.model.mixes.size() + 3) / 4;
+    record[extension] |= 1;
+    reseal(record);
+    const auto unsupported = store::decode(record, restored);
+    store::Record supported{};
+    if (!store::encode(state, 43, supported))
+        return false;
+    const auto selection = store::select_into(record, supported, restored);
+    return (unsupported.status.code == store::Error::module_unavailable) &&
+           (selection.status.code == store::Error::module_unavailable);
+}
+static_assert(tank_unavailable_storage());
+#endif
 
 void torn_writes() {
     auto old = fixture();
@@ -361,6 +562,12 @@ void torn_writes() {
 } // namespace
 
 int main() {
+#if CORETX_MODUL_TANKMIX
+    CHECK(tank_storage());
+#else
+    CHECK(tank_unavailable_storage());
+#endif
+    CHECK(curve_storage());
     CHECK(snapshot_extensions());
     CHECK(obsolete_formats_are_rejected());
     CHECK(roundtrip());

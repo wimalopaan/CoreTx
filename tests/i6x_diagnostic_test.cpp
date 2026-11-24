@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #define CORETX_I6S_TOUCH_TRACE
+#include "boards/common/board.hpp"
 #include "boards/common/calibration_storage.hpp"
 #include "boards/common/dashboard.hpp"
 #include "boards/i6x/keys.hpp"
@@ -77,6 +78,7 @@ struct FakeRegisters {
     hw::AdcError failure{};
     bool paused{};
     bool timer_stopped{};
+    bool barrier_called{};
     bool calibration_while_enabled{};
     bool lcd_timing_error{};
     bool lcd_has_fallen{};
@@ -140,6 +142,7 @@ struct FakeRegisters {
     }
 
     [[nodiscard]] constexpr std::uint32_t now_us() { return read(reg::tim2_cnt); }
+    constexpr void barrier() { barrier_called = true; }
 
     constexpr void write(const std::uintptr_t address, const std::uint32_t value) {
         if (address == adc_dma_registers::ifcr) {
@@ -1565,6 +1568,40 @@ bool adc_deferred_enable() {
     return true;
 }
 
+bool bootloader_message() {
+    struct Scenario {};
+    using Test = coretx::test::RegisterFixture<Scenario, FakeRegisters>;
+    using Board = hw::SenderBoard<Test::Io>;
+    Test::reset_registers();
+    auto &io = Test::registers;
+    if (!Board::bootloader_message() || Board::Display::busy() || io.lcd_timing_error ||
+        (io.cell(reg::tim2_psc) != 7) ||
+        ((io.cell(reg::rcc_cr) & (RCC_CR_HSEON | RCC_CR_PLLON)) != 0))
+        return false;
+    coretx::ui::Framebuffer expected{};
+    expected.text(22, 28, "DFU-Bootloader");
+    std::size_t pixel{};
+    for (std::size_t i = 0; i < io.lcd_count; ++i)
+        if (io.lcd_bytes[i].data) {
+            if ((pixel >= expected.bytes().size()) ||
+                (io.lcd_bytes[i].value != expected.bytes()[pixel++]))
+                return false;
+        }
+    if ((pixel != expected.bytes().size()) || (io.lcd_bytes[io.lcd_count - 1].value != 0xAF))
+        return false;
+    io.cell(Board::Bootloader::address) = 0x20004000;
+    io.cell(Board::Bootloader::address + 4U) = 0x1FFFC901;
+    if (!Board::Bootloader::prepare() || !io.barrier_called ||
+        ((io.cell(GPIOF_BASE + offsetof(GPIO_TypeDef, ODR)) & GPIO_ODR_3) == 0) ||
+        ((io.cell(GPIOC_BASE + offsetof(GPIO_TypeDef, ODR)) & GPIO_ODR_9) == 0) ||
+        ((io.cell(GPIOB_BASE + offsetof(GPIO_TypeDef, ODR)) & GPIO_ODR_4) == 0) ||
+        (io.cell(reg::rcc_apb1enr) != 0))
+        return false;
+    Test::reset_registers();
+    io.timer_stopped = true;
+    return !Board::bootloader_message() && (io.lcd_count == 0);
+}
+
 bool lcd_irregular_timing() {
     struct TestScenario {};
     using Test = coretx::test::RegisterFixture<TestScenario, FakeRegisters>;
@@ -2577,6 +2614,7 @@ int main() {
         Check{"overview_and_latch_lifecycle", overview_and_latch_lifecycle},
         Check{"extended_physical_footer", extended_physical_footer},
         Check{"adc_deferred_enable", adc_deferred_enable},
+        Check{"bootloader_message", bootloader_message},
         Check{"lcd_irregular_timing", lcd_irregular_timing},
         Check{"lcd_bounded_transfer", lcd_bounded_transfer},
         Check{"lcd_bus_and_board", lcd_bus_and_board},
