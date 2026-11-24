@@ -21,6 +21,13 @@ template <typename Io, unsigned Timer = 2> class Clock {
         if (error != HardwareError::none) {
             return error;
         }
+        return initialize_timer(cpu_hz, attempts);
+    }
+    [[nodiscard]] static constexpr stm32f072::HardwareError
+    initialize_timer(const std::uint32_t source_hz,
+                     const std::uint32_t attempts = stm32f072::ready_timeout) noexcept {
+        using namespace stm32f072;
+        using namespace registers;
         Io::write(rcc_apb1enr, Io::read(rcc_apb1enr) | RCC_APB1ENR_TIM2EN);
         (void)Io::read(rcc_apb1enr);
         Io::write(rcc_apb1rstr, Io::read(rcc_apb1rstr) | RCC_APB1RSTR_TIM2RST);
@@ -30,7 +37,7 @@ template <typename Io, unsigned Timer = 2> class Clock {
         Io::write(dbg_apb1fz, Io::read(dbg_apb1fz) | DBGMCU_APB1_FZ_DBG_TIM2_STOP);
         Io::write(tim2_cr1, 0);
         Io::write(tim2_dier, 0);
-        Io::write(tim2_psc, cpu_hz / timer_hz - 1U);
+        Io::write(tim2_psc, source_hz / timer_hz - 1U);
         Io::write(tim2_arr, TIM_ARR_ARR);
         Io::write(tim2_egr, TIM_EGR_UG);
         Io::write(tim2_sr, 0);

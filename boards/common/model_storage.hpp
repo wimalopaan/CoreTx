@@ -2,31 +2,27 @@
 #pragma once
 
 #include "boards/common/controls.hpp"
+#include "boards/common/model_migration.hpp"
 #include "boards/common/radio_storage.hpp"
 #include "boards/common/slot_transfer.hpp"
 #include "coretx/ui/translation.hpp"
 #include "platform/stm32f072/crsf.hpp"
 
 #include <memory>
+#include <optional>
 
 namespace coretx::firmware {
 
 namespace models {
-inline constexpr std::size_t count = 8;
-inline constexpr std::size_t record_size = 768;
-inline constexpr std::uint8_t format_version = coretx::storage::format_version;
-inline constexpr std::uint16_t base = 2304;
-inline constexpr std::uint16_t directory_base = base + count * 2 * record_size;
-inline constexpr std::uint32_t magic = 0x314C444D;           // MDL1.
-inline constexpr std::uint32_t directory_magic = 0x31524944; // DIR1.
 static_assert((directory_base + 128) <= 16'384);
-// Packed lines keep trim settings and per-function controls in the existing journals.
+// Curve references reuse line padding; packed labels and tank metadata retain the journal size.
 static_assert((34 + 2 + (max_input_lines * coretx::storage::detail::packed_model::input_bytes) +
                (max_mix_lines * coretx::storage::detail::packed_model::mix_bytes) +
                (channel_count * coretx::storage::detail::packed_model::output_bytes) + 8 +
-               (logical_switch_count * 7) + (multiswitch_page_count * 51) + 1 +
+               (logical_switch_count * 7) + (multiswitch_page_count * 45) + 1 +
                (multiswitch_page_count * multiswitch_function_count * sizeof(MultiSwitchControl)) +
-               trim_count + 1) <= (record_size - 4));
+               trim_count + 1 + curve_count * 8 + (max_mix_lines + 7) / 8 + 4 +
+               (max_mix_lines + 3) / 4) <= (record_size - 4));
 using Record = std::array<std::uint8_t, record_size>;
 using Name = std::array<char, 12>;
 
@@ -96,6 +92,31 @@ constexpr bool valid_data(const Data &data, const afhds2a::TxId transmitter) noe
     return true;
 }
 
+template <typename Archive, typename Snapshot>
+constexpr bool transfer_curves(Archive &archive, Snapshot &model, const bool enabled) noexcept {
+    if (!coretx::storage::detail::transfer_curves(archive, model, enabled, false))
+        return false;
+    if (!enabled)
+        return archive.good;
+    // The low two mixer selection bits are stored in the packed line's spare bits.
+    for (std::size_t group = 0; group < model.mixes.size(); group += 8) {
+        std::uint8_t high{};
+        if constexpr (std::is_const_v<Snapshot>)
+            for (std::size_t i = group; (i < group + 8) && (i < model.mixes.size()); ++i)
+                high |= static_cast<std::uint8_t>((model.mixes[i].curve >> 2) << (i - group));
+        archive.field(high);
+        if constexpr (!std::is_const_v<Snapshot>) {
+            const auto remaining = std::min(std::size_t{8}, model.mixes.size() - group);
+            if ((static_cast<unsigned>(high) >> remaining) != 0)
+                archive.reject(archive.position - 1);
+            for (std::size_t i = 0; i < remaining; ++i)
+                model.mixes[group + i].curve |=
+                    static_cast<std::uint8_t>(((static_cast<unsigned>(high) >> i) & 1U) << 2);
+        }
+    }
+    return archive.good;
+}
+
 constexpr bool encode(const Data &data, const std::size_t index, const bool present,
                       const std::uint32_t generation, Record &record) noexcept {
     if ((index >= count) || !valid_data(data, data.radio.transmitter))
@@ -115,18 +136,20 @@ constexpr bool encode(const Data &data, const std::size_t index, const bool pres
     for (const auto ch : data.name)
         out.field(static_cast<std::uint8_t>(ch));
     if (!coretx::storage::detail::transfer_model_counts(out, data.model) ||
-        !coretx::storage::detail::transfer_model_lines(out, data.model) ||
+        !coretx::storage::detail::transfer_model_lines(out, data.model, true) ||
         !coretx::storage::detail::transfer_model_extension(out, data.model) ||
-        !coretx::storage::detail::transfer_multiswitch(out, data.model) ||
+        !coretx::storage::detail::transfer_multiswitch(out, data.model, true) ||
         !coretx::storage::detail::transfer_dashboard_options(out, data.model) ||
-        !coretx::storage::detail::transfer_multiswitch_controls(out, data.model))
+        !coretx::storage::detail::transfer_multiswitch_controls(out, data.model) ||
+        !models::transfer_curves(out, data.model, true) ||
+        !coretx::storage::detail::transfer_tank(out, data.model))
         return false;
     coretx::storage::detail::Writer crc{std::span{record}.last(4)};
     crc.word(coretx::storage::crc32(std::span{record}.first(record_size - 4)));
     return out.good && (out.position <= (record_size - 4));
 }
 
-// 0: erased, 1: valid, 2: damaged, 3: incompatible version.
+// 0: erased, 1: valid, 2: damaged, 3: incompatible version, 4: unavailable module.
 constexpr int decode(const Record &record, const std::size_t index, const afhds2a::TxId transmitter,
                      Data &data, Info &info) noexcept {
     if (std::all_of(record.begin(), record.end(), [](auto b) { return b == 0xFF; }))
@@ -150,7 +173,7 @@ constexpr int decode(const Record &record, const std::size_t index, const afhds2
     if (version > format_version)
         return 3;
     if (version < coretx::storage::oldest_format_version)
-        return 2;
+        return 3;
     if (slot != index)
         return 2;
     in.field(info.present);
@@ -163,14 +186,19 @@ constexpr int decode(const Record &record, const std::size_t index, const afhds2
     for (auto &ch : data.name)
         ch = static_cast<char>(in.byte());
     if (!coretx::storage::detail::transfer_model_counts(in, data.model) ||
-        !coretx::storage::detail::transfer_model_lines(in, data.model) ||
+        !coretx::storage::detail::transfer_model_lines(in, data.model, version >= 8) ||
         !coretx::storage::detail::transfer_model_extension(in, data.model) ||
-        !coretx::storage::detail::transfer_multiswitch(in, data.model) ||
+        !coretx::storage::detail::transfer_multiswitch(in, data.model, version >= 8) ||
         !coretx::storage::detail::transfer_dashboard_options(in, data.model, version >= 7) ||
         !coretx::storage::detail::transfer_multiswitch_controls(in, data.model) ||
-        !valid_data(data, transmitter) ||
+        !models::transfer_curves(in, data.model, version >= 8) ||
+        !coretx::storage::detail::transfer_tank(in, data.model, version >= 9) ||
         !std::all_of(record.begin() + static_cast<std::ptrdiff_t>(in.position), record.end() - 4,
                      [](auto b) { return b == 0xFF; }))
+        return 2;
+    if (coretx::validate(data.model).code == ErrorCode::tank_unavailable)
+        return 4;
+    if (!valid_data(data, transmitter))
         return 2;
     info.name = data.name;
     info.checksum = checksum;
@@ -190,6 +218,9 @@ template <typename Memory> class ModelStorage {
         trim_save_pending_ = false;
         directory_valid_ = false;
         resettable_ = directory_damaged_ = slot_damaged_ = false;
+        resetting_ = false;
+        detected_version_.reset();
+        expected_version_ = models::format_version;
         directory_empty_ = scan_empty_ = slot_empty_ = true;
         active_ = target_ = copy_target_ = 0;
         bank_ = directory_bank_ = 0;
@@ -212,21 +243,29 @@ template <typename Memory> class ModelStorage {
     [[nodiscard]] constexpr bool loaded() const noexcept { return loaded_; }
     [[nodiscard]] constexpr bool editable() const noexcept { return loaded_ && writable_; }
     [[nodiscard]] constexpr bool can_initialize() const noexcept { return resettable_; }
-    constexpr bool initialize_models(const Model &model, const RadioSettings radio) noexcept {
+    [[nodiscard]] constexpr bool recovery_required() const noexcept { return resettable_; }
+    [[nodiscard]] constexpr std::optional<std::uint8_t> detected_version() const noexcept {
+        return detected_version_;
+    }
+    [[nodiscard]] constexpr std::uint8_t expected_version() const noexcept {
+        return expected_version_;
+    }
+    constexpr bool initialize_models() noexcept {
         if (!resettable_ || busy())
             return false;
-        if (!coretx::validate(model)) {
-            message_ = coretx::ui::tr::models_error;
-            return false;
-        }
-        data_.model = model;
-        data_.radio = radio;
-        data_.radio.output = RadioOutput::off;
+        models::four_channel_model(data_.model);
+        data_.radio = {transmitter_, {}, RadioOutput::off, afhds2a::ChannelMode::extended16};
         data_.baud_index = static_cast<std::uint8_t>(crsf_default_baudrate_index);
         models::default_name(data_.name, 0);
         resettable_ = false;
+        resetting_ = true;
+        loaded_ = writable_ = changed_ = false;
+        dirty_ = trim_save_pending_ = false;
         reset_index_ = 0;
-        stage_ = Stage::reset;
+        model_migration::Record marker{};
+        model_migration::encode(model_migration::Kind::reset, models::format_version, marker);
+        std::copy(marker.begin(), marker.end(), record_.begin());
+        stage_ = Stage::reset_marker;
         message_ = coretx::ui::tr::models_saving;
         return true;
     }
@@ -367,7 +406,7 @@ template <typename Memory> class ModelStorage {
                 data_.model = legacy;
             data_.radio = radio;
             record_.fill(0xFF);
-            stage_ = Stage::directory_load;
+            stage_ = Stage::migration_load;
         }
         if (stage_ == Stage::ready) {
             if (!dirty_ || !writable_)
@@ -405,6 +444,7 @@ template <typename Memory> class ModelStorage {
   private:
     enum class Stage : std::uint8_t {
         wait,
+        migration_load,
         directory_load,
         scan,
         active_scan,
@@ -413,7 +453,9 @@ template <typename Memory> class ModelStorage {
         select,
         copy,
         rename,
+        reset_marker,
         reset,
+        reset_complete,
         write,
         directory
     };
@@ -431,6 +473,9 @@ template <typename Memory> class ModelStorage {
     // Starts the EEPROM transfer of the current stage; false when the stage has none.
     constexpr bool start() noexcept {
         switch (stage_) {
+        case Stage::migration_load:
+            transfer_.read(model_migration::address, directory_page());
+            return true;
         case Stage::directory_load:
             transfer_.read(directory_address(), directory_page());
             return true;
@@ -449,18 +494,16 @@ template <typename Memory> class ModelStorage {
         case Stage::directory:
             transfer_.write(directory_address(), directory_page(), Memory::page_size);
             return true;
+        case Stage::reset_marker:
+        case Stage::reset_complete:
+            transfer_.write(model_migration::address, directory_page(), Memory::page_size, false);
+            return true;
         case Stage::reset: {
-            // Reset markers make every slot and directory bank explicitly invalid.
-            const bool record = reset_index_ < (models::count * 2);
-            const auto address = static_cast<std::uint16_t>(
-                record ? models::base + reset_index_ * models::record_size
-                       : models::directory_base +
-                             (reset_index_ - models::count * 2) * Memory::page_size);
-            const std::array<std::uint8_t, 4> marker{
-                0, static_cast<std::uint8_t>(record ? 'D' : 'I'),
-                static_cast<std::uint8_t>(record ? 'L' : 'R'), '1'};
-            std::copy(marker.begin(), marker.end(), record_.begin());
-            transfer_.write(address, std::span{record_}.first(marker.size()), marker.size(), false);
+            // Erase the entire model area, retaining the reset marker until the new model commits.
+            const auto address =
+                static_cast<std::uint16_t>(models::base + reset_index_ * Memory::page_size);
+            record_.fill(0xFF);
+            transfer_.write(address, directory_page(), Memory::page_size, false);
             return true;
         }
         case Stage::wait:
@@ -472,15 +515,36 @@ template <typename Memory> class ModelStorage {
     // Handles a completed transfer; true when the next stage needs another transfer.
     [[nodiscard]] constexpr bool complete() noexcept {
         switch (stage_) {
+        case Stage::migration_load:
+            if (!std::all_of(record_.begin(), record_.begin() + Memory::page_size,
+                             [](const auto b) { return b == 0xFF; })) {
+                resettable_ = true;
+                finish(coretx::ui::tr::models_migration, false);
+                return false;
+            }
+            stage_ = Stage::directory_load;
+            return true;
+        case Stage::reset_marker:
+            stage_ = Stage::reset;
+            return true;
+        case Stage::reset_complete:
+            resetting_ = false;
+            changed_ = true;
+            detected_version_.reset();
+            expected_version_ = models::format_version;
+            finish(coretx::ui::tr::models_saved, true);
+            return false;
         case Stage::reset:
-            if (++reset_index_ != ((models::count * 2) + 2))
+            ++reset_index_;
+            if ((models::base + reset_index_ * Memory::page_size) == model_migration::address)
+                ++reset_index_;
+            if ((models::base + reset_index_ * Memory::page_size) < models::memory_size)
                 return true;
             entries_.fill({});
             active_ = 0;
             directory_bank_ = 0;
             directory_generation_ = 0;
             directory_damaged_ = slot_damaged_ = false;
-            writable_ = true;
             scratch_ = data_;
             return begin_save(0, true, true);
         case Stage::directory_load:
@@ -531,9 +595,14 @@ template <typename Memory> class ModelStorage {
             if (switch_after_) {
                 data_ = scratch_;
                 active_ = target_;
-                changed_ = true;
+                changed_ = !resetting_;
             }
             switch_after_ = false;
+            if (resetting_) {
+                record_.fill(0xFF);
+                stage_ = Stage::reset_complete;
+                return true;
+            }
             finish(coretx::ui::tr::models_saved, true);
             return false;
         case Stage::wait:
@@ -564,6 +633,8 @@ template <typename Memory> class ModelStorage {
         if (!writable) {
             dirty_ = false;
             switch_after_ = false;
+            if (resetting_)
+                resettable_ = true;
         }
     }
     constexpr bool begin_save(const std::size_t target, const bool present,
@@ -611,6 +682,9 @@ template <typename Memory> class ModelStorage {
             !empty && (magic == models::directory_magic) &&
             (checksum == coretx::storage::crc32(bytes.first(Memory::page_size - 4)));
         if (recognized && (version != 1)) {
+            resettable_ = true;
+            detected_version_ = version;
+            expected_version_ = 1;
             finish(coretx::ui::tr::models_directory_version, false);
             return false;
         }
@@ -621,6 +695,7 @@ template <typename Memory> class ModelStorage {
             if (directory_valid_) {
                 const auto delta = generation - directory_generation_;
                 if ((delta == 0x80000000U) || ((delta == 0) && (index != active_))) {
+                    resettable_ = true;
                     finish(coretx::ui::tr::models_directory_ambiguous, false);
                     return false;
                 }
@@ -653,7 +728,14 @@ template <typename Memory> class ModelStorage {
         models::Info info{};
         const auto status = models::decode(record_, target_, transmitter_, scratch_, info);
         if (status == 3) {
+            detected_version_ = record_[4];
+            resettable_ = true;
             finish(coretx::ui::tr::models_version, false);
+            return false;
+        }
+        if (status == 4) {
+            resettable_ = true;
+            finish(coretx::ui::tr::models_module_unavailable, false);
             return false;
         }
         scan_empty_ = scan_empty_ && (status == 0);
@@ -663,6 +745,7 @@ template <typename Memory> class ModelStorage {
         if ((status == 1) && entry.valid) {
             const auto delta = info.generation - entry.generation;
             if ((delta == 0x80000000U) || ((delta == 0) && (info.checksum != entry.checksum))) {
+                resettable_ = true;
                 finish(coretx::ui::tr::models_ambiguous, false);
                 return false;
             }
@@ -684,10 +767,7 @@ template <typename Memory> class ModelStorage {
         slot_empty_ = true;
         bank_ = 0;
         if (stage_ == Stage::active_scan) {
-            // Resolve both active banks before exposing a model to the RC pipeline.
-            if (entry.valid && entry.present) {
-                loaded_ = writable_ = changed_ = true;
-            }
+            // No model is exposed until every slot and both banks have been checked.
             stage_ = Stage::background_scan;
             target_ = active_ == 0 ? 1 : 0;
             return true;
@@ -739,6 +819,9 @@ template <typename Memory> class ModelStorage {
     bool directory_valid_{}, directory_empty_{true}, scan_empty_{true};
     bool slot_empty_{true};
     bool resettable_{}, directory_damaged_{}, slot_damaged_{};
+    bool resetting_{};
+    std::optional<std::uint8_t> detected_version_{};
+    std::uint8_t expected_version_{models::format_version};
 };
 
 } // namespace coretx::firmware

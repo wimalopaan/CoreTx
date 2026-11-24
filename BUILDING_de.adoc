@@ -64,6 +64,60 @@ höherem Ressourcenbedarf. `touch-diagnostic` ist ein eigenständiger Touchtest 
 HF- oder EEPROM-Zugriffe. `measurement` ist Messfirmware, nicht die normale
 Senderanwendung. Diese Abbilder nicht mit der normalen Betriebsfirmware verwechseln.
 
+[[model-converter]]
+== Modellspeicher-Wiederherstellung und Konverter
+
+Vor der HF-Freigabe prüft die Hauptfirmware das Modellverzeichnis und beide Bänke
+aller acht Modellplätze. Native Modellformate 6 bis 9 bleiben lesbar.
+Ein unbekanntes Format, nicht wiederherstellbare Modelldaten, ein fehlendes
+benötigtes Modul oder eine unvollständige Konvertierung/Initialisierung sperren
+Normalbetrieb und Modell-Schreibzugriffe. Das LCD zeigt den Grund und, soweit
+erkennbar, die gespeicherte beziehungsweise unterstützte Version:
+
+1. *Aus / extern konvertieren* ist vorausgewählt. Keine Änderung der Modelldaten.
+   Die i6S gibt die Selbsthaltung frei; die i6X fordert zum mechanischen Ausschalten auf.
+2. *ALLE Modelle neu* verlangt eine zweite Bestätigung mit Vorauswahl Abbrechen.
+   Alle Modellplätze und das Verzeichnis werden gelöscht, danach entsteht ein
+   Vierkanal-Grundmodell ohne Empfängerbindung und mit HF AUS. Kalibrierung sowie
+   Sender- und Eingangseinstellungen bleiben erhalten.
+
+Ein unterbrochener Reset bleibt bis zur ausdrücklich erneut gestarteten Initialisierung
+gesperrt. Solange die Wiederherstellung offen ist, keine ältere Firmware verwenden,
+die den Migrationsmarker ignoriert.
+
+Jeder normale Board-Build erzeugt zusätzlich ein *englisches HF-AUS-Wartungsabbild*:
+`build-i6x/coretx-i6x-converter.bin` beziehungsweise
+`build-i6s/coretx-i6s-converter.bin`, dazu HEX/ELF/Ressourcenbericht.
+Diese Abbilder sind keine Betriebsfirmware.
+
+* Das *externe EEPROM* sichern, nicht nur den internen Flash.
+* Den zum Sender passenden Konverter über <<dfu-update,ROM-DFU>> flashen.
+* Normal einschalten (i6S: beide vorderen Tasten 3 s halten). Quellversionen,
+  Zielformat 9 und Modellanzahl prüfen. Tasten zunächst loslassen, dann mit OK
+  (i6X) beziehungsweise der linken Rücktaste (i6S) bestätigen; Zurück/rechte
+  Rücktaste bricht ab.
+* Versorgung bis zum Abschluss der Konvertierung und Rückleseprüfung stabil halten.
+* Ausschalten, erneut ROM-DFU starten und die passende normale Firmware flashen.
+
+Der Konverter hebt native CoreTX-Modellformate 6/7/8 auf 9 an, erhält Modellnamen,
+Empfängereinstellungen und aktive Modellauswahl und setzt eine unterbrochene
+Konvertierung über Journal und Migrationsmarker fort. Er importiert keine
+Flysky-Werks-/EdgeTX-EEPROMs, repariert keine beliebig beschädigten Daten und
+konvertiert zukünftige Formate nicht abwärts. Unbekannte Formate und mehrdeutige
+Journale werden vor Beginn der Konvertierung abgewiesen.
+
+=== Speicherkompatibilität weiterpflegen
+
+Bei jeder Modellformatänderung müssen gemeinsamer Codec, Konverter und unabhängige
+Altformat-Testdatensätze zusammen aktualisiert werden. Die explizite
+`converter_target`-Zusicherung und das Testformat-Verzeichnis verhindern einen
+unbemerkten Formatwechsel beim Bauen. Die Host-Tests `coretx_model_converter`,
+`coretx_i6x_menu` und `coretx_application` einschließlich Schreib-/Reset-Abbrüchen
+ausführen und die Konverter für beide Sender bauen.
+Beide Firmware-Workflows bauen und veröffentlichen die Konverter-BIN/HEX bei jedem
+Release; der i6X-Workflow prüft Migration und Wiederherstellung mit abgeschaltetem
+Kettenmischer der Hauptfirmware.
+
 == Host-Simulator und Tests
 
 Die Presets `build` und `sanitize` aktivieren den SDL3-Simulator:
@@ -85,6 +139,72 @@ beziehungsweise dem entsprechenden `sanitize`-Befehl konfigurieren.
 Später den Simulator ausdrücklich mit `-DCORETX_SIMULATOR=ON` wieder einschalten.
 `sanitize` ergänzt AddressSanitizer und UndefinedBehaviorSanitizer.
 Host-Tests und Simulator sind keine flashbare Senderfirmware.
+
+[[web-simulator]]
+== Browser-Simulator
+
+Der Browser-Simulator verwendet dieselbe Senderanwendung, Menues, Kalibrierung und
+Mischer wie die Firmware, mit virtueller i6X-/i6S-Hardware. Geberpanel, echtes
+128x64-LCD und 16 Kanalbalken bleiben gleichzeitig nutzbar. Neue Sitzungen erhalten
+ein Vierkanalmodell mit kalibrierten virtuellen Gebern. Das LCD der i6S laesst sich
+mit Maus oder Touch bedienen; Sendertasten und Langdruck-Tasten stehen zusaetzlich
+bereit. Die Ruecktaster SE/SF und die Potis verwenden im Setup dieselbe Navigation
+wie der reale Sender. Die HF-Ausgaenge sind ausschliesslich simuliert.
+Die Rueckstelloptionen der Knueppel werden getrennt von Modelldaten pro Profil
+gespeichert; Geberstellungen starten bewusst neutral.
+
+Mit Emscripten 7.x, CMake >= 3.30 und Ninja beide Profile bauen und gemeinsam
+ueber HTTP ausliefern; direktes Oeffnen per `file://` funktioniert nicht:
+
+[source,shell]
+----
+for profile in i6x i6s; do
+  emcmake cmake -S . -B "build-web-$profile" -G Ninja \
+    -DCORETX_WEB=ON -DCORETX_BOARD="${profile^^}" \
+    -DTRANSLATION=DE -DCMAKE_BUILD_TYPE=Release
+  cmake --build "build-web-$profile" --parallel 2
+done
+mkdir -p build-web-site
+cp platform/web/{index.html,simulator.js,simulator.css} build-web-site/
+cp build-web-i6x/coretx-i6x.{js,wasm} build-web-i6s/coretx-i6s.{js,wasm} build-web-site/
+python3 -m http.server 8080 --bind 127.0.0.1 --directory build-web-site
+----
+
+Dann `http://127.0.0.1:8080` oeffnen. Die Kommandos verwenden Bash.
+Falls das Emscripten-Paket seine Werkzeuge nicht in `PATH` eintraegt, zuerst dessen
+Umgebung aktivieren beziehungsweise beispielsweise `/usr/lib/emscripten` zu `PATH`
+hinzufuegen. SDL3 wird fuer diesen Build nicht benoetigt.
+
+Modelle, Kalibrierung und Sendereinstellungen werden pro Senderprofil als natives
+16-KiB-EEPROM-Abbild im lokalen Browser-Speicher gesichert, erst nach Abschluss
+offener Edits und Schreibvorgaenge. Weitere Tabs duerfen diesen Stand nicht
+unbemerkt ueberschreiben. Browser-Speicher ist kein Backup: wichtige Daten ueber
+*EEPROM herunterladen* sichern. Beim Import bleibt der bisherige Browser-Stand
+erhalten, bis der gepruefte Teststand ausdruecklich uebernommen wird.
+Unbekannte Modellformate fuehren zum normalen Wiederherstellungsdialog, nicht
+zu einem automatischen Reset. Es werden keine Modelldaten hochgeladen.
+
+Nur vollstaendige native CoreTX-EEPROM-Abbilder des passenden Senderprofils
+importieren, keine Firmware-BINs und keine 1-/2-KiB-Dateien des bisherigen
+SDL-Simulators. Ein EEPROM-Download ist *keine flashbare Firmware*. Physische
+Sender immer separat kalibrieren; virtuelle Standardwerte nicht ungeprueft
+auf Hardware uebertragen.
+
+Die Action `Browser simulator` baut und prueft beide Profile auf Push/PR und
+stellt die Website als Artefakt bereit. Bei `v...`-Tags sowie manuellem Start
+wird sie auch nach GitHub Pages veroeffentlicht. Derselbe Versions-Tag startet
+die Firmware-Builds; der Simulator wird als `coretx-browser-simulator.zip`
+an deren gemeinsames GitHub-Release angehaengt. ZIP entpacken und ueber HTTP
+starten, nicht per Doppelklick auf `index.html`. Einmalig im Repository unter
+*Settings -> Pages -> Build and deployment -> Source* die Quelle *GitHub Actions*
+auswaehlen und gegebenenfalls das Environment `github-pages` fuer Release-Tags
+freigeben. Danach ist der
+https://wimalopaan.github.io/CoreTx/[Browser-Simulator auf GitHub Pages] erreichbar.
+
+Native Engine-Tests laufen mit CTest. Die WebAssembly-/Gebertests lassen sich mit
+`node tests/web_wasm_test.mjs build-web-i6x build-web-i6s` und
+`node --test tests/web_controls_test.mjs` starten. Die Action prueft zusaetzlich
+die reale Browserbedienung mit Playwright/Chromium.
 
 == Presets und CMake-Optionen
 
@@ -108,6 +228,8 @@ Die folgenden Projektoptionen gelten ohne Überschreibung durch Preset/Cache:
 |Host-ASan/UBSan mit GCC/Clang; nicht mit STM32-Firmware kombinierbar.
 |`CORETX_SIMULATOR` |`OFF`
 |POSIX-SDL3-Desktop-Simulator; in den nativen Presets eingeschaltet.
+|`CORETX_WEB` |`OFF`
+|Browser-Simulator mit Emscripten; separates Build-Verzeichnis pro `CORETX_BOARD`.
 |`CORETX_STM32F072` |`OFF`
 |Bare-Metal-ARM-Firmware; in den Board-Presets eingeschaltet, benötigt ARM-GCC-Toolchain.
 |`CORETX_ADC_COHERENT_SNAPSHOTS` |`OFF`
@@ -119,6 +241,11 @@ Die folgenden Projektoptionen gelten ohne Überschreibung durch Preset/Cache:
 |Externes UART-CRSF-Modul.
 |`CORETX_MULTISWITCH` |`ON`
 |MultiSwitch-Dashboards und SET4-Befehle; nur mit `CORETX_CRSF=ON` wirksam.
+|`CORETX_MODUL_TANKMIX` |`ON`
+|Kettenmischer, Einstellungsmenü und interne Richtungsbedingungen einkompilieren.
+ Bei `OFF` werden Modelle mit aktivem Modul abgewiesen und Schreibzugriffe
+ gesperrt, statt andere Kanalausgaben zu erzeugen. Inaktive Moduleinstellungen
+ bleiben für verlustfreie Übernahme im Speicherformat erhalten.
 |`CORETX_EXTENDED_INPUTS` |`ON`
 |Unterstützung für zusätzliche Analog-/Digitaleingänge einkompilieren.
  Einzelne Erweiterungseingänge stehen in den Sendereinstellungen zunächst auf Off.
@@ -298,7 +425,7 @@ weder Öffnen noch Boot-Brücke erforderlich:
 |FS-i6X |Beide *horizontalen Trimmtasten nach innen*: linke Horizontaltrimmung
  nach rechts, rechte Horizontaltrimmung nach links. Unabhängig vom Stickmode.
 |FS-i6S |Beide *hinteren Tasten SE/SF* (PA9/PA10), dann beide vorderen
- Einschalttasten zum normalen Einschalten. Rücktasten und Einschalttasten unterscheiden!
+ Einschalttasten 3 s halten. Rücktasten und Einschalttasten unterscheiden!
 |===
 
 1. Ausschalten und zunächst USB abziehen, damit der MCU tatsächlich spannungslos wird.
@@ -312,10 +439,16 @@ weder Öffnen noch Boot-Brücke erforderlich:
 CoreTX tastet die Tasten beim Kaltstart entprellt ab, hält HF aus und wechselt
 *vor Watchdog-Start und EEPROM-Zugriffen* in den STM32-ROM-Bootloader.
 Beim i6S bleibt die PB15-Selbsthaltung während der Übergabe aktiv.
+Vor der Übergabe erscheint `DFU-Bootloader` auf dem LCD und bleibt im ROM-DFU sichtbar.
+Der Hardware-Einstieg über die Boot-Pins umgeht CoreTX und kann diese Meldung nicht anzeigen.
 Die Kombination funktioniert auch in den i6S-Abbildern touch-trace,
 touch-diagnostic und measurement.
 Watchdog-/Software-Resets nutzen diese Abkürzung bewusst nicht: Ein bereits
 laufender Watchdog lässt sich für eine zuverlässige DFU-Sitzung nicht stoppen.
+
+Auch beim normalen i6S-Kaltstart müssen beide vorderen Einschalttasten durchgehend
+3 s gedrückt bleiben. Loslassen einer Taste setzt die Wartezeit zurück; HF und LCD
+bleiben bis zum Ablauf aus. Watchdog-/Software-Resets wiederholen diese Einschaltverzögerung nicht.
 
 Dies ist ein Sprung in das MCU-ROM, kein eigener CoreTX-Flash-Bootloader und kein
 USB-Neustartbefehl aus der laufenden Anwendung. Bei Werksfirmware, älteren
@@ -401,7 +534,9 @@ Die https://github.com/wimalopaan/CoreTx/releases[CoreTX-Releases] können hinte
 der Quellcodeversion zurückliegen. `.github/workflows/i6x.yml` und
 `.github/workflows/i6s.yml` bauen jeweils deutsche/englische Firmware bei Pushes,
 Pull Requests und manuellen Starts. Versionstags passend zu `v[0-9]*` hängen
-die DE/EN-BIN/HEX-Dateien beider Sender an dasselbe GitHub-Release.
+die DE/EN-BIN/HEX-Dateien und Konverter beider Sender an dasselbe GitHub-Release.
+`.github/workflows/web.yml` baut zum selben Tag den Browser-Simulator und
+veroeffentlicht dort `coretx-browser-simulator.zip` sowie die Pages-Website.
 Artefaktnamen und Dateinamen sind boardspezifisch; ein erneuter Workflow-Lauf
 eines Boards entfernt nicht die Dateien des anderen Boards.
 Lokal bauen, solange kein passendes Release-Abbild vorliegt.

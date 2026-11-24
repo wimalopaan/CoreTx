@@ -39,6 +39,7 @@ struct FakeRegisters {
                                           reg::scb_icsr,
                                           GPIOB_BASE + offsetof(GPIO_TypeDef, PUPDR),
                                           GPIOB_BASE + offsetof(GPIO_TypeDef, IDR),
+                                          RCC_BASE + offsetof(RCC_TypeDef, CSR),
                                           GPIOD_BASE + offsetof(GPIO_TypeDef, BSRR)};
     std::array<std::uint32_t, addresses.size()> values{};
     std::array<std::pair<std::uintptr_t, std::uint32_t>, 32> writes{};
@@ -287,6 +288,7 @@ struct BootRegisters {
                                           GPIOB_BASE + offsetof(GPIO_TypeDef, MODER),
                                           GPIOB_BASE + offsetof(GPIO_TypeDef, OTYPER),
                                           GPIOB_BASE + offsetof(GPIO_TypeDef, ODR),
+                                          GPIOB_BASE + offsetof(GPIO_TypeDef, PUPDR),
                                           GPIOC_BASE + offsetof(GPIO_TypeDef, MODER),
                                           GPIOC_BASE + offsetof(GPIO_TypeDef, OTYPER),
                                           GPIOC_BASE + offsetof(GPIO_TypeDef, OSPEEDR),
@@ -307,6 +309,8 @@ struct BootRegisters {
     std::size_t write_count{};
     std::uint16_t keys{};
     std::uint32_t milliseconds{}, press_from{}, release_at{100};
+    std::uint32_t power_press_from{}, power_release_at{UINT32_MAX}, power_repress_at{UINT32_MAX},
+        power_latched_at{UINT32_MAX}, tick_stop_at{UINT32_MAX};
     hw::HardwareError failure{};
     bool tick_stopped{}, barrier_called{};
 
@@ -327,6 +331,11 @@ struct BootRegisters {
             (milliseconds >= press_from) && (milliseconds < release_at) ? keys : 0U;
         if (address == GPIOA_BASE + offsetof(GPIO_TypeDef, IDR))
             return 0xFFFFU & ~(pressed << 9);
+        if (address == GPIOB_BASE + offsetof(GPIO_TypeDef, IDR))
+            return (milliseconds >= power_press_from) &&
+                           ((milliseconds < power_release_at) || (milliseconds >= power_repress_at))
+                       ? 0xFFFFU & ~std::uint32_t{GPIO_IDR_14}
+                       : 0xFFFFU;
         if (address == GPIOD_BASE + offsetof(GPIO_TypeDef, IDR)) {
             std::uint32_t rows{};
             for (unsigned column = 0; column < 3; ++column)
@@ -335,7 +344,7 @@ struct BootRegisters {
             return 0xFFFFU & ~(rows << 12);
         }
         if ((address == reg::systick_control) && ((cell(address) & SysTick_CTRL_ENABLE_Msk) != 0) &&
-            !tick_stopped) {
+            !tick_stopped && (milliseconds < tick_stop_at)) {
             ++milliseconds;
             return cell(address) | SysTick_CTRL_COUNTFLAG_Msk;
         }
@@ -347,6 +356,8 @@ struct BootRegisters {
         writes[write_count++] = {address, value};
         for (const auto port : {GPIOB_BASE, GPIOC_BASE, GPIOD_BASE})
             if (address == port + offsetof(GPIO_TypeDef, BSRR)) {
+                if ((port == GPIOB_BASE) && ((value & GPIO_BSRR_BS_15) != 0))
+                    power_latched_at = milliseconds;
                 auto &output = cell(port + offsetof(GPIO_TypeDef, ODR));
                 output = (output | (value & 0xFFFFU)) & ~(value >> 16);
                 return;
@@ -374,6 +385,57 @@ struct BootRegisters {
 
 struct BootKeys {};
 struct BootPreparation {};
+struct PowerStartup {};
+
+bool power_on_startup() {
+    using Test = coretx::test::RegisterFixture<PowerStartup, BootRegisters>;
+    using I6S = coretx::firmware::SenderBoard<Test::Io, coretx::firmware::i6s::Hardware>;
+    using I6X = coretx::firmware::SenderBoard<Test::Io, coretx::firmware::i6x::Hardware>;
+    struct Timing {
+        std::uint32_t press, release, repress, ready;
+    };
+    for (const auto timing :
+         {Timing{0, UINT32_MAX, UINT32_MAX, 3'000}, Timing{100, UINT32_MAX, UINT32_MAX, 3'100},
+          Timing{0, 2'999, 3'010, 6'010}, Timing{0, 3'000, 3'010, 6'010}}) {
+        Test::reset_registers();
+        auto &io = Test::registers;
+        io.power_press_from = timing.press;
+        io.power_release_at = timing.release;
+        io.power_repress_at = timing.repress;
+        I6S::prepare_power();
+        if ((io.cell(GPIOB_BASE + offsetof(GPIO_TypeDef, ODR)) & GPIO_ODR_15) != 0)
+            return false;
+        if (!I6S::power_on_startup() || (io.milliseconds != timing.ready) ||
+            (io.power_latched_at != timing.ready) || (io.cell(reg::systick_control) != 0))
+            return false;
+    }
+    for (const auto flags :
+         {std::uint32_t{RCC_CSR_PINRSTF}, std::uint32_t{RCC_CSR_PORRSTF | RCC_CSR_IWDGRSTF},
+          std::uint32_t{RCC_CSR_PORRSTF | RCC_CSR_WWDGRSTF},
+          std::uint32_t{RCC_CSR_PORRSTF | RCC_CSR_SFTRSTF}}) {
+        Test::reset_registers();
+        auto &io = Test::registers;
+        io.cell(RCC_BASE + offsetof(RCC_TypeDef, CSR)) = flags;
+        I6S::prepare_power();
+        if (!I6S::power_on_startup() || (io.milliseconds != 0) || (io.power_latched_at != 0))
+            return false;
+    }
+    Test::reset_registers();
+    I6X::prepare_power();
+    if (!I6X::power_on_startup() || (Test::registers.write_count != 0))
+        return false;
+    for (const auto press_from : {0U, 4'000U}) {
+        Test::reset_registers();
+        auto &io = Test::registers;
+        io.power_press_from = press_from;
+        io.tick_stop_at = press_from == 0 ? 2'999U : 3'500U;
+        I6S::prepare_power();
+        if (I6S::power_on_startup() || (io.power_latched_at != UINT32_MAX) ||
+            (io.cell(reg::systick_control) != 0))
+            return false;
+    }
+    return true;
+}
 
 bool bootloader_keys() {
     using Test = coretx::test::RegisterFixture<BootKeys, BootRegisters>;
@@ -433,7 +495,7 @@ bool bootloader_preparation() {
     using Board = coretx::firmware::SenderBoard<Test::Io, coretx::firmware::i6s::Hardware>;
     Test::reset_registers();
     auto &io = Test::registers;
-    Board::prepare_power();
+    hw::hold_power<Test::Io>();
     io.cell(reg::rcc_cr) |= RCC_CR_HSEON | RCC_CR_PLLON | RCC_CR_CSSON | RCC_CR_HSEBYP;
     io.cell(reg::rcc_cfgr) = RCC_CFGR_SW_PLL | RCC_CFGR_SWS_PLL;
     io.cell(reg::rcc_apb1enr) = RCC_APB1ENR_TIM2EN;
@@ -500,6 +562,10 @@ static_assert(stack_watermark());
 } // namespace
 
 int main() {
+    if (!power_on_startup()) {
+        std::fputs("FAIL: i6S power-on delay checks\n", stderr);
+        return EXIT_FAILURE;
+    }
     if (!bootloader_keys() || !bootloader_preparation()) {
         std::fputs("FAIL: bootloader keys/handoff checks\n", stderr);
         return EXIT_FAILURE;

@@ -76,6 +76,8 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         Inputs::initialize();
         storage_.initialize(Board::transmitter_id());
         model_applied_ = false;
+        recovery_ = Recovery::none;
+        recovery_selected_ = recovery_drawn_ = false;
         menu_ = {};
         if constexpr (has_external_rf)
             crsf_.reset();
@@ -101,6 +103,15 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             return fail(ApplicationFailure::stack);
         }
         service_storage(now);
+        if (storage_.models.recovery_required() &&
+            ((recovery_ == Recovery::none) || (recovery_ == Recovery::resetting))) {
+            select_output(RadioOutput::off, now);
+            Board::power_off();
+            recovery_ = Recovery::choice;
+            recovery_selected_ = false;
+            drawn_at_ = now - redraw_interval;
+        } else if ((recovery_ == Recovery::resetting) && storage_.models.editable())
+            recovery_ = Recovery::none;
         diagnostics_.allow_logical_commit(!menu_.pending_model_edit());
 
         // Loading input settings can restart the ADC with a newer initialization timestamp.
@@ -115,6 +126,12 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         service_rf();
         telemetry_.service(Board::now_us());
         service_display(now);
+        if ((recovery_ == Recovery::power_off) && recovery_drawn_ && !Display::busy()) {
+            Inputs::stop();
+            if constexpr (has_power)
+                Board::release_power();
+            state_ = ApplicationState::powered_off;
+        }
         if constexpr (has_power)
             finish_shutdown(now);
         return state_;
@@ -124,6 +141,10 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     [[nodiscard]] constexpr ApplicationFailure failure() const noexcept { return failure_; }
     [[nodiscard]] constexpr const Diagnostics &diagnostics() const noexcept { return diagnostics_; }
     [[nodiscard]] constexpr RadioOutput output() const noexcept { return output_; }
+    [[nodiscard]] constexpr bool storage_pending() const noexcept {
+        return !storage_.shutdown_ready() || menu_.editing() || input_menu_.editing() ||
+               (diagnostics_.phase() != CalibrationPhase::idle);
+    }
     [[nodiscard]] constexpr const telemetry::Pool &telemetry() const noexcept { return telemetry_; }
     [[nodiscard]] constexpr const Menu &menu() const noexcept { return menu_; }
     [[nodiscard]] const CrsfMenu &crsf_menu() const noexcept
@@ -139,6 +160,11 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     // A held power button closes all menus, switches RF off and starts the shutdown screen.
     constexpr void service_power_button(const TimestampUs now) noexcept {
         if (power_.update(now, Board::power_button_pressed())) {
+            if (storage_.models.recovery_required()) {
+                recovery_ = Recovery::power_off;
+                drawn_at_ = now - redraw_interval;
+                return;
+            }
             select_output(RadioOutput::off, now);
             Board::power_off();
             Inputs::stop();
@@ -239,10 +265,15 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
 #endif
         // Keep RC evaluation out of nested UI handlers on the 2 KiB stack.
         diagnostics_.defer_refresh();
-        if (!shutting_down())
-            handle(key, now);
+        if (!shutting_down()) {
+            if (recovery_ != Recovery::none)
+                handle_recovery(key, now);
+            else if (storage_.models.loaded())
+                handle(key, now);
+        }
         if constexpr (requires { input_.rear_buttons(); }) {
-            const bool setup = !dashboard_touch() && !shutting_down();
+            const bool setup =
+                ((recovery_ != Recovery::none) || !dashboard_touch()) && !shutting_down();
             diagnostics_.observe_setup_controls(setup, input_.rear_buttons());
             input_.set_setup_mode(now, setup);
         }
@@ -314,7 +345,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             ((overview_phase_ != 0) || ((now - drawn_at_) >= redraw_interval))) {
             render();
 #ifdef CORETX_I6S_TOUCH_TRACE
-            if (overview_phase_ == 0)
+            if ((overview_phase_ == 0) && (recovery_ == Recovery::none))
                 input_.template render_trace<Memory>(framebuffer_, trace_key_,
                                                      static_cast<unsigned>(diagnostics_.phase()),
                                                      menu_.visible());
@@ -336,7 +367,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     }
     [[nodiscard]] constexpr bool shutting_down() const noexcept {
         if constexpr (has_power)
-            return power_.requested();
+            return power_.requested() && (recovery_ == Recovery::none);
         return false;
     }
     [[nodiscard]] constexpr bool shutdown_ready() const noexcept {
@@ -350,6 +381,10 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
 #endif
     [[nodiscard]] constexpr SenderInputContext input_context() const noexcept {
         SenderInputContext context{};
+        if (recovery_ != Recovery::none) {
+            context.taps = true;
+            return context;
+        }
         if constexpr (has_multiswitch) {
             if (const auto slot = multiswitch_slot()) {
                 context.active = true;
@@ -444,6 +479,10 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         }
         output_ = RadioOutput::off;
         radio_message_ = nullptr;
+        if ((output != RadioOutput::off) && !storage_.models.editable()) {
+            radio_message_ = storage_.models.message();
+            return;
+        }
         if ((output != RadioOutput::off) &&
             (!input_applied_ || ((storage_.input.status() != RadioStorageStatus::ready) &&
                                  (storage_.input.status() != RadioStorageStatus::empty) &&
@@ -663,7 +702,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         case MenuCommand::initialize_models:
             if (features::secure_ui && (output_ != RadioOutput::off))
                 radio_message_ = coretx::ui::tr::menu_rf_off;
-            else if (!storage_.models.initialize_models(diagnostics_.model(), settings_))
+            else if (!storage_.models.initialize_models())
                 radio_message_ = storage_.models.message();
             break;
         case MenuCommand::none:
@@ -748,6 +787,12 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             Display::begin_frame();
             return;
         }
+        if (recovery_ != Recovery::none) {
+            render_recovery();
+            overview_phase_ = 0;
+            Display::begin_frame();
+            return;
+        }
         if constexpr (has_external_rf) {
             if (crsf_.menu.visible() || crsf_dashboard_page()) {
                 begin_menu_band();
@@ -795,6 +840,70 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         overview_phase_ = 0;
         render_dashboard_page(model);
         Display::begin_frame();
+    }
+    enum class Recovery : std::uint8_t { none, choice, confirm, resetting, power_off };
+    constexpr void handle_recovery(Key key, const TimestampUs now) noexcept {
+        if ((recovery_ == Recovery::resetting) || (recovery_ == Recovery::power_off))
+            return;
+        if constexpr (Input::touch) {
+            if (const auto point = input_.tapped(); point && (point->y >= 30) && (point->y < 54)) {
+                recovery_selected_ = point->y >= 42;
+                key = Key::ok;
+            }
+        }
+        if ((key == Key::up) || (key == Key::down))
+            recovery_selected_ = key == Key::down;
+        else if ((key == Key::cancel) || (key == Key::cancel_long)) {
+            recovery_ = Recovery::choice;
+            recovery_selected_ = false;
+        } else if (key == Key::ok) {
+            if (recovery_ == Recovery::choice) {
+                recovery_ = recovery_selected_ ? Recovery::confirm : Recovery::power_off;
+                recovery_selected_ = false;
+            } else if (!recovery_selected_)
+                recovery_ = Recovery::choice;
+            else if (storage_.models.initialize_models()) {
+                recovery_ = Recovery::resetting;
+                recovery_selected_ = false;
+            }
+        }
+        if (key != Key::none)
+            drawn_at_ = now - redraw_interval;
+    }
+    constexpr void render_recovery() noexcept {
+        namespace tr = coretx::ui::tr;
+        framebuffer_.clear();
+        framebuffer_.compact();
+        framebuffer_.text(0, 0, tr::models_recovery);
+        if (recovery_ == Recovery::power_off) {
+            framebuffer_.text(0, 20, tr::models_recovery_switch_off);
+            framebuffer_.text(0, 40, tr::models_recovery_converter);
+            recovery_drawn_ = true;
+        } else if (recovery_ == Recovery::resetting)
+            framebuffer_.text(0, 24, storage_.models.message());
+        else {
+            const bool confirm = recovery_ == Recovery::confirm;
+            framebuffer_.text(0, 10,
+                              confirm ? tr::models_recovery_confirm : storage_.models.message());
+            if (const auto version = storage_.models.detected_version(); !confirm && version) {
+                const std::uint32_t expected = storage_.models.expected_version();
+                const auto minimum = expected == models::format_version
+                                         ? coretx::storage::oldest_format_version
+                                         : expected;
+                framebuffer_.text(0, 20, "Format:");
+                framebuffer_.unsigned_number(47, 20, *version);
+                framebuffer_.text(56, 20, "/");
+                framebuffer_.unsigned_number(75, 20, minimum);
+                framebuffer_.text(80, 20, "-");
+                framebuffer_.unsigned_number(99, 20, expected);
+            }
+            framebuffer_.text(0, recovery_selected_ ? 44 : 32, ">");
+            framebuffer_.text(8, 32,
+                              confirm ? tr::models_recovery_cancel : tr::models_recovery_off);
+            framebuffer_.text(8, 44,
+                              confirm ? tr::models_recovery_delete : tr::models_recovery_reset);
+        }
+        framebuffer_.compact(false);
     }
     constexpr void render_shutdown() noexcept {
         framebuffer_.clear();
@@ -944,6 +1053,8 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     bool model_applied_{};
     bool input_applied_{};
     bool adc_extended_{};
+    Recovery recovery_{};
+    bool recovery_selected_{}, recovery_drawn_{};
     [[no_unique_address]]
     std::conditional_t<has_power, Power, DisabledFeature> power_{};
 };

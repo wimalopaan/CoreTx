@@ -18,6 +18,7 @@ class InputMenu {
         visible_ = true;
     }
     [[nodiscard]] constexpr bool visible() const noexcept { return visible_; }
+    [[nodiscard]] constexpr bool editing() const noexcept { return editing_; }
     [[nodiscard]] constexpr InputMenuCommand handle(const Key key, Diagnostics &diagnostics,
                                                     const RadioOutput output, const bool writable,
                                                     const bool busy,

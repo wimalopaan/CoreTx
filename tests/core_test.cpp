@@ -60,6 +60,96 @@ constexpr bool constant_pipeline() {
 
 static_assert(constant_pipeline());
 
+constexpr bool curve_interpolation() {
+    using namespace coretx;
+    constexpr Curve identity{};
+    for (int input = -1100; input <= 1100; ++input)
+        if (evaluate_curve(identity, input) != std::clamp(input, -1024, 1024))
+            return false;
+    constexpr Curve curve{{-75, -25, 60}, {80, -60, 30, -90, 50}};
+    constexpr std::array knots{-1024, -768, -256, 614, 1024};
+    constexpr std::array values{819, -614, 307, -922, 512};
+    for (std::size_t i = 0; i < knots.size(); ++i)
+        if (evaluate_curve(curve, knots[i]) != values[i])
+            return false;
+    return (evaluate_curve(curve, -896) == 103) && (evaluate_curve(curve, -512) == -154) &&
+           (evaluate_curve(curve, 179) == -308) && (evaluate_curve(curve, 819) == -205) &&
+           (evaluate_curve(curve, std::numeric_limits<std::int32_t>::min()) == 819) &&
+           (evaluate_curve(curve, std::numeric_limits<std::int32_t>::max()) == 512) &&
+           (evaluate_curve(Curve{{-33, 1, 99}, {-100, -1, 1, 99, 100}}, -338) == -10);
+}
+static_assert(curve_interpolation());
+
+constexpr bool curve_pipeline() {
+    using namespace coretx;
+    auto model = direct_model();
+    Controls controls{};
+    controls.analogs[0] = 512;
+    for (std::uint8_t selected = 1; selected <= curve_count; ++selected) {
+        model.inputs[0].curve = model.mixes[0].curve = selected;
+        const auto identity = evaluate(model, controls);
+        if (!identity || (identity.frame.inputs[0] != 512) ||
+            (identity.frame.mixes[0].raw() != 512 * MixValue::scale))
+            return false;
+    }
+    model.curves[3].y = {-100, 100, 0, -100, 100};
+    model.inputs[0].curve = model.mixes[0].curve = 4;
+    model.inputs[0].expo_percent = ExpoPercent::constant<100>();
+    model.inputs[0].weight_percent = InputWeight::constant<50>();
+    model.inputs[0].offset_percent = InputOffset::constant<25>();
+    model.mixes[0].weight_percent = MixWeight::constant<50>();
+    model.mixes[0].offset_percent = MixOffset::constant<25>();
+    controls.trims[0] = TrimSteps::constant<20>();
+    const auto transformed = evaluate(model, controls);
+    if (!transformed || (transformed.frame.inputs[0] != 128) ||
+        (transformed.frame.mixes[0].raw() != 88 * MixValue::scale))
+        return false;
+    model.mixes[0].carry_trim = false;
+    if (evaluate(model, controls).frame.mixes[0].raw() != 128 * MixValue::scale)
+        return false;
+    model = direct_model();
+    controls.analogs[0] = resolution;
+    controls.trims[0] = TrimSteps::constant<127>();
+    model.inputs[0].offset_percent = InputOffset::constant<100>();
+    if (evaluate(model, controls).frame.mixes[0].raw() != 2302 * MixValue::scale)
+        return false; // Disabling a curve must not introduce a clamp.
+    model.mixes[0].curve = 1;
+    if (evaluate(model, controls).frame.mixes[0].raw() != 1024 * MixValue::scale)
+        return false;
+    model.mixes[0].source = {SourceKind::analog, 0, true};
+    model.curves[0].y.front() = 25;
+    return evaluate(model, controls).frame.mixes[0].raw() == 256 * MixValue::scale;
+}
+static_assert(curve_pipeline());
+
+constexpr bool curve_validation() {
+    using namespace coretx;
+    constexpr std::array invalid{Curve{{-50, -50, 50}},
+                                 Curve{{50, 0, -50}},
+                                 Curve{{-100, 0, 50}},
+                                 Curve{{-50, 0, 100}},
+                                 Curve{{-50, 0, 50}, {-101, 0, 0, 0, 100}},
+                                 Curve{{-50, 0, 50}, {-100, 0, 0, 0, 101}}};
+    for (const auto &curve : invalid) {
+        auto model = direct_model();
+        model.curves[2] = curve;
+        const auto status = validate(model);
+        if (status || (status.code != ErrorCode::curve_settings) ||
+            (status.stage != Stage::model) || (status.index != 2) || evaluate(model, Controls{}))
+            return false;
+    }
+    auto model = direct_model();
+    model.inputs[0].curve = 5;
+    auto status = validate(model);
+    if (status || (status.code != ErrorCode::input_settings) || (status.stage != Stage::inputs))
+        return false;
+    model.inputs[0].curve = 0;
+    model.mixes[0].curve = 255;
+    status = validate(model);
+    return !status && (status.code == ErrorCode::mix_settings) && (status.stage == Stage::mixes);
+}
+static_assert(curve_validation());
+
 constexpr bool assignable_input_trims() {
     using namespace coretx;
     auto model = direct_model();
@@ -661,9 +751,258 @@ void validation_and_overflow() {
     expect(coretx::ErrorCode::arithmetic_overflow, coretx::Stage::mixes, 5);
 }
 
+#if CORETX_MODUL_TANKMIX
+constexpr bool tank_pipeline() {
+    using namespace coretx;
+    Model model{};
+    model.inputs.resize<3>();
+    for (std::size_t i = 0; i < 3; ++i) {
+        model.inputs[i].destination = static_cast<std::uint8_t>(i);
+        model.inputs[i].source.index = static_cast<std::uint8_t>(i);
+    }
+    model.mixes.resize<1>();
+    model.mixes[0].destination = 5;
+    model.mixes[0].source.index = 2;
+    model.outputs[5].reversed = true;
+    for (auto &logical : model.logical_switches) {
+        logical.function = LogicalFunction::greater;
+        logical.a = 2;
+    }
+    const TankMixer tank{true, 0, 1, 3, 2, 50, 3};
+    if (!configure_tank(model, tank) || (model.mixes.size() != 7) || !validate(model) ||
+        !model.outputs[5].reversed || (model.inputs[2].source.index != 2))
+        return false;
+    Controls controls{};
+    controls.analogs[0] = 400;
+    controls.analogs[1] = 200;
+    controls.analogs[2] = 123;
+    LogicalState state{};
+    auto result = evaluate(model, controls, state);
+    if (!result || result.frame.tank_reverse || (result.frame.channels[3] != 500) ||
+        (result.frame.channels[2] != 300) || (result.frame.channels[5] != -123) ||
+        (result.frame.logical.available != 0xFF) || (result.frame.logical.active != 0xFF))
+        return false;
+    controls.analogs[0] = -400;
+    result = evaluate(model, controls, state);
+    if (!result || !result.frame.tank_reverse || (result.frame.channels[3] != -500) ||
+        (result.frame.channels[2] != -300) || (state.latches != 0))
+        return false;
+    // Direction follows processed drive input, not separately carried trim or steering.
+    controls.trims[0] = TrimSteps::constant<127>();
+    for (const auto drive : {-31, -30, 0, 30, 31}) {
+        controls.analogs[0] = static_cast<std::int16_t>(drive);
+        if (!evaluate(model, controls, state).frame.tank_reverse)
+            return false;
+    }
+    controls.analogs[0] = 32;
+    result = evaluate(model, controls, state);
+    if (!result || result.frame.tank_reverse ||
+        !tank_mix_active(MixRole::tank_forward, result.frame) ||
+        tank_mix_active(MixRole::tank_reverse, result.frame))
+        return false;
+    for (const auto drive : {31, 0, -31}) {
+        controls.analogs[0] = static_cast<std::int16_t>(drive);
+        if (evaluate(model, controls, state).frame.tank_reverse)
+            return false;
+    }
+    controls.analogs[0] = -32;
+    if (!evaluate(model, controls, state).frame.tank_reverse)
+        return false;
+    controls.analogs[0] = 0;
+    LogicalState startup{};
+    if (evaluate(model, controls, startup).frame.tank_reverse)
+        return false;
+    // A failed evaluation must not commit direction or logical latch updates.
+    controls.analogs[0] = 1025;
+    if (evaluate(model, controls, state) || !state.tank_reverse)
+        return false;
+    const auto normal = model;
+    auto overflow = model.mixes[6];
+    overflow.source = {SourceKind::maximum, 0, false};
+    overflow.weight_percent = MixWeight::constant<500>();
+    overflow.multiplex = Multiplex::multiply;
+    model.mixes[6] = overflow;
+    for (unsigned i = 0; i < 7; ++i)
+        if (!model.mixes.try_push_back(overflow))
+            return false;
+    controls.analogs[0] = 400;
+    if (evaluate(model, controls, state) || !state.tank_reverse)
+        return false;
+    model = normal;
+    controls.analogs[0] = 0;
+    auto disabled = tank;
+    disabled.enabled = false;
+    if (!configure_tank(model, disabled) || (model.tank != disabled) || (model.mixes.size() != 1) ||
+        (model.mixes[0].destination != 5) || !evaluate(model, controls, state) ||
+        state.tank_reverse)
+        return false;
+    model.mixes[0].destination = 2;
+    if (!validate(model))
+        return false;
+    model = normal;
+    model.inputs[0].weight_percent = InputWeight::constant<-100>();
+    controls.analogs[0] = 400;
+    state = {};
+    if (!evaluate(model, controls, state).frame.tank_reverse)
+        return false;
+    model.inputs[0].offset_percent = InputOffset::constant<100>();
+    return !evaluate(model, controls, state).frame.tank_reverse;
+}
+static_assert(tank_pipeline());
+
+constexpr bool tank_reversal_option() {
+    using namespace coretx;
+    Model model{};
+    model.inputs.resize<2>();
+    model.inputs[1].destination = 1;
+    model.inputs[1].source.index = 1;
+    auto tank = model.tank;
+    tank.enabled = true;
+    tank.steering_percent = 50;
+    Controls controls{};
+    controls.analogs[0] = -400;
+    controls.analogs[1] = 200;
+    LogicalState state{};
+    if (!tank.reverse_steering || !configure_tank(model, tank))
+        return false;
+    auto result = evaluate(model, controls, state);
+    if (!result || !result.frame.tank_reverse || (result.frame.channels[0] != -500) ||
+        (result.frame.channels[1] != -300))
+        return false;
+    tank.reverse_steering = false;
+    if (!configure_tank(model, tank))
+        return false;
+    result = evaluate(model, controls, state);
+    if (!result || result.frame.tank_reverse || state.tank_reverse ||
+        (result.frame.channels[0] != -300) || (result.frame.channels[1] != -500))
+        return false;
+    controls.analogs[0] = 0;
+    tank.reverse_steering = true;
+    if (!configure_tank(model, tank))
+        return false;
+    result = evaluate(model, controls, state);
+    if (!result || result.frame.tank_reverse || (result.frame.channels[0] != 100) ||
+        (result.frame.channels[1] != -100))
+        return false;
+    controls.analogs[0] = -400;
+    return evaluate(model, controls, state).frame.tank_reverse;
+}
+static_assert(tank_reversal_option());
+
+constexpr bool tank_configuration_validation() {
+    using namespace coretx;
+    Model model{};
+    const TankMixer tank{true, 0, 1, 0, 1, 100, 3};
+    if (!configure_tank(model, tank))
+        return false;
+    const auto canonical = model;
+    for (const unsigned mutation : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U}) {
+        model = canonical;
+        auto &line = model.mixes[0];
+        switch (mutation) {
+        case 0:
+            line.role = static_cast<MixRole>(4);
+            break;
+        case 1:
+            line.source.index = 2;
+            break;
+        case 2:
+            line.carry_trim = false;
+            break;
+        case 3:
+            line.offset_percent = MixOffset::constant<1>();
+            break;
+        case 4:
+            line.curve = 1;
+            break;
+        case 5:
+            line.multiplex = Multiplex::replace;
+            break;
+        case 6:
+            line.role = MixRole::manual;
+            break;
+        case 7:
+            line.role = MixRole::tank_forward;
+            break;
+        case 8:
+            model.tank.enabled = false;
+            break;
+        case 9:
+            (void)model.mixes.try_erase(0);
+            break;
+        }
+        if (validate(model))
+            return false;
+    }
+    for (const unsigned mutation : {0U, 1U, 2U, 3U, 4U, 5U, 6U}) {
+        auto bad = tank;
+        switch (mutation) {
+        case 0:
+            bad.drive_input = 8;
+            break;
+        case 1:
+            bad.steering_input = 8;
+            break;
+        case 2:
+            bad.left_channel = 16;
+            break;
+        case 3:
+            bad.right_channel = bad.left_channel;
+            break;
+        case 4:
+            bad.steering_percent = 101;
+            break;
+        case 5:
+            bad.hysteresis_percent = 0;
+            break;
+        case 6:
+            bad.hysteresis_percent = 21;
+            break;
+        }
+        model = canonical;
+        if ((configure_tank(model, bad).code != ErrorCode::tank_settings) ||
+            (model.tank != canonical.tank) || !validate(model))
+            return false;
+    }
+    model = canonical;
+    auto moved = tank;
+    moved.left_channel = 15;
+    moved.right_channel = 14;
+    moved.drive_input = moved.steering_input = 7;
+    moved.steering_percent = 0;
+    moved.hysteresis_percent = 20;
+    return configure_tank(model, moved) && validate(model) && (model.mixes[0].destination == 14) &&
+           (model.mixes[5].destination == 15);
+}
+static_assert(tank_configuration_validation());
+#else
+constexpr bool tank_unavailable() {
+    coretx::Model model{};
+    coretx::Controls controls{};
+    model.tank.enabled = true;
+    if (coretx::evaluate(model, controls).status.code != coretx::ErrorCode::tank_unavailable)
+        return false;
+    model.tank.enabled = false;
+    model.mixes.resize<1>();
+    model.mixes[0].role = coretx::MixRole::tank_drive;
+    return coretx::evaluate(model, controls).status.code == coretx::ErrorCode::tank_unavailable;
+}
+static_assert(tank_unavailable());
+#endif
+
 } // namespace
 
 int main() {
+#if CORETX_MODUL_TANKMIX
+    CHECK(tank_pipeline());
+    CHECK(tank_reversal_option());
+    CHECK(tank_configuration_validation());
+#else
+    CHECK(tank_unavailable());
+#endif
+    CHECK(curve_interpolation());
+    CHECK(curve_pipeline());
+    CHECK(curve_validation());
     CHECK(logical_predicates());
     CHECK(logical_validation_and_latches());
     CHECK(bitmap_input_selection());

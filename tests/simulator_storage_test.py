@@ -32,7 +32,9 @@ def main():
         packed = int.from_bytes(edited[first_input:first_input + 7], "little")
         packed = (packed & ~(0xFF << 27)) | ((73 + 100) << 27)
         edited[first_input:first_input + 7] = packed.to_bytes(7, "little")
-        trim_offset = 16 + int.from_bytes(edited[6:8], "little") - 5
+        # Formats 8/9 append curves/selectors, then tank settings and packed roles.
+        curve_extension_bytes = 4 * 8 + 8 + 8 + 4 + (8 + 3) // 4
+        trim_offset = 16 + int.from_bytes(edited[6:8], "little") - 5 - curve_extension_bytes
         edited[trim_offset:trim_offset + 4] = bytes((17, 233, 0, 127))
         edited[12:16] = zlib.crc32(edited[:12] + edited[16:]).to_bytes(4, "little")
         committed = bytes(edited)

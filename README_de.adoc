@@ -7,7 +7,7 @@ Originalfirmware und externes EEPROM getrennt sichern.
 Neutrale Kanalausgabe ist kein garantierter Motor-Aus-Failsafe.
 
 Experimentelle Firmware für *Flysky FS-i6X und FS-i6S* mit STM32F072,
-128 KiB Flash und 16 KiB RAM. Aktuelle Firmwareversion im Quellcode: *5*
+128 KiB Flash und 16 KiB RAM. Aktuelle Firmwareversion im Quellcode: *6*
 (`coretx/version.hpp`).
 
 == Ziele
@@ -53,6 +53,21 @@ Für spätere Updates beim Einschalten beide horizontalen Trimmungen nach innen
 
 == Erweiterungen
 
+https://wimalopaan.github.io/CoreTx/[Browser-Simulator online öffnen]
+(nach Veröffentlichung über GitHub Pages).
+Mit i6X-/i6S-Profilen, Geberpanel, echtem LCD, 16 Kanalbalken
+und lokalem EEPROM-Dateiimport/-export:
+link:BUILDING_de.adoc#web-simulator[Bauen und GitHub Pages].
+Die Berechnung erfolgt lokal im Browser; Modelldaten werden nicht hochgeladen.
+
+* *Kurven:* vier stückweise lineare 5-Punkt-Kurven für Inputs und Mixer,
+  mit bearbeitbaren inneren X-/allen Y-Werten, Punkteditor und grafischer Vorschau.
+  Vor dem Update das EEPROM sichern: Im Format 9 gespeicherte Modelle sind mit
+  älterer Firmware nicht lesbar.
+* *Kettenmischer:* wählbare Fahrt-/Lenk-Inputs und linke/rechte Ausgänge,
+  Lenkanteil (0..100 %) und optionale Lenkumkehr mit Hysterese.
+  Sechs sichtbare Read-only-Mixerzeilen werden ohne logische Schalter verwaltet;
+  Inputs, Kurven und Outputs bleiben normal bearbeitbar.
 * *Externes CRSF:* bidirektionale UART für Kanalausgabe, Telemetrie und
   Modulkonfiguration. Es ist immer nur ein HF-Pfad aktiv.
 * *MultiSwitch:* CRSF-Dashboards und SET4-Befehle für kompatible Empfänger/Module.

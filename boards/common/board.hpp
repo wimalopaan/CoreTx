@@ -58,8 +58,30 @@ template <typename Io, typename Assignment = Hardware> struct SenderBoard {
     static void prepare_power() noexcept {
         // The i6X has a mechanical switch; only the i6S needs the PB15 latch.
         if constexpr (Hardware::power_latch) {
-            i6s::hold_power<Io, Hardware>();
+            i6s::hold_power<Io, Hardware>(!Bootloader::cold_start());
         }
+    }
+    [[nodiscard]] static bool power_on_startup() noexcept {
+        if constexpr (Hardware::power_latch) {
+            if (Bootloader::cold_start()) {
+                i6s::initialize_power_button<Io, Hardware>();
+                Bootloader::start_sampling();
+                auto pressed = power_button_pressed();
+                std::uint32_t held_ms{};
+                while (held_ms < (Power::startup_hold_duration.count() / 1'000U)) {
+                    if (!Bootloader::wait_tick()) {
+                        Bootloader::stop_sampling();
+                        return false;
+                    }
+                    const auto previous = pressed;
+                    pressed = power_button_pressed();
+                    held_ms = pressed && previous ? held_ms + 1U : 0U;
+                }
+                Bootloader::stop_sampling();
+                i6s::hold_power<Io, Hardware>();
+            }
+        }
+        return true;
     }
     [[nodiscard]] static stm32f072::BootloaderRequest bootloader_request() noexcept {
         using Request = stm32f072::BootloaderRequest;
@@ -100,11 +122,34 @@ template <typename Io, typename Assignment = Hardware> struct SenderBoard {
                        ? Request::requested
                        : Request::none;
     }
+    [[nodiscard]] static bool bootloader_message() noexcept {
+        // The LCD needs a microsecond clock, but ROM DFU must not depend on the HSE/PLL.
+        if ((Clock<Io, Hardware::clock_timer>::initialize_timer(8'000'000U) !=
+             stm32f072::HardwareError::none) ||
+            (Display::initialize() != LcdError::none))
+            return false;
+        coretx::ui::Framebuffer display{};
+        display.text(22, 28, "DFU-Bootloader");
+        Display::begin_frame();
+        const auto started = Io::now_us();
+        for (std::uint32_t attempt = 0; attempt < stm32f072::ready_timeout; ++attempt) {
+            if ((Display::service(display) != LcdError::none) ||
+                ((Io::now_us() - started) >= 250_ms))
+                return false;
+            if (!Display::busy())
+                return true;
+        }
+        return false;
+    }
     [[nodiscard]] static bool bootloader_startup() noexcept {
+        if (!power_on_startup())
+            return false;
         const auto request = bootloader_request();
         if (request == stm32f072::BootloaderRequest::error)
             return false;
         if (request == stm32f072::BootloaderRequest::requested) {
+            if (!bootloader_message())
+                return false;
             __disable_irq();
             if (!Bootloader::prepare())
                 return false;

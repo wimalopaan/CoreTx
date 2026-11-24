@@ -30,6 +30,40 @@ constexpr bool in_range(const std::int32_t value, const std::int32_t lower,
     return (value >= lower) && (value <= upper);
 }
 
+constexpr bool valid_tank(const TankMixer &tank) noexcept {
+    return (tank.drive_input < input_count) && (tank.steering_input < input_count) &&
+           (tank.left_channel < channel_count) && (tank.right_channel < channel_count) &&
+           (tank.left_channel != tank.right_channel) && (tank.steering_percent <= 100) &&
+           in_range(tank.hysteresis_percent, 1, 20);
+}
+
+#if CORETX_MODUL_TANKMIX
+constexpr MixLine tank_line(const TankMixer &tank, const std::uint8_t channel,
+                            const MixRole role) noexcept {
+    MixLine line{};
+    line.destination = channel;
+    line.role = role;
+    line.source.index = role == MixRole::tank_drive ? tank.drive_input : tank.steering_input;
+    if (role != MixRole::tank_drive) {
+        const bool positive = (channel == tank.left_channel) == (role == MixRole::tank_forward);
+        (void)line.weight_percent.try_set(positive ? tank.steering_percent
+                                                   : -tank.steering_percent);
+    }
+    return line;
+}
+
+constexpr bool canonical_tank_line(const MixLine &line, const TankMixer &tank) noexcept {
+    const auto expected = tank_line(tank, line.destination, line.role);
+    return (line.source.kind == expected.source.kind) &&
+           (line.source.index == expected.source.index) && !line.source.inverted &&
+           !line.condition.enabled && (line.condition.index == 0) &&
+           (line.condition.position == SwitchPosition::up) && !line.condition.inverted &&
+           (line.multiplex == Multiplex::add) && line.carry_trim &&
+           (line.weight_percent == expected.weight_percent) && (line.offset_percent.value() == 0) &&
+           (line.curve == 0);
+}
+#endif
+
 constexpr bool valid_source(const Source &source, const bool allow_input) noexcept {
     switch (source.kind) {
     case SourceKind::analog:
@@ -358,11 +392,44 @@ constexpr std::int16_t apply_output(const MixValue value, const Output &output) 
 
 } // namespace detail
 
+constexpr std::int32_t evaluate_curve(const Curve &curve, const std::int32_t input) noexcept {
+    const auto units = [](const std::int8_t percent) constexpr {
+        return detail::round_divide(percent * resolution, 100);
+    };
+    if (input <= -resolution)
+        return units(curve.y.front());
+    if (input >= resolution)
+        return units(curve.y.back());
+    std::int32_t left_x = -resolution;
+    auto left_y = units(curve.y.front());
+    for (std::size_t i = 0; i < curve.y.size() - 1; ++i) {
+        const auto right_x = i < curve.x.size() ? units(curve.x[i]) : resolution;
+        const auto right_y = units(curve.y[i + 1]);
+        if (input <= right_x)
+            return detail::round_divide(left_y * (right_x - input) + right_y * (input - left_x),
+                                        right_x - left_x);
+        left_x = right_x;
+        left_y = right_y;
+    }
+    return units(curve.y.back());
+}
+
 constexpr Status validate(const Model &model) noexcept {
+    if (!detail::valid_tank(model.tank))
+        return {ErrorCode::tank_settings, Stage::model, 0};
     if ((model.trim_switches >> trim_count) != 0)
         return {ErrorCode::input_settings, Stage::model, 0};
     if (const auto status = detail::validate_logical(model); !status)
         return status;
+    for (std::size_t i = 0; i < model.curves.size(); ++i) {
+        const auto &curve = model.curves[i];
+        if ((curve.x.front() <= -100) || (curve.x.back() >= 100) || (curve.x[0] >= curve.x[1]) ||
+            (curve.x[1] >= curve.x[2]))
+            return {ErrorCode::curve_settings, Stage::model, i};
+        for (const auto y : curve.y)
+            if (!detail::in_range(y, -100, 100))
+                return {ErrorCode::curve_settings, Stage::model, i};
+    }
     const auto valid_condition = [&](const Condition &condition) constexpr {
         return detail::valid_condition(condition) &&
                (!condition.enabled || (condition.index < switch_count) ||
@@ -409,12 +476,41 @@ constexpr Status validate(const Model &model) noexcept {
         if ((static_cast<std::uint8_t>(line.side) >
              static_cast<std::uint8_t>(InputSide::positive)) ||
             (static_cast<std::uint8_t>(line.trim) >
-             static_cast<std::uint8_t>(TrimSource::stick4))) {
+             static_cast<std::uint8_t>(TrimSource::stick4)) ||
+            (line.curve > curve_count)) {
             return {ErrorCode::input_settings, Stage::inputs, i};
         }
     }
+#if CORETX_MODUL_TANKMIX
+    std::array<std::uint8_t, 2> tank_roles{};
+#else
+    if (model.tank.enabled)
+        return {ErrorCode::tank_unavailable, Stage::model, 0};
+#endif
     for (std::size_t i = 0; i < model.mixes.size(); ++i) {
         const auto &line = model.mixes[i];
+#if CORETX_MODUL_TANKMIX
+        if (line.role > MixRole::tank_reverse)
+            return {ErrorCode::tank_settings, Stage::mixes, i};
+        const bool reserved = (line.destination == model.tank.left_channel) ||
+                              (line.destination == model.tank.right_channel);
+        if (line.role == MixRole::manual) {
+            if (model.tank.enabled && reserved)
+                return {ErrorCode::tank_conflict, Stage::mixes, i};
+        } else {
+            if (!model.tank.enabled || !reserved || !detail::canonical_tank_line(line, model.tank))
+                return {ErrorCode::tank_settings, Stage::mixes, i};
+            auto &roles = tank_roles[line.destination == model.tank.left_channel ? 0 : 1];
+            const auto bit =
+                static_cast<std::uint8_t>(1U << (static_cast<unsigned>(line.role) - 1));
+            if ((roles & bit) != 0)
+                return {ErrorCode::tank_settings, Stage::mixes, i};
+            roles |= bit;
+        }
+#else
+        if (line.role != MixRole::manual)
+            return {ErrorCode::tank_unavailable, Stage::mixes, i};
+#endif
         if (line.destination >= channel_count) {
             return {ErrorCode::destination, Stage::mixes, i};
         }
@@ -427,11 +523,16 @@ constexpr Status validate(const Model &model) noexcept {
         if (!valid_condition(line.condition)) {
             return {ErrorCode::condition, Stage::mixes, i};
         }
-        if (static_cast<std::uint8_t>(line.multiplex) >
-            static_cast<std::uint8_t>(Multiplex::replace)) {
+        if ((static_cast<std::uint8_t>(line.multiplex) >
+             static_cast<std::uint8_t>(Multiplex::replace)) ||
+            (line.curve > curve_count)) {
             return {ErrorCode::mix_settings, Stage::mixes, i};
         }
     }
+#if CORETX_MODUL_TANKMIX
+    if (model.tank.enabled && ((tank_roles[0] != 7) || (tank_roles[1] != 7)))
+        return {ErrorCode::tank_settings, Stage::model, 0};
+#endif
     for (std::size_t i = 0; i < channel_count; ++i) {
         const auto &output = model.outputs[i];
         if (output.minimum_permille > output.maximum_permille) {
@@ -440,6 +541,50 @@ constexpr Status validate(const Model &model) noexcept {
     }
     return {};
 }
+
+#if CORETX_MODUL_TANKMIX
+constexpr Status configure_tank(Model &model, const TankMixer &tank) noexcept {
+    if (!detail::valid_tank(tank))
+        return {ErrorCode::tank_settings, Stage::model, 0};
+    if (const auto status = validate(model); !status)
+        return status;
+    std::size_t manual_count{};
+    for (std::size_t i = 0; i < model.mixes.size(); ++i) {
+        const auto &line = model.mixes[i];
+        if (line.role != MixRole::manual)
+            continue;
+        ++manual_count;
+        if (tank.enabled &&
+            ((line.destination == tank.left_channel) || (line.destination == tank.right_channel)))
+            return {ErrorCode::tank_conflict, Stage::mixes, i};
+    }
+    if (manual_count + (tank.enabled ? 6U : 0U) > max_mix_lines)
+        return {ErrorCode::capacity, Stage::mixes, manual_count};
+    for (auto i = model.mixes.size(); i > 0; --i)
+        if (model.mixes[i - 1].role != MixRole::manual)
+            (void)model.mixes.try_erase(i - 1);
+    // Preflight above guarantees all insertions succeed; no model-sized stack copy is needed.
+    for (std::size_t channel = 0; channel < channel_count; ++channel) {
+        if (tank.enabled && ((channel == tank.left_channel) || (channel == tank.right_channel))) {
+            std::size_t index{};
+            while ((index < model.mixes.size()) && (model.mixes[index].destination < channel))
+                ++index;
+            for (const auto role :
+                 {MixRole::tank_drive, MixRole::tank_forward, MixRole::tank_reverse})
+                (void)model.mixes.try_insert(
+                    index++, detail::tank_line(tank, static_cast<std::uint8_t>(channel), role));
+        }
+    }
+    model.tank = tank;
+    return {};
+}
+
+constexpr bool tank_mix_active(const MixRole role, const Frame &frame) noexcept {
+    return (role == MixRole::manual) || (role == MixRole::tank_drive) ||
+           ((role == MixRole::tank_forward) && !frame.tank_reverse) ||
+           ((role == MixRole::tank_reverse) && frame.tank_reverse);
+}
+#endif
 
 constexpr Evaluation evaluate(const Model &model, const Controls &controls,
                               LogicalState &state) noexcept {
@@ -477,6 +622,8 @@ constexpr Evaluation evaluate(const Model &model, const Controls &controls,
             continue;
         }
         value = detail::expo(value, line.expo_percent);
+        if (line.curve != 0)
+            value = evaluate_curve(model.curves[line.curve - 1], value);
         value = detail::round_divide(value * line.weight_percent.value() * 10, 1000);
         value += detail::round_divide(
             detail::round_divide(line.offset_percent.value() * 10 * resolution, 100), 10);
@@ -487,13 +634,34 @@ constexpr Evaluation evaluate(const Model &model, const Controls &controls,
         }
         selected.set(destination);
     }
+#if CORETX_MODUL_TANKMIX
+    if (model.tank.enabled && model.tank.reverse_steering) {
+        // Direction follows the processed drive input, before independently carried mixer trim.
+        const auto drive = frame.inputs[model.tank.drive_input];
+        const auto threshold =
+            detail::round_divide(model.tank.hysteresis_percent * resolution, 100);
+        if (drive > threshold)
+            next.tank_reverse = false;
+        else if (drive < -threshold)
+            next.tank_reverse = true;
+    } else {
+        next.tank_reverse = false;
+    }
+    frame.tank_reverse = next.tank_reverse;
+#endif
     for (std::size_t i = 0; i < model.mixes.size(); ++i) {
         const auto &line = model.mixes[i];
+#if CORETX_MODUL_TANKMIX
+        if (!tank_mix_active(line.role, frame))
+            continue;
+#endif
         if (!detail::matches(line.condition, controls, frame.logical)) {
             continue;
         }
-        const auto value = detail::source_value(line.source, controls, frame) +
-                           detail::mix_trim(line, controls, origins, reversed);
+        auto value = detail::source_value(line.source, controls, frame) +
+                     detail::mix_trim(line, controls, origins, reversed);
+        if (line.curve != 0)
+            value = evaluate_curve(model.curves[line.curve - 1], value);
         const auto contribution = detail::mix_contribution(value, line);
         auto &accumulated = frame.mixes[line.destination];
         if ((i > 0) && (model.mixes[i - 1].destination == line.destination)) {
@@ -550,6 +718,16 @@ constexpr const char *error_message(const ErrorCode &code) noexcept {
         return "invalid MultiSwitch page";
     case ErrorCode::multiswitch_duplicate:
         return "duplicate MultiSwitch target";
+    case ErrorCode::curve_settings:
+        return "invalid curve points";
+    case ErrorCode::tank_settings:
+        return "invalid tank mixer settings or managed lines";
+    case ErrorCode::tank_conflict:
+        return "tank channel contains manual mixer lines";
+    case ErrorCode::capacity:
+        return "not enough mixer line capacity";
+    case ErrorCode::tank_unavailable:
+        return "tank mixer module not compiled in";
     }
     return "unknown error";
 }

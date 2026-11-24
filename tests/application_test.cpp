@@ -2485,28 +2485,118 @@ template <template <typename> typename BoardPolicy> bool active_model_background
         }
         fw::Application<typename Test::Board, typename Test::Board::Input> app{};
         (void)app.initialize();
-        for (unsigned i = 0; !app.models().background_loading() && (i < 1000); ++i)
-            (void)step(app, c, c.now + 1000U);
-        if (!app.models().background_loading() || (app.output() != data.radio.output) ||
-            !app.diagnostics().output_valid() ||
-            (app.models().data().model.mixes[0].weight_percent.value() != 61))
-            return false;
-        const auto channels = app.diagnostics().evaluation().frame.channels;
         const auto before = c.eeprom;
-        for (unsigned i = 0; app.models().background_loading() && (i < 1000); ++i) {
+        for (unsigned i = 0; !app.models().loaded() && (i < 1000); ++i) {
             (void)step(app, c, c.now + 1000U);
-            if ((app.output() != data.radio.output) || !app.diagnostics().output_valid() ||
-                (app.diagnostics().evaluation().frame.channels != channels))
+            if (!app.models().loaded() &&
+                ((app.output() != fw::RadioOutput::off) || c.powered || c.internal_active))
                 return false;
         }
+        if (!app.models().loaded() ||
+            (app.models().data().model.mixes[0].weight_percent.value() != 61))
+            return false;
         if (app.models().busy() || (c.eeprom != before) ||
-            (app.models().editable() != (failure == 0)) || (c.powered != fw::features::crsf) ||
-            (c.internal_active != !fw::features::crsf))
+            (app.models().editable() != (failure == 0)) ||
+            (app.output() != (failure == 0 ? data.radio.output : fw::RadioOutput::off)) ||
+            (c.powered != ((failure == 0) && fw::features::crsf)) ||
+            (c.internal_active != ((failure == 0) && !fw::features::crsf)))
             return false;
         if ((failure == 1) && (app.models().message() != coretx::ui::tr::models_error))
             return false;
         if ((failure == 2) && (app.models().message() != coretx::ui::tr::models_version))
             return false;
+    }
+    return true;
+}
+
+template <template <typename> typename BoardPolicy> bool model_recovery_dialog() {
+    for (unsigned action = 0; action < 3; ++action) {
+        const bool reset = action != 0;
+        struct Scenario {};
+        using Test = coretx::test::FakeApplication<Scenario, Context, BoardPolicy>;
+        using Board = typename Test::Board;
+        Test::reset();
+        auto &c = Test::context;
+        c.probe_state = fw::StorageProbeState::found;
+        c.eeprom.fill(0xFF);
+        c.adc_event = fw::ScanEvent::complete;
+        c.samples.fill(2048);
+        c.touch_ready = true;
+        c.touch_event = s::TouchEvent::sample;
+        fw::models::Data model{};
+        model.radio = {{0x12345678},
+                       {0x87654321},
+                       fw::RadioOutput::internal,
+                       coretx::afhds2a::ChannelMode::standard14};
+        fw::models::Record record{};
+        if (!fw::models::encode(model, 0, true, 1, record))
+            return false;
+        record[4] = fw::models::format_version + 1;
+        coretx::storage::detail::Writer crc{std::span{record}.last(4)};
+        crc.word(coretx::storage::crc32(std::span{record}.first(record.size() - 4)));
+        std::copy(record.begin(), record.end(), c.eeprom.begin() + fw::models::base);
+        const auto before = c.eeprom;
+        fw::Application<Board, typename Board::Input> app{};
+        (void)app.initialize();
+        settle_menu(app, c);
+        if (!app.models().recovery_required() || app.models().editable() || (c.eeprom != before) ||
+            c.powered || c.internal_active ||
+            (app.models().detected_version() != fw::models::format_version + 1))
+            return false;
+        const auto choose = [&](const bool second) {
+            if constexpr (Board::Input::touch) {
+                c.touch_sample = {0, 0, 60, static_cast<std::uint8_t>(second ? 46 : 34), 0};
+                (void)step(app, c, c.now + 1000U);
+                c.touch_sample.contacts = 1;
+                (void)step(app, c, c.now + 1000U);
+                c.touch_sample.contacts = 0;
+                (void)step(app, c, c.now + 1000U);
+            } else {
+                press_key(app, c, second ? Key::down : Key::up);
+                press_key(app, c, Key::ok);
+            }
+        };
+        if (reset) {
+            choose(true);
+            if ((c.eeprom != before) || app.models().busy())
+                return false;
+            choose(false); // The confirmation defaults to cancellation, not deletion.
+            if ((c.eeprom != before) || app.models().busy())
+                return false;
+            choose(true);
+            c.memory_fail_writes = action == 2;
+            choose(true);
+            settle_menu(app, c);
+            if (action == 2) {
+                if (!app.models().recovery_required() || app.models().editable() ||
+                    (c.eeprom != before))
+                    return false;
+                choose(false);
+                settle_menu(app, c);
+                if ((app.state() != fw::ApplicationState::powered_off) ||
+                    (c.power_releases != (Board::Input::touch ? 1U : 0U)))
+                    return false;
+                continue;
+            }
+            if (!app.models().editable() || app.models().recovery_required() ||
+                (app.models().data().model.mixes.size() != 4) ||
+                (app.models().data().radio.receiver.value != 0) ||
+                (app.output() != fw::RadioOutput::off) || c.powered || c.internal_active ||
+                !std::equal(c.eeprom.begin(), c.eeprom.begin() + fw::models::base, before.begin()))
+                return false;
+            for (std::size_t i = 1; i < fw::models::count; ++i)
+                if (app.models().entries()[i].present)
+                    return false;
+        } else {
+            if constexpr (Board::Input::touch)
+                choose(false);
+            else
+                press_key(app, c, Key::ok); // First/default choice is power off.
+            settle_menu(app, c);
+            if ((app.state() != fw::ApplicationState::powered_off) || (c.eeprom != before) ||
+                (c.power_releases != (Board::Input::touch ? 1U : 0U)))
+                return false;
+        }
     }
     return true;
 }
@@ -2899,6 +2989,8 @@ int main() {
     RUN(trim_controls());
     RUN(active_model_background_loading<SenderBoard>());
     RUN(active_model_background_loading<TouchSenderBoard>());
+    RUN(model_recovery_dialog<SenderBoard>());
+    RUN(model_recovery_dialog<TouchSenderBoard>());
     RUN(trim_application());
     RUN(calibration_reboot<SenderBoard>());
     RUN(calibration_reboot<TouchSenderBoard>());

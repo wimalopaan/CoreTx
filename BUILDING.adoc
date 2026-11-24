@@ -63,6 +63,53 @@ resource use. `touch-diagnostic` is a standalone touch test without RF or EEPROM
 access. `measurement` is bench firmware, not the normal transmitter application.
 Do not substitute these images for normal operation.
 
+[[model-converter]]
+== Model storage recovery and converter
+
+Before enabling RF, the main firmware checks the model directory and both banks
+of all eight model slots. Native model formats 6 through 9 remain readable.
+An unsupported format, unrecoverable model data, a missing required module or an
+unfinished conversion/reset blocks normal operation and all model writes.
+The LCD shows the reason and, when available, the stored/supported versions:
+
+1. *Off / external conversion* is the default. No model data is changed.
+   The i6S releases its power latch; the i6X asks you to use its mechanical switch.
+2. *Initialize ALL models* requires a second confirmation, initially set to Cancel.
+   This clears all model slots and the directory, then creates a four-channel
+   model with no receiver binding and RF OFF. Calibration and transmitter/input
+   settings are preserved.
+
+An interrupted reset remains blocked until initialization is explicitly repeated.
+Never use an older firmware that ignores the migration marker while recovery is pending.
+
+Each default board build also generates an *English, RF-OFF maintenance image*:
+`build-i6x/coretx-i6x-converter.bin` or `build-i6s/coretx-i6s-converter.bin`,
+with matching HEX/ELF/resource-report files. These are not operating firmware.
+
+* Back up the *external EEPROM*, not only internal flash.
+* Flash the converter matching the transmitter through <<dfu-update,ROM DFU>>.
+* Start normally (hold both front power buttons for 3 s on i6S). Inspect source
+  versions, target format 9 and model count. Release the controls, then confirm
+  with OK (i6X) or the left rear button (i6S); Cancel/right rear cancels.
+* Keep power stable until conversion and read-back verification finish.
+* Switch off, enter ROM DFU again and flash the matching normal firmware.
+
+The converter upgrades native CoreTX model formats 6/7/8 to 9, preserves model
+names, receiver settings and active-model selection, and resumes interrupted
+conversion using the journal and migration marker. It does not import Flysky
+factory/EdgeTX EEPROMs, repair arbitrary corrupt data or downgrade future formats.
+Unknown formats and ambiguous journals are refused without starting conversion.
+
+=== Maintaining storage compatibility
+
+Every model-format change must update the shared codec, converter and independent
+historical-version fixtures together. The explicit `converter_target` assertion
+and fixture-version manifest prevent an unnoticed format bump from building.
+Run `coretx_model_converter`, `coretx_i6x_menu` and `coretx_application` host tests,
+including interrupted writes/resets, and build both boards' converter images.
+Both firmware workflows build and publish the converter BIN/HEX alongside every
+release; the i6X workflow also runs migration/recovery tests with the main tank module OFF.
+
 == Host simulator and tests
 
 The `build` and `sanitize` presets enable the SDL3 simulator:
@@ -84,6 +131,66 @@ or the equivalent `sanitize` command. Re-enable the simulator explicitly with
 `-DCORETX_SIMULATOR=ON` when needed again.
 `sanitize` adds AddressSanitizer and UndefinedBehaviorSanitizer.
 Host tests and simulator are not firmware images.
+
+[[web-simulator]]
+== Browser simulator
+
+The browser simulator runs the real sender application, menus, calibration and
+mixing on virtual i6X/i6S hardware. It combines physical controls, the actual
+128x64 LCD framebuffer and 16 output bars. New sessions have a four-channel model
+and calibrated virtual controls. The i6S supports LCD touch/mouse gestures and
+the real rear-button/pot setup navigation. All RF hardware is simulated.
+Stick centering preferences are saved separately per profile; control positions
+intentionally start neutral.
+
+Build both profiles with Emscripten 7.x, CMake >= 3.30 and Ninja, then serve them
+together over HTTP (not `file://`). These commands use Bash:
+
+[source,shell]
+----
+for profile in i6x i6s; do
+  emcmake cmake -S . -B "build-web-$profile" -G Ninja \
+    -DCORETX_WEB=ON -DCORETX_BOARD="${profile^^}" \
+    -DTRANSLATION=DE -DCMAKE_BUILD_TYPE=Release
+  cmake --build "build-web-$profile" --parallel 2
+done
+mkdir -p build-web-site
+cp platform/web/{index.html,simulator.js,simulator.css} build-web-site/
+cp build-web-i6x/coretx-i6x.{js,wasm} build-web-i6s/coretx-i6s.{js,wasm} build-web-site/
+python3 -m http.server 8080 --bind 127.0.0.1 --directory build-web-site
+----
+
+Open `http://127.0.0.1:8080`. Activate the Emscripten environment first if necessary;
+some distributions install its tools in `/usr/lib/emscripten` without updating
+`PATH`. This build does not require SDL3.
+
+Each profile automatically saves its native 16-KiB EEPROM image locally after
+edits and writes finish, including models, calibration and radio settings.
+Concurrent browser tabs cannot silently overwrite a changed saved image.
+Download important EEPROMs as files: browser storage is not a backup.
+Imports run as a separate test session; the previous browser image is preserved
+until explicitly replaced. Unsupported model versions enter firmware recovery
+instead of silently resetting data. No model data is uploaded.
+
+Import only complete native CoreTX EEPROM images for the selected board, not
+firmware BINs or the old SDL simulator's 1-/2-KiB state files. EEPROM downloads
+are *not flashable firmware*. Always calibrate real hardware separately; do not
+reuse virtual calibration values on a physical transmitter without verification.
+
+The `Browser simulator` Action builds/tests both profiles on pushes/PRs and
+uploads a website artifact. Version tags (`v...`) and manual runs additionally
+deploy to GitHub Pages. The same version tags build the firmware and attach
+`coretx-browser-simulator.zip` to the shared GitHub release. Extract the ZIP and
+serve it over HTTP; do not double-click `index.html`.
+First select *GitHub Actions* in the repository's
+*Settings -> Pages -> Build and deployment -> Source*, and allow release tags
+in the `github-pages` environment if required.
+After deployment, https://wimalopaan.github.io/CoreTx/[open the simulator on GitHub Pages].
+
+CTest includes the native engine tests. Run `node --test tests/web_controls_test.mjs`
+and `node tests/web_wasm_test.mjs build-web-i6x build-web-i6s` for the frontend
+helpers and compiled modules. CI additionally exercises the actual website
+using Playwright/Chromium.
 
 == Presets and CMake options
 
@@ -107,6 +214,8 @@ The following are project options and their defaults when not overridden by a pr
 |Host ASan/UBSan with GCC/Clang; incompatible with STM32 firmware.
 |`CORETX_SIMULATOR` |`OFF`
 |POSIX SDL3 desktop simulator; enabled by the native presets.
+|`CORETX_WEB` |`OFF`
+|Emscripten browser simulator; a separate build directory per `CORETX_BOARD`.
 |`CORETX_STM32F072` |`OFF`
 |Bare-metal ARM firmware; enabled by the board presets, requires the ARM GCC toolchain.
 |`CORETX_ADC_COHERENT_SNAPSHOTS` |`OFF`
@@ -118,6 +227,11 @@ The following are project options and their defaults when not overridden by a pr
 |External UART CRSF support.
 |`CORETX_MULTISWITCH` |`ON`
 |MultiSwitch dashboards and SET4 commands; effective only with `CORETX_CRSF=ON`.
+|`CORETX_MODUL_TANKMIX` |`ON`
+|Compile the tank mixer, its configuration UI and internal direction conditions.
+ With `OFF`, models using the module are rejected and writes are blocked rather
+ than falling back to different channel behavior. Inactive module settings
+ remain in the storage format for lossless roundtrips.
 |`CORETX_EXTENDED_INPUTS` |`ON`
 |Compile additional analog/digital input support.
  Individual expansion inputs still default to Off in radio setup.
@@ -294,7 +408,7 @@ bridge is needed for routine updates:
 |Board |Hold while switching on
 |FS-i6X |Both *horizontal trim buttons inward*: left horizontal trim to the right,
  right horizontal trim to the left. The combination is independent of stick mode.
-|FS-i6S |Both *rear buttons SE/SF* (PA9/PA10), then both front power buttons
+|FS-i6S |Both *rear buttons SE/SF* (PA9/PA10), then hold both front power buttons for 3 s
  for normal power-on. The rear buttons are not the front power buttons.
 |===
 
@@ -309,10 +423,16 @@ bridge is needed for routine updates:
 CoreTX samples and debounces the keys at cold startup, keeps RF off and enters the
 STM32 ROM bootloader *before starting the watchdog or accessing EEPROM*.
 On i6S the PB15 power latch remains active during handoff.
+The LCD displays `DFU-Bootloader` before the handoff and retains the message in ROM DFU.
+Hardware boot-pin entry bypasses CoreTX and cannot display this message.
 The same combination works in the i6S touch-trace, standalone touch-diagnostic
 and measurement images.
 Watchdog/software resets deliberately do not use this shortcut: an already
 running watchdog cannot be stopped for a reliable DFU session.
+
+Normal i6S cold startup also requires both front power buttons to be held continuously
+for 3 s. Releasing either button restarts the delay; RF and the LCD remain off until
+the delay has elapsed. Watchdog/software resets do not repeat the power-on delay.
 
 This is a jump into the MCU's ROM, not a separate CoreTX flash bootloader or a
 USB runtime reboot command. Factory firmware, older CoreTX builds without this
@@ -394,7 +514,10 @@ https://github.com/wimalopaan/CoreTx/releases[CoreTX releases] may lag the sourc
 version. The workflows `.github/workflows/i6x.yml` and `.github/workflows/i6s.yml`
 build the respective board's German/English firmware on pushes, pull requests
 and manual runs. Version tags matching `v[0-9]*` attach both boards' DE/EN BIN/HEX
-assets to the same GitHub release. Artifact names and filenames are board-specific;
+and converter assets to the same GitHub release. `.github/workflows/web.yml` builds
+the browser simulator from the same tag and publishes `coretx-browser-simulator.zip`
+alongside the firmware, plus the Pages website.
+Artifact names and filenames are board-specific;
 rerunning one board's workflow does not remove the other board's assets.
 Build locally when no matching release image exists.
 

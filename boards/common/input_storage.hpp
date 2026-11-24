@@ -33,9 +33,9 @@ struct Decoded {
     writer.field(format_version);
     writer.field(setup.extra_analog);
     writer.field(static_cast<std::uint8_t>(setup.digital_modes & 0xFFU));
-    writer.field(static_cast<std::uint8_t>((setup.trim_beep ? 0U : 1U) |
-                                           (setup.external_module ? 0U : 2U) |
-                                           ((setup.digital_modes >> 8U) << 2U)));
+    writer.field(
+        static_cast<std::uint8_t>((setup.trim_beep ? 0U : 1U) | (setup.external_module ? 0U : 2U) |
+                                  ((static_cast<unsigned>(setup.digital_modes) >> 8U) << 2U)));
     writer.word(generation);
     for (const auto mode : setup.modes)
         writer.field(mode);

@@ -41,7 +41,8 @@ enum class MenuScreen : std::uint8_t {
     multiswitch,
     multiswitch_page,
     multiswitch_button,
-    trims
+    trims,
+    curves
 };
 
 namespace menu_detail {
@@ -51,21 +52,35 @@ inline constexpr std::size_t multiswitch_row = 6;
 inline constexpr std::size_t crsf_dashboard_row =
     multiswitch_row + (features::multiswitch ? 1U : 0U);
 inline constexpr std::size_t trim_row = crsf_dashboard_row + (features::crsf ? 1U : 0U);
+inline constexpr std::size_t curves_row = trim_row + 1;
+inline constexpr std::size_t tank_row = curves_row + 1;
 namespace tr = coretx::ui::tr;
 inline constexpr std::size_t visible_rows = 4;
 inline constexpr int list_y = 12;
 inline constexpr int row_height = 10;
-inline constexpr std::array input_fields{tr::menu_source,     tr::menu_weight,    tr::menu_expo,
-                                         tr::menu_offset,     tr::menu_trim,      tr::menu_side,
-                                         tr::menu_invert,     tr::menu_target,    tr::menu_switch,
-                                         tr::menu_switch_pos, tr::menu_switch_not};
-inline constexpr std::array mix_fields{
-    tr::menu_source, tr::menu_weight, tr::menu_offset, tr::menu_multiplex,  tr::menu_trim,
-    tr::menu_invert, tr::menu_target, tr::menu_switch, tr::menu_switch_pos, tr::menu_switch_not};
+inline constexpr std::array input_fields{tr::menu_source,     tr::menu_weight,     tr::menu_expo,
+                                         tr::menu_offset,     tr::menu_trim,       tr::menu_side,
+                                         tr::menu_invert,     tr::menu_target,     tr::menu_switch,
+                                         tr::menu_switch_pos, tr::menu_switch_not, tr::menu_curve};
+inline constexpr std::array mix_fields{tr::menu_source,     tr::menu_weight, tr::menu_offset,
+                                       tr::menu_multiplex,  tr::menu_trim,   tr::menu_invert,
+                                       tr::menu_target,     tr::menu_switch, tr::menu_switch_pos,
+                                       tr::menu_switch_not, tr::menu_curve};
 inline constexpr std::array output_fields{tr::menu_minimum, tr::menu_maximum, tr::menu_subtrim,
                                           tr::menu_reverse};
 inline constexpr std::array actions{tr::menu_new, tr::menu_copy, tr::menu_delete, tr::menu_move_up,
                                     tr::menu_move_down};
+#if CORETX_MODUL_TANKMIX
+inline constexpr std::array tank_fields{tr::tank_enabled,    tr::tank_drive,   tr::tank_steering,
+                                        tr::tank_left,       tr::tank_right,   tr::tank_gain,
+                                        tr::tank_hysteresis, tr::tank_reversal};
+
+constexpr const char *tank_label(const MixRole role) noexcept {
+    return role == MixRole::tank_drive     ? tr::tank_drive_line
+           : role == MixRole::tank_forward ? tr::tank_forward
+                                           : tr::tank_reverse;
+}
+#endif
 inline constexpr std::array<std::string_view, 11> logical_functions{
     "--", "A > X", "A < X", "A = X", "A != X", "A >= X", "A <= X", "AND", "OR", "XOR", "SRFF"};
 inline constexpr std::array logical_fields{
@@ -176,6 +191,9 @@ class Menu {
     [[nodiscard]] constexpr bool pending_model_edit() const noexcept {
         return (screen_ == MenuScreen::editor) && editor_.editing();
     }
+    [[nodiscard]] constexpr bool editing() const noexcept {
+        return editing_ || pending_model_edit();
+    }
     [[nodiscard]] constexpr RadioOutput requested_output() const noexcept {
         return static_cast<RadioOutput>(draft_value_);
     }
@@ -219,7 +237,15 @@ class Menu {
                     diagnostics.refresh_model();
                 } else if (details_)
                     details_ = false;
-                else {
+                else if (editor_.page() == coretx::ui::Page::curves) {
+                    screen_ = MenuScreen::curves;
+                    selected_ = editor_.selected_curve();
+#if CORETX_MODUL_TANKMIX
+                } else if (editor_.page() == coretx::ui::Page::tank) {
+                    screen_ = MenuScreen::setup;
+                    selected_ = menu_detail::tank_row;
+#endif
+                } else {
                     screen_ = MenuScreen::setup;
                     selected_ = static_cast<std::size_t>(editor_.page()) - 1;
                 }
@@ -246,7 +272,8 @@ class Menu {
                         ? MenuScreen::model_actions
                     : (screen_ == MenuScreen::rf) || (screen_ == MenuScreen::dashboard_channels) ||
                             (screen_ == MenuScreen::logical_switches) ||
-                            (screen_ == MenuScreen::multiswitch) || (screen_ == MenuScreen::trims)
+                            (screen_ == MenuScreen::multiswitch) ||
+                            (screen_ == MenuScreen::trims) || (screen_ == MenuScreen::curves)
                         ? MenuScreen::setup
                         : MenuScreen::root;
                 selected_ = from_model_actions ? model_slot_ : 0;
@@ -493,7 +520,21 @@ class Menu {
                 notice_ = store.message();
                 return {};
             }
-            if ((key == Key::ok_long) && !details_)
+            if ((editor_.page() == coretx::ui::Page::curves)
+#if CORETX_MODUL_TANKMIX
+                || (editor_.page() == coretx::ui::Page::tank)
+#endif
+            ) {
+                editor_.handle(
+                    key == Key::up
+                        ? (editor_.editing() ? coretx::ui::Key::right : coretx::ui::Key::up)
+                    : key == Key::down
+                        ? (editor_.editing() ? coretx::ui::Key::left : coretx::ui::Key::down)
+                    : key == Key::ok                              ? coretx::ui::Key::enter
+                    : (key == Key::ok_long) && !editor_.editing() ? coretx::ui::Key::right
+                                                                  : coretx::ui::Key::none,
+                    model, dummy_);
+            } else if ((key == Key::ok_long) && !details_)
                 editor_.handle(coretx::ui::Key::menu, model, dummy_);
             else if (editor_.dialog() != coretx::ui::Dialog::none)
                 editor_.handle(key == Key::up     ? coretx::ui::Key::up
@@ -520,8 +561,8 @@ class Menu {
                                                   : coretx::ui::Key::none,
                                model, dummy_);
             diagnostics.refresh_model();
-            if (editor_.take_changed())
-                (void)store.save();
+            if (editor_.take_changed() && !store.save())
+                notice_ = store.message();
             return {};
         }
         if (screen_ == MenuScreen::rename) {
@@ -604,7 +645,17 @@ class Menu {
                 selected_ = 0;
                 break;
             case MenuScreen::setup:
-                if (selected_ == menu_detail::trim_row) {
+#if CORETX_MODUL_TANKMIX
+                if (selected_ == menu_detail::tank_row) {
+                    editor_.open(coretx::ui::Page::tank);
+                    screen_ = MenuScreen::editor;
+                    details_ = false;
+                } else
+#endif
+                    if (selected_ == menu_detail::curves_row) {
+                    screen_ = MenuScreen::curves;
+                    selected_ = 0;
+                } else if (selected_ == menu_detail::trim_row) {
                     screen_ = MenuScreen::trims;
                     selected_ = 0;
                     editing_ = false;
@@ -630,6 +681,11 @@ class Menu {
                     selected_ = 0;
                     editing_ = false;
                 }
+                break;
+            case MenuScreen::curves:
+                editor_.open_curve(static_cast<std::uint8_t>(selected_));
+                screen_ = MenuScreen::editor;
+                details_ = false;
                 break;
             case MenuScreen::radio:
                 if (features::crsf && (selected_ == 3))
@@ -752,6 +808,14 @@ class Menu {
         display.text(0, 0, title());
         if (screen_ == MenuScreen::logical_editor)
             coretx::ui::detail::indexed_label(display, 110, 0, "L", logical_slot_, true);
+        if ((screen_ == MenuScreen::editor) && (editor_.page() == coretx::ui::Page::curves)) {
+            coretx::ui::detail::indexed_label(display, 74, 0, "C", editor_.selected_curve(), true);
+            display.text(98, 0, editor_.selected_field() == 0 ? "X %" : "Y %");
+        }
+#if CORETX_MODUL_TANKMIX
+        if ((screen_ == MenuScreen::editor) && (editor_.page() == coretx::ui::Page::tank))
+            display.small_text(100, 2, diagnostics.evaluation().frame.tank_reverse ? "REV" : "FWD");
+#endif
         display.rectangle(0, 10, 128, 1);
         const auto first =
             selected_ >= menu_detail::visible_rows ? selected_ - menu_detail::visible_rows + 1 : 0;
@@ -789,7 +853,7 @@ class Menu {
                    (screen_ == MenuScreen::multiswitch_button)) {
             render_multiswitch_setup(store.data().model, display, first);
         } else if (screen_ == MenuScreen::editor) {
-            render_editor(store.data().model, display);
+            render_editor(store.data().model, diagnostics.evaluation().frame, display);
         } else if ((screen_ == MenuScreen::dashboard_channels) ||
                    (screen_ == MenuScreen::logical_switches) ||
                    (screen_ == MenuScreen::logical_editor)) {
@@ -849,11 +913,18 @@ class Menu {
                                                 tr::menu_outputs,     tr::menu_radio_config,
                                                 tr::menu_dashboard,   tr::menu_logical,
                                                 tr::menu_multiswitch, tr::menu_crsf_dashboard};
-                    label = i == menu_detail::trim_row ? tr::menu_trims
-                            : (i == menu_detail::crsf_dashboard_row) && features::crsf
-                                ? tr::menu_crsf_dashboard
-                                : labels[i];
-                } else if (screen_ == MenuScreen::radio)
+                    label =
+#if CORETX_MODUL_TANKMIX
+                        i == menu_detail::tank_row ? tr::menu_tank :
+#endif
+                        i == menu_detail::curves_row ? tr::menu_curves
+                        : i == menu_detail::trim_row ? tr::menu_trims
+                        : (i == menu_detail::crsf_dashboard_row) && features::crsf
+                            ? tr::menu_crsf_dashboard
+                            : labels[i];
+                } else if (screen_ == MenuScreen::curves)
+                    label = tr::menu_curve;
+                else if (screen_ == MenuScreen::radio)
                     label = i == 0                                  ? tr::menu_stick_mode
                             : i == 1                                ? tr::menu_calibration
                             : i == 2                                ? tr::menu_input_setup
@@ -881,6 +952,8 @@ class Menu {
                 const int y =
                     menu_detail::list_y + static_cast<int>(i - first) * menu_detail::row_height;
                 const bool ink = i != selected_;
+                if (screen_ == MenuScreen::curves)
+                    coretx::ui::detail::indexed_label(display, 110, y, "C", i, ink);
                 if ((screen_ == MenuScreen::radio) && (i == 0))
                     display.number(
                         127, y,
@@ -924,22 +997,40 @@ class Menu {
                 }
             }
         }
+#if CORETX_MODUL_TANKMIX
+        const bool managed =
+            (screen_ == MenuScreen::editor) && editor_.managed_mix(store.data().model);
+        if (managed) {
+            const auto &line = store.data().model.mixes[editor_.selected_row(store.data().model)];
+            display.small_text(0, 52, menu_detail::tank_label(line.role));
+            display.small_text(
+                104, 52, tank_mix_active(line.role, diagnostics.evaluation().frame) ? "ON" : "OFF");
+        } else
+#endif
+            display.small_text(0, 52,
+                               (screen_ == MenuScreen::model_actions) ||
+                                       (screen_ == MenuScreen::delete_model)
+                                   ? (store.entries()[model_slot_].present
+                                          ? store.entries()[model_slot_].name.data()
+                                          : tr::menu_empty)
+                                   : store.data().name.data());
         display.small_text(
-            0, 52,
-            (screen_ == MenuScreen::model_actions) || (screen_ == MenuScreen::delete_model)
-                ? (store.entries()[model_slot_].present ? store.entries()[model_slot_].name.data()
-                                                        : tr::menu_empty)
-                : store.data().name.data());
-        display.small_text(0, 58,
-                           notice_ != nullptr                  ? notice_
-                           : store.busy() || !store.editable() ? store.message()
-                           : screen_ == MenuScreen::rename     ? tr::menu_name_help
-                           : (screen_ == MenuScreen::multiswitch_button) && editing_ &&
-                                   (selected_ == 0)
-                               ? tr::menu_name_help
-                           : screen_ == MenuScreen::logical_editor        ? tr::menu_logical_help
-                           : (screen_ == MenuScreen::editor) && !details_ ? tr::menu_hold_help
-                                                                          : tr::menu_help);
+            0, 58,
+            notice_ != nullptr                  ? notice_
+            : store.busy() || !store.editable() ? store.message()
+#if CORETX_MODUL_TANKMIX
+            : managed ? tr::tank_readonly
+            : (screen_ == MenuScreen::editor) && (editor_.page() == coretx::ui::Page::tank)
+                ? (editor_.notice() ? editor_.notice() : tr::tank_disable_help)
+#endif
+            : screen_ == MenuScreen::rename ? tr::menu_name_help
+            : (screen_ == MenuScreen::multiswitch_button) && editing_ && (selected_ == 0)
+                ? tr::menu_name_help
+            : screen_ == MenuScreen::logical_editor ? tr::menu_logical_help
+            : (screen_ == MenuScreen::editor) && (editor_.page() == coretx::ui::Page::curves)
+                ? tr::menu_curve_help
+            : (screen_ == MenuScreen::editor) && !details_ ? tr::menu_hold_help
+                                                           : tr::menu_help);
     }
 
   private:
@@ -1138,7 +1229,8 @@ class Menu {
         return screen_ == MenuScreen::root     ? 3
                : screen_ == MenuScreen::radio  ? menu_detail::external_module_row + 1
                : screen_ == MenuScreen::models ? models::count
-               : screen_ == MenuScreen::setup  ? menu_detail::trim_row + 1
+               : screen_ == MenuScreen::setup  ? menu_detail::curves_row + 1 + CORETX_MODUL_TANKMIX
+               : screen_ == MenuScreen::curves ? curve_count
                : screen_ == MenuScreen::trims  ? board::trim_buttons ? (trim_count * 2) : trim_count
                : screen_ == MenuScreen::multiswitch        ? multiswitch_page_count + 1
                : screen_ == MenuScreen::multiswitch_page   ? 9
@@ -1174,9 +1266,15 @@ class Menu {
         case MenuScreen::initialize_models:
             return tr::menu_initialize_title;
         case MenuScreen::editor:
-            return editor_.page() == coretx::ui::Page::inputs  ? tr::menu_inputs
-                   : editor_.page() == coretx::ui::Page::mixes ? tr::menu_mixers
-                                                               : tr::menu_outputs;
+            return editor_.page() == coretx::ui::Page::inputs   ? tr::menu_inputs
+                   : editor_.page() == coretx::ui::Page::mixes  ? tr::menu_mixers
+                   : editor_.page() == coretx::ui::Page::curves ? tr::menu_curves
+#if CORETX_MODUL_TANKMIX
+                   : editor_.page() == coretx::ui::Page::tank ? tr::menu_tank
+#endif
+                                                              : tr::menu_outputs;
+        case MenuScreen::curves:
+            return tr::menu_curves;
         case MenuScreen::dashboard_channels:
             return tr::menu_dashboard;
         case MenuScreen::logical_switches:
@@ -1192,11 +1290,45 @@ class Menu {
             return tr::menu_title;
         }
     }
-    constexpr void render_editor(const Model &model,
+    constexpr void render_editor(const Model &model, const Frame &frame,
                                  coretx::ui::Framebuffer &display) const noexcept {
         namespace tr = coretx::ui::tr;
         using menu_detail::row;
         const auto page = editor_.page();
+#if CORETX_MODUL_TANKMIX
+        if (page == coretx::ui::Page::tank) {
+            const auto selected = editor_.selected_row(model);
+            const auto first = selected >= menu_detail::visible_rows
+                                   ? selected - menu_detail::visible_rows + 1
+                                   : 0;
+            for (std::size_t i = first;
+                 (i < menu_detail::tank_fields.size()) && (i < first + menu_detail::visible_rows);
+                 ++i) {
+                const int y =
+                    menu_detail::list_y + static_cast<int>(i - first) * menu_detail::row_height;
+                const bool ink = i != selected;
+                row(display, i, selected, first, menu_detail::tank_fields[i]);
+                const int value = i == selected ? editor_.field_value(model)
+                                                : coretx::ui::detail::tank_value(model.tank, i);
+                if ((i == 0) || (i == 7))
+                    display.text(104, y, value ? tr::menu_yes : tr::menu_no, ink);
+                else if (i <= 4)
+                    coretx::ui::detail::indexed_label(display, 104, y, i <= 2 ? "I" : "CH",
+                                                      static_cast<std::size_t>(value), ink);
+                else
+                    display.number(127, y, value, ink);
+                if (editor_.editing() && (i == selected))
+                    display.small_text(96, y + 2, "*", ink);
+            }
+            return;
+        }
+#else
+        (void)frame;
+#endif
+        if (page == coretx::ui::Page::curves) {
+            editor_.render_curve(model, display, menu_detail::list_y, 40);
+            return;
+        }
         if (editor_.dialog() != coretx::ui::Dialog::none) {
             if (editor_.dialog() == coretx::ui::Dialog::actions) {
                 const auto selected = static_cast<std::size_t>(editor_.action());
@@ -1284,7 +1416,14 @@ class Menu {
                             static_cast<std::size_t>(page == coretx::ui::Page::inputs ? 9 : 8)) &&
                            (page != coretx::ui::Page::outputs))
                     display.text(120, y, value < 0 ? "^" : value > 0 ? "v" : "-", ink);
-                else
+                else if (((page == coretx::ui::Page::inputs) && (i == 11)) ||
+                         ((page == coretx::ui::Page::mixes) && (i == 10))) {
+                    if (value == 0)
+                        display.text(110, y, tr::radio_off, ink);
+                    else
+                        coretx::ui::detail::indexed_label(display, 110, y, "C",
+                                                          static_cast<std::size_t>(value - 1), ink);
+                } else
                     display.number(127, y, value, ink);
                 if (editor_.editing() && (i == selected))
                     display.small_text(88, y + 2, "*", ink);
@@ -1311,12 +1450,24 @@ class Menu {
                     if (page == coretx::ui::Page::inputs) {
                         draw(model.inputs[i]);
                     } else {
-                        draw(model.mixes[i]);
-                        display.text(96, y,
-                                     model.mixes[i].multiplex == Multiplex::add        ? "+="
-                                     : model.mixes[i].multiplex == Multiplex::multiply ? "*="
-                                                                                       : ":=",
-                                     ink);
+                        const auto &line = model.mixes[i];
+#if CORETX_MODUL_TANKMIX
+                        if (line.role != MixRole::manual) {
+                            coretx::ui::detail::indexed_label(display, 0, y, "CH", line.destination,
+                                                              ink);
+                            display.small_text(30, y + 2, menu_detail::tank_label(line.role), ink);
+                            display.small_text(
+                                104, y + 2, tank_mix_active(line.role, frame) ? "ON" : "OFF", ink);
+                        } else
+#endif
+                        {
+                            draw(line);
+                            display.text(96, y,
+                                         model.mixes[i].multiplex == Multiplex::add        ? "+="
+                                         : model.mixes[i].multiplex == Multiplex::multiply ? "*="
+                                                                                           : ":=",
+                                         ink);
+                        }
                     }
                 }
             }

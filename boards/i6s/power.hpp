@@ -25,6 +25,7 @@ class PowerButton {
         std::uint16_t hz{};
         DurationUs duration{};
     };
+    inline static constexpr DurationUs startup_hold_duration{3'000'000};
     inline static constexpr DurationUs hold_duration{1'500'000};
     inline static constexpr DurationUs tone_step{130'000};
     inline static constexpr std::array<std::uint16_t, 3> farewell{1'760, 1'320, 880};
@@ -139,13 +140,14 @@ template <typename Io, typename Assignment = Hardware> constexpr void release_po
     drive<Io>(Assignment::hold_power, false);
 }
 
-template <typename Io, typename Assignment = Hardware> constexpr void hold_power() noexcept {
+template <typename Io, typename Assignment = Hardware>
+constexpr void hold_power(const bool enabled = true) noexcept {
     using namespace registers;
     constexpr auto pin = Assignment::hold_power;
     Io::write(rcc_ahbenr, Io::read(rcc_ahbenr) | gpio_clock(pin));
     (void)Io::read(rcc_ahbenr);
-    // Load PB15 high before enabling its output driver to avoid a low latch pulse.
-    drive<Io>(pin, true);
+    // Load the latch level before enabling its output driver.
+    drive<Io>(pin, enabled);
     constexpr auto otyper = pin.port + offsetof(GPIO_TypeDef, OTYPER);
     constexpr auto moder = pin.port + offsetof(GPIO_TypeDef, MODER);
     Io::write(otyper, Io::read(otyper) & ~(std::uint32_t{GPIO_OTYPER_OT_0} << pin.index));

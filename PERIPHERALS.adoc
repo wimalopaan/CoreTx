@@ -464,6 +464,9 @@ An internal-flash DFU backup does *not* contain this EEPROM.
 
 *PB15* is the active-high power latch. *PB14* is the active-low common signal
 of the two power buttons.
+On cold startup, hold both buttons continuously for 3 s. Only then does CoreTX
+assert PB15 and start the LCD and RF initialization. Releasing either button
+restarts the delay; watchdog/software resets skip it.
 After boot the buttons must first be released.
 Hold both buttons for 1.5 s to request shutdown.
 CoreTX immediately disables RF, plays a falling three-tone signal
@@ -479,6 +482,7 @@ After installing CoreTX with startup DFU support, hold both rear buttons
 *SE/SF (PA9/PA10)* while switching on with the front power buttons.
 This enters ROM DFU without a bridge before watchdog/EEPROM initialization;
 PB15 remains high and GPIOB is not reset during handoff.
+The LCD retains `DFU-Bootloader` after the handoff; hardware boot-pin entry bypasses this display.
 See link:BUILDING.adoc#dfu-update[power-on DFU and recovery].
 
 === Interrupts and unused resources

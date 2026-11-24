@@ -7,7 +7,7 @@ Back up the original firmware and external EEPROM separately.
 Neutral channel output is not a guaranteed motor-off failsafe.
 
 Experimental firmware for the *Flysky FS-i6X and FS-i6S*, based on the STM32F072
-with 128 KiB flash and 16 KiB RAM. Current source firmware version: *5*
+with 128 KiB flash and 16 KiB RAM. Current source firmware version: *6*
 (`coretx/version.hpp`).
 
 == Goals
@@ -53,6 +53,21 @@ buttons SE/SF (i6S) while switching on to enter ROM DFU without opening the case
 
 == Extensions
 
+https://wimalopaan.github.io/CoreTx/[Open the browser simulator]
+(after deployment to GitHub Pages).
+With i6X/i6S profiles, physical controls, the real LCD,
+16 output bars and local EEPROM file import/export:
+link:BUILDING.adoc#web-simulator[building and GitHub Pages].
+Simulation runs locally in the browser; model data is not uploaded.
+
+* *Curves:* four piecewise linear five-point curves for inputs and mixers,
+  with editable inner X/all Y coordinates, a point editor and graphical preview.
+  Back up the EEPROM before updating: models saved in format 9 cannot be read
+  by older firmware.
+* *Tank mixer:* configurable drive/steering inputs and left/right outputs,
+  steering contribution (0..100%) and optional steering reversal with hysteresis.
+  Six visible read-only mixer lines are module-managed without logical switches;
+  inputs, curves and outputs remain independently editable.
 * *External CRSF:* bidirectional UART for channel output, telemetry and module
   configuration. Only one RF path is active at a time.
 * *MultiSwitch:* CRSF dashboards and SET4 commands for compatible receivers/modules.

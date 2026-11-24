@@ -16,6 +16,11 @@ foreach(language IN ITEMS en de)
     list(APPEND firmware_targets ${firmware})
 endforeach()
 
+add_executable(coretx-${board_name}-converter common/converter_main.cpp
+    "${PROJECT_SOURCE_DIR}/platform/stm32f072/startup.S")
+set_property(TARGET coretx-${board_name}-converter PROPERTY CORETX_CONVERTER TRUE)
+list(APPEND firmware_targets coretx-${board_name}-converter)
+
 if(CORETX_BOARD STREQUAL "I6S")
     add_executable(coretx-i6s-touch-trace EXCLUDE_FROM_ALL common/main.cpp common/rf_interrupts.cpp
         "${PROJECT_SOURCE_DIR}/platform/stm32f072/startup.S")
