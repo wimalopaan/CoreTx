@@ -132,6 +132,66 @@ or the equivalent `sanitize` command. Re-enable the simulator explicitly with
 `sanitize` adds AddressSanitizer and UndefinedBehaviorSanitizer.
 Host tests and simulator are not firmware images.
 
+[[web-simulator]]
+== Browser simulator
+
+The browser simulator runs the real sender application, menus, calibration and
+mixing on virtual i6X/i6S hardware. It combines physical controls, the actual
+128x64 LCD framebuffer and 16 output bars. New sessions have a four-channel model
+and calibrated virtual controls. The i6S supports LCD touch/mouse gestures and
+the real rear-button/pot setup navigation. All RF hardware is simulated.
+Stick centering preferences are saved separately per profile; control positions
+intentionally start neutral.
+
+Build both profiles with Emscripten 7.x, CMake >= 3.30 and Ninja, then serve them
+together over HTTP (not `file://`). These commands use Bash:
+
+[source,shell]
+----
+for profile in i6x i6s; do
+  emcmake cmake -S . -B "build-web-$profile" -G Ninja \
+    -DCORETX_WEB=ON -DCORETX_BOARD="${profile^^}" \
+    -DTRANSLATION=DE -DCMAKE_BUILD_TYPE=Release
+  cmake --build "build-web-$profile" --parallel 2
+done
+mkdir -p build-web-site
+cp platform/web/{index.html,simulator.js,simulator.css} build-web-site/
+cp build-web-i6x/coretx-i6x.{js,wasm} build-web-i6s/coretx-i6s.{js,wasm} build-web-site/
+python3 -m http.server 8080 --bind 127.0.0.1 --directory build-web-site
+----
+
+Open `http://127.0.0.1:8080`. Activate the Emscripten environment first if necessary;
+some distributions install its tools in `/usr/lib/emscripten` without updating
+`PATH`. This build does not require SDL3.
+
+Each profile automatically saves its native 16-KiB EEPROM image locally after
+edits and writes finish, including models, calibration and radio settings.
+Concurrent browser tabs cannot silently overwrite a changed saved image.
+Download important EEPROMs as files: browser storage is not a backup.
+Imports run as a separate test session; the previous browser image is preserved
+until explicitly replaced. Unsupported model versions enter firmware recovery
+instead of silently resetting data. No model data is uploaded.
+
+Import only complete native CoreTX EEPROM images for the selected board, not
+firmware BINs or the old SDL simulator's 1-/2-KiB state files. EEPROM downloads
+are *not flashable firmware*. Always calibrate real hardware separately; do not
+reuse virtual calibration values on a physical transmitter without verification.
+
+The `Browser simulator` Action builds/tests both profiles on pushes/PRs and
+uploads a website artifact. Version tags (`v...`) and manual runs additionally
+deploy to GitHub Pages. The same version tags build the firmware and attach
+`coretx-browser-simulator.zip` to the shared GitHub release. Extract the ZIP and
+serve it over HTTP; do not double-click `index.html`.
+First select *GitHub Actions* in the repository's
+*Settings -> Pages -> Build and deployment -> Source*, and allow release tags
+in the `github-pages` environment if required.
+The deployment URL is `https://wimalopaan.github.io/CoreTx/`.
+
+CTest includes the native engine tests. Run `node --test tests/web_controls_test.mjs`
+and `node tests/web_wasm_test.mjs build-web-i6x build-web-i6s` for the frontend
+helpers and compiled modules. CI additionally exercises the actual website
+using Playwright/Chromium.
+
 == Presets and CMake options
 
 [cols="1,2,3",options="header"]
@@ -154,6 +214,8 @@ The following are project options and their defaults when not overridden by a pr
 |Host ASan/UBSan with GCC/Clang; incompatible with STM32 firmware.
 |`CORETX_SIMULATOR` |`OFF`
 |POSIX SDL3 desktop simulator; enabled by the native presets.
+|`CORETX_WEB` |`OFF`
+|Emscripten browser simulator; a separate build directory per `CORETX_BOARD`.
 |`CORETX_STM32F072` |`OFF`
 |Bare-metal ARM firmware; enabled by the board presets, requires the ARM GCC toolchain.
 |`CORETX_ADC_COHERENT_SNAPSHOTS` |`OFF`
@@ -452,7 +514,10 @@ https://github.com/wimalopaan/CoreTx/releases[CoreTX releases] may lag the sourc
 version. The workflows `.github/workflows/i6x.yml` and `.github/workflows/i6s.yml`
 build the respective board's German/English firmware on pushes, pull requests
 and manual runs. Version tags matching `v[0-9]*` attach both boards' DE/EN BIN/HEX
-assets to the same GitHub release. Artifact names and filenames are board-specific;
+and converter assets to the same GitHub release. `.github/workflows/web.yml` builds
+the browser simulator from the same tag and publishes `coretx-browser-simulator.zip`
+alongside the firmware, plus the Pages website.
+Artifact names and filenames are board-specific;
 rerunning one board's workflow does not remove the other board's assets.
 Build locally when no matching release image exists.
 

@@ -53,6 +53,10 @@ buttons SE/SF (i6S) while switching on to enter ROM DFU without opening the case
 
 == Extensions
 
+Browser simulator with i6X/i6S profiles, physical controls, the real LCD,
+16 output bars and local EEPROM file import/export:
+link:BUILDING.adoc#web-simulator[building and GitHub Pages].
+
 * *Curves:* four piecewise linear five-point curves for inputs and mixers,
   with editable inner X/all Y coordinates, a point editor and graphical preview.
   Back up the EEPROM before updating: models saved in format 9 cannot be read

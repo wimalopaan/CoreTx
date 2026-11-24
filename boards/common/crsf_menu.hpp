@@ -369,7 +369,7 @@ class CrsfMenu {
                     std::min(parameter->unit.size(), md::value_columns - text.size() - 1);
                 numeric_text[text.size()] = ' ';
                 std::copy_n(parameter->unit.begin(), unit_size,
-                            numeric_text.begin() + text.size() + 1);
+                            numeric_text.begin() + static_cast<std::ptrdiff_t>(text.size()) + 1);
                 text = {numeric_text.data(), text.size() + 1 + unit_size};
             }
             text = md::head(text, md::value_columns);
@@ -401,7 +401,8 @@ class CrsfMenu {
             std::copy(prefix.begin(), prefix.end(), message.begin());
             message[prefix.size()] = ' ';
             message[prefix.size() + 1] = '#';
-            std::copy(id.begin(), id.end(), message.begin() + prefix.size() + 2);
+            std::copy(id.begin(), id.end(),
+                      message.begin() + static_cast<std::ptrdiff_t>(prefix.size()) + 2);
             display.small_text(0, md::help_y, {message.data(), prefix.size() + 2 + id.size()});
         } else
             display.small_text(0, md::help_y, help);

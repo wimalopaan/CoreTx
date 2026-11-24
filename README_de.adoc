@@ -53,6 +53,10 @@ Für spätere Updates beim Einschalten beide horizontalen Trimmungen nach innen
 
 == Erweiterungen
 
+Browser-Simulator mit i6X-/i6S-Profilen, Geberpanel, echtem LCD, 16 Kanalbalken
+und lokalem EEPROM-Dateiimport/-export:
+link:BUILDING_de.adoc#web-simulator[Bauen und GitHub Pages].
+
 * *Kurven:* vier stückweise lineare 5-Punkt-Kurven für Inputs und Mixer,
   mit bearbeitbaren inneren X-/allen Y-Werten, Punkteditor und grafischer Vorschau.
   Vor dem Update das EEPROM sichern: Im Format 9 gespeicherte Modelle sind mit

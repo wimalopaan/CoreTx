@@ -191,6 +191,9 @@ class Menu {
     [[nodiscard]] constexpr bool pending_model_edit() const noexcept {
         return (screen_ == MenuScreen::editor) && editor_.editing();
     }
+    [[nodiscard]] constexpr bool editing() const noexcept {
+        return editing_ || pending_model_edit();
+    }
     [[nodiscard]] constexpr RadioOutput requested_output() const noexcept {
         return static_cast<RadioOutput>(draft_value_);
     }

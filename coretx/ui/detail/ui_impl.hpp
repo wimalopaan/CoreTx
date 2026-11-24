@@ -333,7 +333,7 @@ constexpr void Framebuffer::clear() noexcept {
     if (clipped_page_ == (height / 8))
         pixels_.fill(0);
     else
-        std::fill_n(pixels_.begin() + static_cast<std::size_t>(clipped_page_) * width, width, 0);
+        std::fill_n(pixels_.begin() + static_cast<std::ptrdiff_t>(clipped_page_) * width, width, 0);
 }
 
 constexpr void Framebuffer::pixel(const int x, const int y, const bool ink) noexcept {

@@ -1,0 +1,113 @@
+name: Browser simulator
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v[0-9]*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mymindstorm/setup-emsdk@6ab9eb1bda2574c4ddb79809fc9247783eaf9021 # v14
+        with:
+          version: '7.0.1'
+      - name: Install build tools
+        run: python3 -m pip install --user 'cmake>=3.30,<5' ninja
+      - name: Build both virtual senders
+        run: |
+          for profile in i6x i6s; do
+            emcmake cmake -S . -B "build-web-$profile" -G Ninja \
+              -DCORETX_WEB=ON -DCORETX_BOARD="${profile^^}" \
+              -DTRANSLATION=DE -DCMAKE_BUILD_TYPE=Release
+            cmake --build "build-web-$profile" --parallel 2
+          done
+      - name: Test WebAssembly and controls
+        run: |
+          node --test tests/web_controls_test.mjs
+          node tests/web_wasm_test.mjs build-web-i6x build-web-i6s
+      - name: Assemble website
+        run: |
+          mkdir _site
+          cp platform/web/index.html platform/web/simulator.js platform/web/simulator.css _site/
+          cp build-web-i6x/coretx-i6x.{js,wasm} build-web-i6s/coretx-i6s.{js,wasm} _site/
+          touch _site/.nojekyll
+      - name: Test real browser
+        run: |
+          npm install --prefix deps/web-tests --no-save playwright
+          deps/web-tests/node_modules/.bin/playwright install --with-deps chromium
+          CORETX_PLAYWRIGHT="$PWD/deps/web-tests/node_modules/playwright/index.mjs" \
+            node tests/web_browser_test.mjs _site
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coretx-browser-simulator
+          path: _site/
+          if-no-files-found: error
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        with:
+          path: _site
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download browser simulator
+        uses: actions/download-artifact@v8
+        with:
+          name: coretx-browser-simulator
+          path: simulator
+      - name: Package browser simulator
+        working-directory: simulator
+        run: |
+          python3 -m zipfile -c ../coretx-browser-simulator.zip \
+            index.html simulator.js simulator.css \
+            coretx-i6x.js coretx-i6x.wasm coretx-i6s.js coretx-i6s.wasm
+      - name: Publish with firmware release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # The firmware workflows may create the shared release concurrently.
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "CoreTX $RELEASE_TAG" \
+              --notes "Experimental firmware for Flysky FS-i6X and FS-i6S (STM32F072). Board-specific German/English main firmware and English RF-OFF converter BIN/HEX images are attached, together with coretx-browser-simulator.zip from the same source version. Extract the simulator ZIP and serve it over HTTP; it is not flashable firmware. Back up firmware and EEPROM first. For native model formats 6/7/8, flash the matching board's converter, confirm conversion to format 9, then switch off and flash the matching main firmware. Converter images are maintenance tools, not transmitter firmware; unsupported or corrupt data requires recovery/reset. Never use another board's image. Flash start address: 0x08000000." \
+              || gh release view "$RELEASE_TAG" >/dev/null
+          fi
+          gh release upload "$RELEASE_TAG" coretx-browser-simulator.zip --clobber
+
+  deploy:
+    if: >-
+      always() && needs.build.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' || needs.release.result == 'success')
+    needs: [build, release]
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        id: deployment

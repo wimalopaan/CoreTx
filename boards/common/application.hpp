@@ -141,6 +141,10 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     [[nodiscard]] constexpr ApplicationFailure failure() const noexcept { return failure_; }
     [[nodiscard]] constexpr const Diagnostics &diagnostics() const noexcept { return diagnostics_; }
     [[nodiscard]] constexpr RadioOutput output() const noexcept { return output_; }
+    [[nodiscard]] constexpr bool storage_pending() const noexcept {
+        return !storage_.shutdown_ready() || menu_.editing() || input_menu_.editing() ||
+               (diagnostics_.phase() != CalibrationPhase::idle);
+    }
     [[nodiscard]] constexpr const telemetry::Pool &telemetry() const noexcept { return telemetry_; }
     [[nodiscard]] constexpr const Menu &menu() const noexcept { return menu_; }
     [[nodiscard]] const CrsfMenu &crsf_menu() const noexcept

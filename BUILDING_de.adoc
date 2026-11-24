@@ -140,6 +140,71 @@ Später den Simulator ausdrücklich mit `-DCORETX_SIMULATOR=ON` wieder einschalt
 `sanitize` ergänzt AddressSanitizer und UndefinedBehaviorSanitizer.
 Host-Tests und Simulator sind keine flashbare Senderfirmware.
 
+[[web-simulator]]
+== Browser-Simulator
+
+Der Browser-Simulator verwendet dieselbe Senderanwendung, Menues, Kalibrierung und
+Mischer wie die Firmware, mit virtueller i6X-/i6S-Hardware. Geberpanel, echtes
+128x64-LCD und 16 Kanalbalken bleiben gleichzeitig nutzbar. Neue Sitzungen erhalten
+ein Vierkanalmodell mit kalibrierten virtuellen Gebern. Das LCD der i6S laesst sich
+mit Maus oder Touch bedienen; Sendertasten und Langdruck-Tasten stehen zusaetzlich
+bereit. Die Ruecktaster SE/SF und die Potis verwenden im Setup dieselbe Navigation
+wie der reale Sender. Die HF-Ausgaenge sind ausschliesslich simuliert.
+Die Rueckstelloptionen der Knueppel werden getrennt von Modelldaten pro Profil
+gespeichert; Geberstellungen starten bewusst neutral.
+
+Mit Emscripten 7.x, CMake >= 3.30 und Ninja beide Profile bauen und gemeinsam
+ueber HTTP ausliefern; direktes Oeffnen per `file://` funktioniert nicht:
+
+[source,shell]
+----
+for profile in i6x i6s; do
+  emcmake cmake -S . -B "build-web-$profile" -G Ninja \
+    -DCORETX_WEB=ON -DCORETX_BOARD="${profile^^}" \
+    -DTRANSLATION=DE -DCMAKE_BUILD_TYPE=Release
+  cmake --build "build-web-$profile" --parallel 2
+done
+mkdir -p build-web-site
+cp platform/web/{index.html,simulator.js,simulator.css} build-web-site/
+cp build-web-i6x/coretx-i6x.{js,wasm} build-web-i6s/coretx-i6s.{js,wasm} build-web-site/
+python3 -m http.server 8080 --bind 127.0.0.1 --directory build-web-site
+----
+
+Dann `http://127.0.0.1:8080` oeffnen. Die Kommandos verwenden Bash.
+Falls das Emscripten-Paket seine Werkzeuge nicht in `PATH` eintraegt, zuerst dessen
+Umgebung aktivieren beziehungsweise beispielsweise `/usr/lib/emscripten` zu `PATH`
+hinzufuegen. SDL3 wird fuer diesen Build nicht benoetigt.
+
+Modelle, Kalibrierung und Sendereinstellungen werden pro Senderprofil als natives
+16-KiB-EEPROM-Abbild im lokalen Browser-Speicher gesichert, erst nach Abschluss
+offener Edits und Schreibvorgaenge. Weitere Tabs duerfen diesen Stand nicht
+unbemerkt ueberschreiben. Browser-Speicher ist kein Backup: wichtige Daten ueber
+*EEPROM herunterladen* sichern. Beim Import bleibt der bisherige Browser-Stand
+erhalten, bis der gepruefte Teststand ausdruecklich uebernommen wird.
+Unbekannte Modellformate fuehren zum normalen Wiederherstellungsdialog, nicht
+zu einem automatischen Reset. Es werden keine Modelldaten hochgeladen.
+
+Nur vollstaendige native CoreTX-EEPROM-Abbilder des passenden Senderprofils
+importieren, keine Firmware-BINs und keine 1-/2-KiB-Dateien des bisherigen
+SDL-Simulators. Ein EEPROM-Download ist *keine flashbare Firmware*. Physische
+Sender immer separat kalibrieren; virtuelle Standardwerte nicht ungeprueft
+auf Hardware uebertragen.
+
+Die Action `Browser simulator` baut und prueft beide Profile auf Push/PR und
+stellt die Website als Artefakt bereit. Bei `v...`-Tags sowie manuellem Start
+wird sie auch nach GitHub Pages veroeffentlicht. Derselbe Versions-Tag startet
+die Firmware-Builds; der Simulator wird als `coretx-browser-simulator.zip`
+an deren gemeinsames GitHub-Release angehaengt. ZIP entpacken und ueber HTTP
+starten, nicht per Doppelklick auf `index.html`. Einmalig im Repository unter
+*Settings -> Pages -> Build and deployment -> Source* die Quelle *GitHub Actions*
+auswaehlen und gegebenenfalls das Environment `github-pages` fuer Release-Tags
+freigeben. Die Adresse lautet `https://wimalopaan.github.io/CoreTx/`.
+
+Native Engine-Tests laufen mit CTest. Die WebAssembly-/Gebertests lassen sich mit
+`node tests/web_wasm_test.mjs build-web-i6x build-web-i6s` und
+`node --test tests/web_controls_test.mjs` starten. Die Action prueft zusaetzlich
+die reale Browserbedienung mit Playwright/Chromium.
+
 == Presets und CMake-Optionen
 
 [cols="1,2,3",options="header"]
@@ -162,6 +227,8 @@ Die folgenden Projektoptionen gelten ohne Überschreibung durch Preset/Cache:
 |Host-ASan/UBSan mit GCC/Clang; nicht mit STM32-Firmware kombinierbar.
 |`CORETX_SIMULATOR` |`OFF`
 |POSIX-SDL3-Desktop-Simulator; in den nativen Presets eingeschaltet.
+|`CORETX_WEB` |`OFF`
+|Browser-Simulator mit Emscripten; separates Build-Verzeichnis pro `CORETX_BOARD`.
 |`CORETX_STM32F072` |`OFF`
 |Bare-Metal-ARM-Firmware; in den Board-Presets eingeschaltet, benötigt ARM-GCC-Toolchain.
 |`CORETX_ADC_COHERENT_SNAPSHOTS` |`OFF`
@@ -466,7 +533,9 @@ Die https://github.com/wimalopaan/CoreTx/releases[CoreTX-Releases] können hinte
 der Quellcodeversion zurückliegen. `.github/workflows/i6x.yml` und
 `.github/workflows/i6s.yml` bauen jeweils deutsche/englische Firmware bei Pushes,
 Pull Requests und manuellen Starts. Versionstags passend zu `v[0-9]*` hängen
-die DE/EN-BIN/HEX-Dateien beider Sender an dasselbe GitHub-Release.
+die DE/EN-BIN/HEX-Dateien und Konverter beider Sender an dasselbe GitHub-Release.
+`.github/workflows/web.yml` baut zum selben Tag den Browser-Simulator und
+veroeffentlicht dort `coretx-browser-simulator.zip` sowie die Pages-Website.
 Artefaktnamen und Dateinamen sind boardspezifisch; ein erneuter Workflow-Lauf
 eines Boards entfernt nicht die Dateien des anderen Boards.
 Lokal bauen, solange kein passendes Release-Abbild vorliegt.
