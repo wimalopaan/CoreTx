@@ -53,9 +53,12 @@ buttons SE/SF (i6S) while switching on to enter ROM DFU without opening the case
 
 == Extensions
 
-Browser simulator with i6X/i6S profiles, physical controls, the real LCD,
+https://wimalopaan.github.io/CoreTx/[Open the browser simulator]
+(after deployment to GitHub Pages).
+With i6X/i6S profiles, physical controls, the real LCD,
 16 output bars and local EEPROM file import/export:
 link:BUILDING.adoc#web-simulator[building and GitHub Pages].
+Simulation runs locally in the browser; model data is not uploaded.
 
 * *Curves:* four piecewise linear five-point curves for inputs and mixers,
   with editable inner X/all Y coordinates, a point editor and graphical preview.

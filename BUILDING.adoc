@@ -185,7 +185,7 @@ serve it over HTTP; do not double-click `index.html`.
 First select *GitHub Actions* in the repository's
 *Settings -> Pages -> Build and deployment -> Source*, and allow release tags
 in the `github-pages` environment if required.
-The deployment URL is `https://wimalopaan.github.io/CoreTx/`.
+After deployment, https://wimalopaan.github.io/CoreTx/[open the simulator on GitHub Pages].
 
 CTest includes the native engine tests. Run `node --test tests/web_controls_test.mjs`
 and `node tests/web_wasm_test.mjs build-web-i6x build-web-i6s` for the frontend

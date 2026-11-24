@@ -198,7 +198,8 @@ an deren gemeinsames GitHub-Release angehaengt. ZIP entpacken und ueber HTTP
 starten, nicht per Doppelklick auf `index.html`. Einmalig im Repository unter
 *Settings -> Pages -> Build and deployment -> Source* die Quelle *GitHub Actions*
 auswaehlen und gegebenenfalls das Environment `github-pages` fuer Release-Tags
-freigeben. Die Adresse lautet `https://wimalopaan.github.io/CoreTx/`.
+freigeben. Danach ist der
+https://wimalopaan.github.io/CoreTx/[Browser-Simulator auf GitHub Pages] erreichbar.
 
 Native Engine-Tests laufen mit CTest. Die WebAssembly-/Gebertests lassen sich mit
 `node tests/web_wasm_test.mjs build-web-i6x build-web-i6s` und
