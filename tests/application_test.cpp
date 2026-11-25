@@ -2341,6 +2341,14 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
     };
     if constexpr (!Test::Board::Input::touch)
         hold();
+    if constexpr (Test::Board::Input::touch) {
+        // Swipe left is Back: it first leaves the CRSF parameter list, then the page changes.
+        if (c.crsf_config.mode() == coretx::crsf::config::Mode::parameters) {
+            touch(64, 32, true);
+            touch(64, 32, true, s::Gesture::left);
+            touch(64, 32, false);
+        }
+    }
     next();
     if ((app.diagnostics().page() != 0) || app.crsf_menu().visible() ||
         (c.crsf_config.mode() != coretx::crsf::config::Mode::closed))

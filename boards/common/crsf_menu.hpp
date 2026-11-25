@@ -109,6 +109,12 @@ class CrsfMenu {
         editing_ = false;
         client.close();
     }
+    // Device list without an open edit: Back leaves the page to the dashboard instead.
+    [[nodiscard]] bool at_device_root(const CrsfClient &client) const noexcept {
+        return visible_ && !editing_ &&
+               (client.view_mode() != coretx::crsf::config::Mode::parameters) &&
+               (client.command() == coretx::crsf::config::Command::idle);
+    }
     // Touch Back: at the device root it only leaves edits, so the embedded dashboard stays.
     void back(CrsfClient &client, const TimestampUs now) noexcept {
         namespace cfg = coretx::crsf::config;

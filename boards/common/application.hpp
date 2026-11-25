@@ -574,7 +574,8 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         if (!dashboard_touch())
             return false;
         if constexpr (has_crsf_ui) {
-            if (crsf_dashboard_page() && ((key != Key::ok_long) || crsf_.menu.editing())) {
+            if (crsf_dashboard_page() && ((key != Key::ok_long) || crsf_.menu.editing()) &&
+                !((key == Key::cancel) && crsf_.menu.at_device_root(ExternalRFModule::config()))) {
                 if (const auto error = crsf_.unavailable(output_ == RadioOutput::external)) {
                     if (key != Key::none)
                         radio_message_ = error;
