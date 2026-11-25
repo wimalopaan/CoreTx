@@ -95,18 +95,6 @@ template <typename Touch, typename SetupControls = NoSetupControls> class TouchI
     {
         return controls_.buttons();
     }
-    [[nodiscard]] constexpr std::optional<i6s::TouchPoint> tapped() const noexcept {
-        if constexpr (features::multiswitch)
-            if (state_.multiswitch_active)
-                return std::nullopt;
-        return state_.navigation.tapped();
-    }
-    [[nodiscard]] constexpr std::optional<i6s::TouchPoint> pressed() const noexcept {
-        if constexpr (features::multiswitch)
-            if (state_.multiswitch_active)
-                return std::nullopt;
-        return state_.navigation.pressed();
-    }
     [[nodiscard]] constexpr bool ok_held() const noexcept { return false; }
     [[nodiscard]] constexpr std::optional<std::size_t> held_switch() const noexcept {
         if constexpr (features::multiswitch)

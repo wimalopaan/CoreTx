@@ -15,7 +15,7 @@ class Buzzer {
   public:
     Buzzer() = delete;
 
-    static void initialize() noexcept {
+    static void initialize(const std::uint32_t source_hz = stm32f072::cpu_hz) noexcept {
         using namespace stm32f072::registers;
         Io::write(rcc_ahbenr, Io::read(rcc_ahbenr) | gpio_clock(Output));
         Io::write(Peripheral::enable_register,
@@ -24,7 +24,7 @@ class Buzzer {
         configure_alternate<Io>(Output, Peripheral::alternate(Output), false);
         write(offsetof(TIM_TypeDef, CR1), 0);
         write(offsetof(TIM_TypeDef, DIER), 0);
-        write(offsetof(TIM_TypeDef, PSC), stm32f072::cpu_hz / timer_hz - 1U);
+        write(offsetof(TIM_TypeDef, PSC), source_hz / timer_hz - 1U);
         write(offsetof(TIM_TypeDef, CCMR1), TIM_CCMR1_OC1M_1 | TIM_CCMR1_OC1M_2 | TIM_CCMR1_OC1PE);
         write(offsetof(TIM_TypeDef, CCER), TIM_CCER_CC1P);
         if constexpr (Peripheral::main_output)

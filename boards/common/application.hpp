@@ -391,7 +391,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
                 context.momentary = diagnostics_.model().multiswitch[*slot].momentary;
             }
         }
-        context.taps = !context.active && crsf_dashboard_page();
+        context.taps = !context.active && (crsf_dashboard_page() || menu_.visible());
         if constexpr (requires { input_.rear_buttons(); }) {
             context.jog_enabled = diagnostics_.valid() && !input_menu_.visible() &&
                                   (diagnostics_.phase() == CalibrationPhase::idle);
@@ -573,22 +573,21 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
                                                         const TimestampUs now) noexcept {
         if (!dashboard_touch())
             return false;
-        const auto tap = input_.tapped();
-        if (!tap && ((key == Key::ok) || (key == Key::cancel))) {
-            diagnostics_.handle(key == Key::cancel ? Key::down : Key::up);
-            return true;
-        }
         if constexpr (has_crsf_ui) {
-            if (crsf_dashboard_page() && (key != Key::ok_long)) {
+            if (crsf_dashboard_page() && ((key != Key::ok_long) || crsf_.menu.editing())) {
                 if (const auto error = crsf_.unavailable(output_ == RadioOutput::external)) {
                     if (key != Key::none)
                         radio_message_ = error;
-                } else if (tap)
-                    crsf_.menu.tap(tap->x, tap->y, ExternalRFModule::config(), now);
+                } else if (key == Key::cancel)
+                    crsf_.menu.back(ExternalRFModule::config(), now);
                 else
                     crsf_.menu.handle(key, ExternalRFModule::config(), now);
                 return true;
             }
+        }
+        if ((key == Key::ok) || (key == Key::cancel)) {
+            diagnostics_.handle(key == Key::cancel ? Key::down : Key::up);
+            return true;
         }
         return (key == Key::up) || (key == Key::down);
     }
@@ -815,7 +814,8 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             bool binding{};
             if constexpr (has_internal_rf)
                 binding = internal_.session().binding();
-            menu_.render(storage_.models, diagnostics_, output_, framebuffer_, binding);
+            menu_.render(storage_.models, diagnostics_, output_, framebuffer_, binding,
+                         Input::touch);
             const auto input_error = input_notice();
             if (const auto notice = input_error != nullptr ? input_error : radio_notice())
                 draw_notice(notice);
@@ -845,12 +845,6 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     constexpr void handle_recovery(Key key, const TimestampUs now) noexcept {
         if ((recovery_ == Recovery::resetting) || (recovery_ == Recovery::power_off))
             return;
-        if constexpr (Input::touch) {
-            if (const auto point = input_.tapped(); point && (point->y >= 30) && (point->y < 54)) {
-                recovery_selected_ = point->y >= 42;
-                key = Key::ok;
-            }
-        }
         if ((key == Key::up) || (key == Key::down))
             recovery_selected_ = key == Key::down;
         else if ((key == Key::cancel) || (key == Key::cancel_long)) {
@@ -923,18 +917,13 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     }
     constexpr void render_crsf() noexcept {
         const bool dashboard = crsf_dashboard_page();
-        const char *const navigation_help =
-            !dashboard                     ? nullptr
-            : Input::touch                 ? coretx::ui::tr::crsf_dashboard_touch_help
-            : !crsf_.dashboard_interacting ? coretx::ui::tr::crsf_dashboard_help
-                                           : coretx::ui::tr::crsf_dashboard_active_help;
+        const char *const navigation_help = !dashboard ? nullptr
+                                            : !crsf_.dashboard_interacting
+                                                ? coretx::ui::tr::crsf_dashboard_help
+                                                : coretx::ui::tr::crsf_dashboard_active_help;
         crsf_.menu.render(ExternalRFModule::config(), framebuffer_, Board::now_us(),
                           dashboard && crsf_.dashboard_interacting, navigation_help,
                           dashboard && Input::touch);
-        if constexpr (Input::touch) {
-            if (const auto point = input_.pressed(); point && dashboard)
-                crsf_.menu.highlight(point->x, point->y, ExternalRFModule::config(), framebuffer_);
-        }
         const auto input_error = input_notice();
         const auto notice = dashboard && (output_ != RadioOutput::external)
                                 ? coretx::ui::tr::crsf_select_external

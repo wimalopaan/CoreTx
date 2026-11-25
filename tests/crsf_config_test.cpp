@@ -743,54 +743,32 @@ void dashboard_touch_rows_and_transactions() {
         link.entry(id, number(0));
     }
     const auto now = coretx::TimestampUs{link.clock};
-    menu.tap(70, 56, link.client, now);
-    require(!menu.editing(), "touching footer cannot activate a row");
-    menu.tap(70, 33, link.client, now);
-    require(menu.editing(), "tap directly activates the third visible row");
+    menu.handle(Key::down, link.client, now);
+    menu.handle(Key::down, link.client, now);
+    menu.handle(Key::ok, link.client, now);
+    require(menu.editing(), "OK edits the selected row");
     menu.handle(Key::up, link.client, now);
-    menu.tap(10, 4, link.client, now);
-    require(!menu.editing() && !link.client.pending_write(),
-            "visible Back discards an unconfirmed touch edit");
-    menu.tap(70, 23, link.client, now);
+    menu.handle(Key::cancel, link.client, now);
+    require(!menu.editing() && !link.client.pending_write(), "Back discards an unconfirmed edit");
     menu.handle(Key::up, link.client, now);
     coretx::ui::Framebuffer display{};
-    menu.render(link.client, display, now, false, coretx::ui::tr::crsf_dashboard_touch_help, true);
-    require(display.pixel_at(0, 0) && display.pixel_at(31, 9) && display.pixel_at(96, 0) &&
-                display.pixel_at(127, 9),
-            "touch header exposes Back and edit confirmation hit regions");
-    coretx::ui::Framebuffer buttons{};
-    buttons.rectangle(0, 0, 32, 10);
-    buttons.small_text(2, 2, coretx::ui::tr::touch_back, false);
-    buttons.rectangle(96, 0, 32, 10);
-    buttons.small_text(106, 2, "OK", false);
-    for (int y = 0; y < 10; ++y)
+    menu.render(link.client, display, now, false, coretx::ui::tr::crsf_dashboard_help, true);
+    coretx::ui::Framebuffer footer{};
+    footer.compact(false);
+    footer.clear();
+    footer.small_text_centered(0, 64, 58, coretx::ui::tr::touch_edit_ok);
+    footer.small_text_centered(64, 64, 58, coretx::ui::tr::touch_back);
+    for (int y = 56; y < 64; ++y)
         for (int x = 0; x < 128; ++x)
-            if ((x < 32) || (x >= 96))
-                require(display.pixel_at(x, y) == buttons.pixel_at(x, y),
-                        "touch button labels contrast with their filled backgrounds");
-    const auto highlighted = [&](const std::uint8_t x, const std::uint8_t y, const int top,
-                                 const int left, const int width) {
-        auto pressed = display;
-        menu.highlight(x, y, link.client, pressed);
-        auto expected = display;
-        if (width != 0)
-            expected.invert(left, top, width, 10);
-        for (int py = 0; py < 64; ++py)
-            for (int px = 0; px < 128; ++px)
-                if (pressed.pixel_at(px, py) != expected.pixel_at(px, py))
-                    return false;
-        return (width == 0) || (pressed.pixel_at(left, top) != display.pixel_at(left, top));
-    };
-    require(highlighted(10, 4, 0, 0, 32) && highlighted(110, 4, 0, 96, 32) &&
-                highlighted(70, 33, coretx::firmware::crsf_menu_detail::list_y - 1 + 20, 0, 128) &&
-                highlighted(70, 56, 0, 0, 0),
-            "touch feedback inverts exactly the element a tap would activate");
-    require(highlighted(37, 4, 0, 0, 32) && highlighted(34, 13, 0, 0, 32) &&
-                highlighted(95, 13, 0, 96, 32) &&
-                highlighted(60, 13, coretx::firmware::crsf_menu_detail::list_y - 1, 0, 128),
-            "button hit areas extend beside and below the drawn boxes");
-    menu.tap(95, 13, link.client, now);
-    require(link.client.pending_write(), "visible OK confirms the selected field");
+            require(display.pixel_at(x, y) == footer.pixel_at(x, y),
+                    "touch footer labels the OK and Back halves");
+    coretx::ui::Framebuffer plain{};
+    menu.render(link.client, plain, now, false, coretx::ui::tr::crsf_dashboard_help, false);
+    menu.handle(Key::ok, link.client, now);
+    menu.handle(Key::up, link.client, now);
+    menu.handle(Key::ok_long, link.client, now);
+    require(link.client.pending_write(), "OK confirms the selected field");
+
     menu.suspend(link.client);
     require(!menu.visible() && link.client.pending_write(),
             "horizontal page navigation preserves a queued parameter write");
@@ -806,16 +784,16 @@ void dashboard_touch_rows_and_transactions() {
     require(link.client.mode() == cfg::Mode::closed,
             "configuration polling stops after the background transaction finishes");
     menu.resume(link.client, coretx::TimestampUs{link.clock});
-    menu.tap(10, 4, link.client, coretx::TimestampUs{link.clock});
+    menu.back(link.client, coretx::TimestampUs{link.clock});
     require(menu.visible() && link.client.view_mode() == cfg::Mode::devices,
             "Back at the parameter root returns to device selection");
-    menu.tap(10, 4, link.client, coretx::TimestampUs{link.clock});
+    menu.back(link.client, coretx::TimestampUs{link.clock});
     require(menu.visible(), "Back at the device root cannot strand the embedded dashboard");
     link.start(1);
     link.entry(0, folder(0, {1}));
     link.request(1);
     link.entry(1, command(0));
-    menu.tap(70, 13, link.client, coretx::TimestampUs{link.clock});
+    menu.handle(Key::ok, link.client, coretx::TimestampUs{link.clock});
     const auto running = link.client.command();
     menu.suspend(link.client);
     menu.resume(link.client, coretx::TimestampUs{link.clock});

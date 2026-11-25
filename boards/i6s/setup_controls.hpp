@@ -31,6 +31,7 @@ class SetupNavigation {
         if (!active_ || !enabled) {
             blocked_ = true;
             jog_armed_ = false;
+            jog_held_ = false;
             return Key::none;
         }
         if ((now - blink_at_) >= 250'000_us) {
@@ -54,15 +55,28 @@ class SetupNavigation {
         }
         if (!jog_enabled) {
             jog_armed_ = false;
+            jog_held_ = false;
             return key;
         }
         const int direction = vra > 300 ? 1 : vra < -300 ? -1 : vrb > 300 ? 1 : vrb < -300 ? -1 : 0;
-        if (direction == 0)
+        if (direction == 0) {
             jog_armed_ = true;
-        else {
-            if (jog_armed_ && (key == Key::none))
-                key = direction > 0 ? Key::down : Key::up;
+            jog_held_ = false;
+            return key;
+        }
+        const auto step = direction > 0 ? Key::down : Key::up;
+        if (jog_armed_) {
             jog_armed_ = false;
+            if (key == Key::none) {
+                key = step;
+                jog_held_ = true;
+                jog_at_ = now;
+                jog_repeat_at_ = now;
+            }
+        } else if (jog_held_ && (key == Key::none) && ((now - jog_at_) >= jog_repeat_delay) &&
+                   ((now - jog_repeat_at_) >= jog_repeat_period)) {
+            key = step;
+            jog_repeat_at_ = now;
         }
         return key;
     }
@@ -70,9 +84,11 @@ class SetupNavigation {
     [[nodiscard]] constexpr bool led_on() const noexcept { return led_on_; }
 
   private:
-    TimestampUs changed_at_{}, pressed_at_{}, blink_at_{};
+    inline static constexpr DurationUs jog_repeat_delay{400'000};
+    inline static constexpr DurationUs jog_repeat_period{100'000};
+    TimestampUs changed_at_{}, pressed_at_{}, blink_at_{}, jog_at_{}, jog_repeat_at_{};
     std::uint8_t candidate_{}, held_{};
-    bool active_{}, blocked_{true}, long_sent_{}, jog_armed_{}, led_on_{true};
+    bool active_{}, blocked_{true}, long_sent_{}, jog_armed_{}, jog_held_{}, led_on_{true};
 };
 
 template <typename Io, typename Assignment = Hardware> class SetupControls {

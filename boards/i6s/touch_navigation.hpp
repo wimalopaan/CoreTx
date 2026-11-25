@@ -23,9 +23,6 @@ struct TouchSample {
     bool synthetic{};
 };
 
-struct TouchPoint {
-    std::uint8_t x{}, y{};
-};
 // LCD pixels; the panel is twice as wide as tall, so vertical strokes need less travel.
 inline constexpr int drag_x = 12, drag_y = 10;
 // Quick strokes are accepted with shorter travel when one axis clearly dominates.
@@ -33,10 +30,13 @@ inline constexpr int flick_x = 8, flick_y = 7;
 // Finger jitter below this travel never cancels a tap; a dominant flick still takes precedence.
 inline constexpr int tap_slop = 12;
 inline constexpr DurationUs flick_time{300'000};
-// Touch buttons (Back/OK) occupy the top rows. Contacts there are distorted by the panel edge, so
-// a stroke starting above this line stays a tap until it exceeds tap_slop; flicks and short drags
-// never replace a button tap.
-inline constexpr int button_bar_height = 15;
+// Header and footer rows are touch keys, as on Ferrox-RC: a tap in the header is Up, a tap in the
+// footer is OK (left half) or Back (right half). Taps in the body never select anything, so list
+// rows cannot be activated by accident. Contacts in these rows are distorted by the panel edge, so
+// a stroke starting there stays a tap until it exceeds tap_slop.
+inline constexpr int header_height = 15;
+inline constexpr int footer_y = 46;
+inline constexpr int footer_split = 64;
 
 [[nodiscard]] constexpr Key gesture_key(const Gesture gesture) noexcept {
     switch (gesture) {
@@ -90,8 +90,8 @@ struct TouchStroke {
         moved =
             moved || (dx >= tap_slop) || (dx <= -tap_slop) || (dy >= tap_slop) || (dy <= -tap_slop);
     }
-    [[nodiscard]] constexpr bool on_button_bar() const noexcept {
-        return start_y < button_bar_height;
+    [[nodiscard]] constexpr bool on_touch_bar() const noexcept {
+        return (start_y < header_height) || (start_y >= footer_y);
     }
     [[nodiscard]] constexpr Key drag(const TouchSample &sample) const noexcept {
         return swipe_key(sample, start_x, start_y);
@@ -109,6 +109,16 @@ struct TouchStroke {
     std::uint8_t start_x{}, start_y{}, last_x{}, last_y{};
     bool moved{};
 };
+
+[[nodiscard]] constexpr Key tap_key(const TouchStroke &stroke) noexcept {
+    if (stroke.start_y < header_height) {
+        return Key::up;
+    }
+    if (stroke.start_y >= footer_y) {
+        return stroke.start_x < footer_split ? Key::ok : Key::cancel;
+    }
+    return Key::none;
+}
 
 [[nodiscard]] constexpr bool decode_touch(const std::array<std::uint8_t, 7> &bytes,
                                           TouchSample &sample) noexcept {
@@ -160,20 +170,9 @@ class TouchNavigation {
         *this = {};
         blocked_ = true;
     }
-    [[nodiscard]] constexpr std::optional<TouchPoint> tapped() const noexcept {
-        return tapped_ ? std::optional<TouchPoint>{{stroke_.start_x, stroke_.start_y}}
-                       : std::nullopt;
-    }
-    // A contact that can still become a tap, for immediate visual feedback.
-    [[nodiscard]] constexpr std::optional<TouchPoint> pressed() const noexcept {
-        return active_ && !emitted_ && !stroke_.moved
-                   ? std::optional<TouchPoint>{{stroke_.start_x, stroke_.start_y}}
-                   : std::nullopt;
-    }
 
     [[nodiscard]] constexpr Key service(const TimestampUs now, const TouchSample *sample,
                                         const bool healthy, const bool taps = false) noexcept {
-        tapped_ = false;
         const bool expired = active_ && ((now - last_packet_) >= release_timeout_us);
         // Consume a driver-qualified release before the stale-contact guard discards the tap.
         const bool inferred_release =
@@ -211,16 +210,15 @@ class TouchNavigation {
             if (emitted_)
                 return Key::none;
             const bool endpoint = sample->position_valid && !sample->synthetic;
-            const bool button = taps && stroke_.on_button_bar() && !stroke_.moved;
-            auto key = button ? Key::none : stroke_.release(*sample, endpoint ? now : previous);
+            const bool bar = taps && stroke_.on_touch_bar() && !stroke_.moved;
+            auto key = bar ? Key::none : stroke_.release(*sample, endpoint ? now : previous);
             if (taps && (key == Key::none) && !stroke_.moved &&
                 (!sample->synthetic || inferred_release)) {
-                tapped_ = true;
-                key = Key::ok;
+                key = tap_key(stroke_);
             }
             return key;
         }
-        if (!emitted_ && !(taps && stroke_.on_button_bar() && !stroke_.moved)) {
+        if (!emitted_ && !(taps && stroke_.on_touch_bar() && !stroke_.moved)) {
             if (const auto key = stroke_.drag(*sample); key != Key::none) {
                 emitted_ = true;
                 return key;
@@ -242,7 +240,6 @@ class TouchNavigation {
     bool active_{};
     bool emitted_{};
     bool blocked_{};
-    bool tapped_{};
 };
 
 } // namespace coretx::firmware::i6s

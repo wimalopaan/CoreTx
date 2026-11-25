@@ -58,6 +58,7 @@ namespace tr = coretx::ui::tr;
 inline constexpr std::size_t visible_rows = 4;
 inline constexpr int list_y = 12;
 inline constexpr int row_height = 10;
+inline constexpr int footer_split = 64;
 inline constexpr std::array input_fields{tr::menu_source,     tr::menu_weight,     tr::menu_expo,
                                          tr::menu_offset,     tr::menu_trim,       tr::menu_side,
                                          tr::menu_invert,     tr::menu_target,     tr::menu_switch,
@@ -800,7 +801,7 @@ class Menu {
     template <typename Store>
     constexpr void render(const Store &store, const Diagnostics &diagnostics,
                           const RadioOutput output, coretx::ui::Framebuffer &display,
-                          const bool binding = false) const noexcept {
+                          const bool binding = false, const bool touch = false) const noexcept {
         namespace tr = coretx::ui::tr;
         using menu_detail::row;
         display.clear();
@@ -1014,23 +1015,29 @@ class Menu {
                                           ? store.entries()[model_slot_].name.data()
                                           : tr::menu_empty)
                                    : store.data().name.data());
-        display.small_text(
-            0, 58,
-            notice_ != nullptr                  ? notice_
-            : store.busy() || !store.editable() ? store.message()
+        if (touch && (notice_ == nullptr) && !store.busy() && store.editable()) {
+            display.small_text_centered(0, menu_detail::footer_split, 58, tr::touch_select_ok);
+            display.small_text_centered(menu_detail::footer_split,
+                                        coretx::ui::Framebuffer::width - menu_detail::footer_split,
+                                        58, tr::touch_back);
+        } else
+            display.small_text(
+                0, 58,
+                notice_ != nullptr                  ? notice_
+                : store.busy() || !store.editable() ? store.message()
 #if CORETX_MODUL_TANKMIX
-            : managed ? tr::tank_readonly
-            : (screen_ == MenuScreen::editor) && (editor_.page() == coretx::ui::Page::tank)
-                ? (editor_.notice() ? editor_.notice() : tr::tank_disable_help)
+                : managed ? tr::tank_readonly
+                : (screen_ == MenuScreen::editor) && (editor_.page() == coretx::ui::Page::tank)
+                    ? (editor_.notice() ? editor_.notice() : tr::tank_disable_help)
 #endif
-            : screen_ == MenuScreen::rename ? tr::menu_name_help
-            : (screen_ == MenuScreen::multiswitch_button) && editing_ && (selected_ == 0)
-                ? tr::menu_name_help
-            : screen_ == MenuScreen::logical_editor ? tr::menu_logical_help
-            : (screen_ == MenuScreen::editor) && (editor_.page() == coretx::ui::Page::curves)
-                ? tr::menu_curve_help
-            : (screen_ == MenuScreen::editor) && !details_ ? tr::menu_hold_help
-                                                           : tr::menu_help);
+                : screen_ == MenuScreen::rename ? tr::menu_name_help
+                : (screen_ == MenuScreen::multiswitch_button) && editing_ && (selected_ == 0)
+                    ? tr::menu_name_help
+                : screen_ == MenuScreen::logical_editor ? tr::menu_logical_help
+                : (screen_ == MenuScreen::editor) && (editor_.page() == coretx::ui::Page::curves)
+                    ? tr::menu_curve_help
+                : (screen_ == MenuScreen::editor) && !details_ ? tr::menu_hold_help
+                                                               : tr::menu_help);
     }
 
   private:

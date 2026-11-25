@@ -286,20 +286,18 @@ constexpr bool flicks() {
         int dx, dy;
         std::uint32_t lift_ms;
         Key key;
-        bool tap;
     };
+    // Taps in the body select nothing; only the header and footer rows produce keys.
     constexpr std::array cases{
-        Case{9, 0, 150, Key::ok, false},   Case{-8, 0, 300, Key::cancel, false},
-        Case{0, 7, 100, Key::down, false}, Case{0, -7, 100, Key::up, false},
-        Case{9, 0, 400, Key::none, true},  Case{9, 7, 100, Key::none, true},
-        Case{7, 0, 100, Key::none, true},
+        Case{9, 0, 150, Key::ok},   Case{-8, 0, 300, Key::cancel}, Case{0, 7, 100, Key::down},
+        Case{0, -7, 100, Key::up},  Case{9, 0, 400, Key::none},    Case{9, 7, 100, Key::none},
+        Case{7, 0, 100, Key::none},
     };
     for (const std::uint32_t base : {0U, 0xFFFF0000U}) {
         for (const auto &c : cases) {
             hw::TouchNavigation nav{};
             hw::TouchSample sample{0, 0, 64, 32, 1, hw::Gesture::none, true};
-            if ((nav.service(TimestampUs{base}, &sample, true, true) != Key::none) ||
-                !nav.pressed() || (nav.pressed()->x != 64))
+            if (nav.service(TimestampUs{base}, &sample, true, true) != Key::none)
                 return false;
             // The driver keeps polling a held contact well within the stale-contact deadline.
             for (std::uint32_t ms = 100; ms + 100 <= c.lift_ms; ms += 100)
@@ -307,42 +305,43 @@ constexpr bool flicks() {
                     return false;
             sample.x = static_cast<std::uint8_t>(64 + c.dx);
             sample.y = static_cast<std::uint8_t>(32 + c.dy);
-            if ((nav.service(TimestampUs{base + c.lift_ms * 1000U - 8000U}, &sample, true, true) !=
-                 Key::none) ||
-                !nav.pressed())
+            if (nav.service(TimestampUs{base + c.lift_ms * 1000U - 8000U}, &sample, true, true) !=
+                Key::none)
                 return false;
             sample = {0, 0, 0, 0, 0, hw::Gesture::none, false};
-            if ((nav.service(TimestampUs{base + c.lift_ms * 1000U}, &sample, true, true) !=
-                 (c.tap ? Key::ok : c.key)) ||
-                (nav.tapped().has_value() != c.tap) || nav.pressed())
+            if (nav.service(TimestampUs{base + c.lift_ms * 1000U}, &sample, true, true) != c.key)
                 return false;
         }
     }
-    // Travel beyond the tap slop cancels the press highlight and the tap.
+    // Travel beyond the tap slop in the body never produces a key.
     hw::TouchNavigation nav{};
     hw::TouchSample sample{0, 0, 64, 32, 1, hw::Gesture::none, true};
     (void)nav.service(TimestampUs{0}, &sample, true, true);
     sample.x = 76;
     sample.y = 44;
-    if ((nav.service(TimestampUs{1000}, &sample, true, true) != Key::none) || nav.pressed())
+    if (nav.service(TimestampUs{1000}, &sample, true, true) != Key::none)
         return false;
     sample.contacts = 0;
-    if ((nav.service(TimestampUs{2000}, &sample, true, true) != Key::none) || nav.tapped())
+    if (nav.service(TimestampUs{2000}, &sample, true, true) != Key::none)
         return false;
-    // On the button bar, edge jitter that would be a flick elsewhere stays a tap.
-    for (const int dy : {0, 10}) {
-        nav = {};
-        sample = {0, 0, 10, 4, 1, hw::Gesture::none, true};
-        (void)nav.service(TimestampUs{0}, &sample, true, true);
-        sample.x = 19;
-        sample.y = static_cast<std::uint8_t>(4 + dy);
-        if (nav.service(TimestampUs{50'000}, &sample, true, true) != Key::none)
-            return false;
-        sample = {0, 0, 0, 0, 0, hw::Gesture::none, false};
-        const auto tap = nav.tapped();
-        if ((nav.service(TimestampUs{100'000}, &sample, true, true) != Key::ok) || !nav.tapped() ||
-            (nav.tapped()->x != 10) || (nav.tapped()->y != 4) || tap)
-            return false;
+    // Edge jitter in the header and footer rows stays a tap that maps to that row's key.
+    struct Bar {
+        std::uint8_t x, y;
+        Key key;
+    };
+    for (const Bar bar : {Bar{10, 4, Key::up}, Bar{10, 50, Key::ok}, Bar{100, 50, Key::cancel}}) {
+        for (const int dy : {0, 10}) {
+            nav = {};
+            sample = {0, 0, bar.x, bar.y, 1, hw::Gesture::none, true};
+            (void)nav.service(TimestampUs{0}, &sample, true, true);
+            sample.x = static_cast<std::uint8_t>(bar.x + 9);
+            sample.y = static_cast<std::uint8_t>(bar.y + dy);
+            if (nav.service(TimestampUs{50'000}, &sample, true, true) != Key::none)
+                return false;
+            sample = {0, 0, 0, 0, 0, hw::Gesture::none, false};
+            if (nav.service(TimestampUs{100'000}, &sample, true, true) != bar.key)
+                return false;
+        }
     }
     return true;
 }
@@ -716,7 +715,7 @@ bool sparse_reports() {
             (Driver::sample().contacts != 0) ||
             (input.service(released_at + coretx::DurationUs{1000}, true, {false, 0, true}) !=
              Key::none) ||
-            (Driver::frames() != frames) || input.tapped())
+            (Driver::frames() != frames))
             return false;
     }
     return true;
@@ -758,18 +757,15 @@ bool inferred_taps() {
                     return false;
                 io.cell(reg::interrupt) = touch_line;
                 constexpr auto timeout = hw::TouchNavigation::release_timeout_us.count();
-                if ((service(now + 1000U) != Key::none) || input.tapped() || input.tapped_switch())
+                if ((service(now + 1000U) != Key::none) || input.tapped_switch())
                     return false;
-                if (service(now + timeout) != (mode == 0 ? Key::ok : Key::none))
+                if (service(now + timeout) != Key::none)
                     return false;
-                if ((input.tapped().has_value() != (mode == 0)) ||
-                    ((mode == 0) && ((input.tapped()->x != 4) || (input.tapped()->y != 16))) ||
-                    (input.tapped_switch() !=
+                if ((input.tapped_switch() !=
                      (mode == 1 ? std::optional<std::size_t>{0} : std::nullopt)) ||
                     input.held_switch() || !Driver::sample().synthetic)
                     return false;
-                if ((service(now + timeout + 1) != Key::none) || input.tapped() ||
-                    input.tapped_switch())
+                if ((service(now + timeout + 1) != Key::none) || input.tapped_switch())
                     return false;
                 now += timeout + 10'000U;
             }
@@ -797,49 +793,51 @@ constexpr bool inferred_tap_guards() {
         sample.synthetic = true;
         const auto deadline = coretx::TimestampUs{1000} + hw::TouchNavigation::release_timeout_us;
         if ((navigation.service(deadline, &sample, true, true) != Key::none) ||
-            navigation.tapped() || (switches.service(deadline, &sample, true, 0) != Key::none) ||
-            switches.tapped() || switches.held())
+            (switches.service(deadline, &sample, true, 0) != Key::none) || switches.tapped() ||
+            switches.held())
             return false;
     }
     return true;
 }
 
 constexpr bool dashboard_taps() {
+    // The header is Up, the footer halves are OK (left) and Back (right); the body does nothing.
+    struct Tap {
+        std::uint8_t x, y;
+        Key key;
+    };
+    constexpr std::array taps{Tap{40, 24, Key::none}, Tap{40, 4, Key::up}, Tap{40, 50, Key::ok},
+                              Tap{90, 50, Key::cancel}};
     for (const bool enabled : {false, true}) {
-        hw::TouchNavigation nav{};
-        hw::TouchSample sample{0, 0, 40, 24, 1, hw::Gesture::none};
-        if (nav.service(coretx::TimestampUs{0}, &sample, true, enabled) != Key::none)
-            return false;
-        sample.contacts = 0;
-        const auto key = nav.service(coretx::TimestampUs{10'000}, &sample, true, enabled);
-        if ((key != (enabled ? Key::ok : Key::none)) || (nav.tapped().has_value() != enabled))
-            return false;
-        if (enabled && ((nav.tapped()->x != 40) || (nav.tapped()->y != 24)))
-            return false;
-        (void)nav.service(coretx::TimestampUs{10'001}, nullptr, true, enabled);
-        if (nav.tapped())
-            return false;
+        for (const auto &tap : taps) {
+            hw::TouchNavigation nav{};
+            hw::TouchSample sample{0, 0, tap.x, tap.y, 1, hw::Gesture::none};
+            if (nav.service(coretx::TimestampUs{0}, &sample, true, enabled) != Key::none)
+                return false;
+            sample.contacts = 0;
+            const auto key = nav.service(coretx::TimestampUs{10'000}, &sample, true, enabled);
+            if (key != (enabled ? tap.key : Key::none))
+                return false;
+        }
     }
     for (const bool synthetic : {false, true}) {
         hw::TouchNavigation nav{};
-        hw::TouchSample sample{0, 0, 40, 24, 1, hw::Gesture::none};
+        hw::TouchSample sample{0, 0, 40, 50, 1, hw::Gesture::none};
         (void)nav.service(coretx::TimestampUs{0}, &sample, true, true);
         sample.contacts = 0;
         sample.synthetic = synthetic;
         sample.position_valid = !synthetic;
         sample.x = 52;
         sample.y = 36;
-        if ((nav.service(coretx::TimestampUs{10'000}, &sample, true, true) != Key::none) ||
-            nav.tapped())
+        if (nav.service(coretx::TimestampUs{10'000}, &sample, true, true) != Key::none)
             return false;
     }
     hw::TouchNavigation swipe{};
     hw::TouchSample sample{0, 0, 40, 24, 1, hw::Gesture::right};
-    if ((swipe.service(coretx::TimestampUs{0}, &sample, true, true) != Key::ok) || swipe.tapped())
+    if (swipe.service(coretx::TimestampUs{0}, &sample, true, true) != Key::ok)
         return false;
     sample.contacts = 0;
-    return (swipe.service(coretx::TimestampUs{10'000}, &sample, true, true) == Key::none) &&
-           !swipe.tapped();
+    return swipe.service(coretx::TimestampUs{10'000}, &sample, true, true) == Key::none;
 }
 
 bool cooperative_reports() {
@@ -922,16 +920,12 @@ bool report_taps() {
                     io.cell(exti_pending) |= touch_line;
                     const auto key = input.service(coretx::TimestampUs{before}, true, context);
                     const bool released = phase == 2;
-                    if ((io.clock - before > 300U) ||
-                        (key != (released && mode == 0 ? Key::ok : Key::none)) ||
+                    if ((io.clock - before > 300U) || (key != Key::none) ||
                         (Driver::frames() != tap * 3 + phase + 1) ||
-                        (input.tapped().has_value() != (released && mode == 0)) ||
                         (input.tapped_switch().has_value() != (released && mode == 1)) ||
                         (input.held_switch().has_value() != (!released && mode == 2)))
                         return false;
-                    if ((input.tapped() &&
-                         ((input.tapped()->x != 4) || (input.tapped()->y != 16))) ||
-                        (input.tapped_switch() && (*input.tapped_switch() != 0)) ||
+                    if ((input.tapped_switch() && (*input.tapped_switch() != 0)) ||
                         (input.held_switch() && (*input.held_switch() != 0)))
                         return false;
                 }
@@ -972,10 +966,10 @@ bool polled_release_taps() {
                     const auto before = io.clock;
                     const auto key = input.service(coretx::TimestampUs{before}, true, context);
                     if ((io.clock - before > 300U) || (Driver::error() != hw::TouchError::none) ||
-                        ((key != Key::none) && !((mode == 0) && (key == Key::ok))) ||
+                        (key != Key::none) ||
                         ((mode == 2) && (elapsed < 20'000) && (input.held_switch() != 0)))
                         return false;
-                    if (key == Key::ok || input.tapped_switch()) {
+                    if (input.tapped_switch()) {
                         if ((elapsed < 20'000) || (elapsed > 28'000))
                             return false;
                         ++actions;
@@ -990,7 +984,7 @@ bool polled_release_taps() {
                         return false;
                 }
                 if (!released_at || (*released_at < 20'000) || (*released_at > 28'000) ||
-                    (actions != (mode == 2 ? 0U : 1U)))
+                    (actions != (mode == 1 ? 1U : 0U)))
                     return false;
             }
         }
@@ -1175,6 +1169,21 @@ constexpr bool rendering() {
 
 constexpr bool setup_navigation() {
     using coretx::TimestampUs;
+    {
+        // A held deflection repeats once after 400 ms and then every 100 ms.
+        hw::SetupNavigation jog{};
+        jog.set_mode(TimestampUs{0}, true);
+        auto now = 0U;
+        const auto push = [&](const std::uint32_t elapsed, const std::int16_t vra) {
+            now += elapsed;
+            return jog.service(TimestampUs{now}, 0, true, vra, 0, true);
+        };
+        if ((push(0, 0) != Key::none) || (push(1000, 1024) != Key::down) ||
+            (push(399'000, 1024) != Key::none) || (push(1000, 1024) != Key::down) ||
+            (push(99'000, 1024) != Key::none) || (push(1000, 1024) != Key::down) ||
+            (push(0, 0) != Key::none) || (push(1000, -1024) != Key::up))
+            return false;
+    }
     for (const std::uint32_t base : {0U, 0xFFFFF000U}) {
         hw::SetupNavigation nav{};
         auto now = base;
@@ -1199,7 +1208,7 @@ constexpr bool setup_navigation() {
             (step(799'999, 1) != Key::none) || (step(1, 1) != Key::ok_long) ||
             (step(1, 0) != Key::none) || (step(20'000, 0) != Key::none))
             return false;
-        if ((step(1, 0, 301) != Key::down) || (step(1'000'000, 0, 1024) != Key::none) ||
+        if ((step(1, 0, 301) != Key::down) || (step(1'000'000, 0, 1024) != Key::down) ||
             (step(1, 0, -1024) != Key::none) || (step(1, 0) != Key::none) ||
             (step(1, 0, 0, -301) != Key::up))
             return false;

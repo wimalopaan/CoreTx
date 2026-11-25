@@ -14,19 +14,10 @@ namespace tr = coretx::ui::tr;
 inline constexpr int header_y = 0;
 inline constexpr int list_y = 12;
 inline constexpr int row_height = 10;
-// Touch hit areas of the Back/OK buttons: larger than the drawn 32x10 boxes, because taps near
-// the panel edge are reported a few pixels too low or beside them.
-enum class Button : std::uint8_t { none, back, ok };
-[[nodiscard]] constexpr Button button(const std::uint8_t x, const std::uint8_t y) noexcept {
-    if (y < list_y - 1)
-        return x < 40 ? Button::back : x >= 88 ? Button::ok : Button::none;
-    if (y < 15)
-        return x < 36 ? Button::back : x >= 92 ? Button::ok : Button::none;
-    return Button::none;
-}
 inline constexpr int value_right = coretx::ui::Framebuffer::width - 1;
 inline constexpr int value_character_width = 4;
 inline constexpr int help_y = 58;
+inline constexpr int footer_split = 64;
 inline constexpr std::size_t label_columns = 12;
 inline constexpr std::size_t value_columns = 13;
 inline constexpr std::string_view characters =
@@ -117,6 +108,20 @@ class CrsfMenu {
         visible_ = false;
         editing_ = false;
         client.close();
+    }
+    // Touch Back: at the device root it only leaves edits, so the embedded dashboard stays.
+    void back(CrsfClient &client, const TimestampUs now) noexcept {
+        namespace cfg = coretx::crsf::config;
+        if (!visible_)
+            return;
+        if (client.error() == cfg::Error::link) {
+            finish_edit(client);
+            client.open(now);
+            selected_ = first_ = 0;
+            notice_ = nullptr;
+        } else if ((client.view_mode() == cfg::Mode::parameters) ||
+                   (client.command() != cfg::Command::idle))
+            handle(Key::cancel, client, now);
     }
     void handle(const Key key, CrsfClient &client, const TimestampUs now) noexcept {
         namespace cfg = coretx::crsf::config;
@@ -223,65 +228,6 @@ class CrsfMenu {
             first_ = static_cast<std::uint8_t>(selected_ - cfg::visible_rows + 1);
         client.window(first_);
     }
-    void tap(const std::uint8_t x, const std::uint8_t y, CrsfClient &client,
-             const TimestampUs now) noexcept {
-        namespace cfg = coretx::crsf::config;
-        namespace md = crsf_menu_detail;
-        if (!visible_)
-            return;
-        const auto button = md::button(x, y);
-        const bool confirm = editing_ || (client.command() == cfg::Command::confirmation);
-        if ((button == md::Button::back) || ((button == md::Button::ok) && confirm) ||
-            (y < md::list_y - 1)) {
-            if (button == md::Button::back) {
-                if (client.error() == cfg::Error::link) {
-                    finish_edit(client);
-                    client.open(now);
-                    selected_ = first_ = 0;
-                    notice_ = nullptr;
-                } else if ((client.view_mode() == cfg::Mode::parameters) ||
-                           (client.command() != cfg::Command::idle))
-                    handle(Key::cancel, client, now);
-            } else if ((button == md::Button::ok) && confirm)
-                handle(editing_ ? Key::ok_long : Key::ok, client, now);
-            return;
-        }
-        const auto row = static_cast<std::size_t>((y - (md::list_y - 1)) / md::row_height);
-        const auto index = first_ + row;
-        const auto count =
-            client.view_mode() == cfg::Mode::parameters ? client.count() : client.device_count();
-        if ((row >= cfg::visible_rows) || (index >= count))
-            return;
-        if ((editing_ || client.pending_write() || (client.command() != cfg::Command::idle)) &&
-            (index != selected_))
-            return;
-        selected_ = static_cast<std::uint8_t>(index);
-        handle(Key::ok, client, now);
-    }
-    // Marks the element that tap() would activate for the current touch point.
-    void highlight(const std::uint8_t x, const std::uint8_t y, const CrsfClient &client,
-                   coretx::ui::Framebuffer &display) const noexcept {
-        namespace cfg = coretx::crsf::config;
-        namespace md = crsf_menu_detail;
-        if (!visible_)
-            return;
-        const auto button = md::button(x, y);
-        const bool confirm = editing_ || (client.command() == cfg::Command::confirmation);
-        if ((button == md::Button::back) || ((button == md::Button::ok) && confirm) ||
-            (y < md::list_y - 1)) {
-            if (button == md::Button::back)
-                display.invert(0, 0, 32, 10);
-            else if ((button == md::Button::ok) && confirm)
-                display.invert(96, 0, 32, 10);
-            return;
-        }
-        const auto row = static_cast<std::size_t>((y - (md::list_y - 1)) / md::row_height);
-        const auto count =
-            client.view_mode() == cfg::Mode::parameters ? client.count() : client.device_count();
-        if ((row < cfg::visible_rows) && ((first_ + row) < count))
-            display.invert(0, md::list_y - 1 + static_cast<int>(row) * md::row_height, 128,
-                           md::row_height);
-    }
     void render(const CrsfClient &client, coretx::ui::Framebuffer &display, const TimestampUs now,
                 const bool active_header = false, const char *const navigation_help = nullptr,
                 const bool touch = false) const noexcept {
@@ -300,16 +246,8 @@ class CrsfMenu {
             display.rectangle(0, md::header_y, coretx::ui::Framebuffer::width, md::row_height);
         const bool confirm =
             touch && (editing_ || (client.command() == cfg::Command::confirmation));
-        if (touch) {
-            display.rectangle(0, 0, 32, 10);
-            display.small_text(2, 2, md::tr::touch_back, false);
-            if (confirm) {
-                display.rectangle(96, 0, 32, 10);
-                display.small_text(106, 2, "OK", false);
-            }
-        }
-        display.text(touch ? 35 : 0, md::header_y, md::head(title, touch ? (confirm ? 9 : 14) : 19),
-                     !active_header);
+        const bool footer_confirm = editing_ || (client.command() == cfg::Command::confirmation);
+        display.text(0, md::header_y, md::head(title, 19), !active_header);
         if (client.busy() && !confirm) {
             constexpr std::string_view spinner = "|/-\\";
             display.text(122, md::header_y, {spinner.data() + (now.count() / 200'000U) % 4U, 1},
@@ -382,12 +320,15 @@ class CrsfMenu {
                                   y + md::row_height - 2, 3, 1, ink);
         }
         const auto error = md::error(client.error());
+        const bool footer = touch && (error == nullptr) && (notice_ == nullptr) &&
+                            !client.pending_write() &&
+                            ((client.command() == cfg::Command::idle) ||
+                             (client.command() == cfg::Command::confirmation));
         const auto help = error != nullptr                                 ? error
                           : notice_ != nullptr                             ? notice_
                           : client.command() == cfg::Command::confirmation ? md::tr::crsf_confirm
                           : client.command() != cfg::Command::idle         ? md::tr::crsf_running
                           : client.pending_write()                         ? md::tr::saving
-                          : touch && navigation_help != nullptr            ? navigation_help
                           : editing_ && (editing_type_ == coretx::crsf::CRSF_STRING)
                               ? md::tr::menu_name_help
                           : editing_                   ? md::tr::menu_help
@@ -404,6 +345,13 @@ class CrsfMenu {
             std::copy(id.begin(), id.end(),
                       message.begin() + static_cast<std::ptrdiff_t>(prefix.size()) + 2);
             display.small_text(0, md::help_y, {message.data(), prefix.size() + 2 + id.size()});
+        } else if (footer) {
+            display.small_text_centered(0, md::footer_split, md::help_y,
+                                        footer_confirm ? md::tr::touch_confirm_ok
+                                                       : md::tr::touch_edit_ok);
+            display.small_text_centered(
+                md::footer_split, coretx::ui::Framebuffer::width - md::footer_split, md::help_y,
+                footer_confirm ? md::tr::touch_cancel : md::tr::touch_back);
         } else
             display.small_text(0, md::help_y, help);
     }

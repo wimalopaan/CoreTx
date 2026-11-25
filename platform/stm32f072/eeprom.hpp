@@ -23,6 +23,7 @@ class EepromState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
   public:
     inline static constexpr std::size_t capacity = 16'384;
     inline static constexpr std::size_t page_size = 64;
+    inline static constexpr auto service_burst = 250_us;
 
     constexpr void select(const std::uint8_t address) noexcept { device_ = address; }
 
@@ -45,7 +46,19 @@ class EepromState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
         input_ = {};
         return true;
     }
+    // One byte takes about 22 us at 400 kHz; a bounded burst avoids a main-loop pass per byte.
     constexpr void service(const TimestampUs now) noexcept {
+        if (!busy()) {
+            return;
+        }
+        step(now);
+        while (busy() && ((Io::now_us() - now) < service_burst)) {
+            step(Io::now_us());
+        }
+    }
+
+  private:
+    constexpr void step(const TimestampUs now) noexcept {
         if (!busy()) {
             return;
         }
@@ -156,6 +169,7 @@ class EepromState : stm32f072::I2cTraits<Assignment::storage.peripheral> {
         }
     }
 
+  public:
     [[nodiscard]] constexpr bool busy() const noexcept {
         return (stage_ != Stage::complete) && (stage_ != Stage::failed);
     }

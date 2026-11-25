@@ -30,6 +30,13 @@ class Framebuffer {
         text(x, y, value, ink);
         compact_ = previous;
     }
+    // Centers compact text within the touch zone [left, left + width).
+    constexpr void small_text_centered(int left, int width, int y, const std::string_view &value,
+                                       bool ink = true) noexcept {
+        constexpr int compact_character = 4;
+        small_text(left + (width - static_cast<int>(value.size()) * compact_character) / 2, y,
+                   value, ink);
+    }
     constexpr void pixel(int x, int y, bool ink = true) noexcept;
     [[nodiscard]] constexpr bool pixel_at(int x, int y) const noexcept;
     constexpr void rectangle(int x, int y, int width, int height, bool ink = true) noexcept;

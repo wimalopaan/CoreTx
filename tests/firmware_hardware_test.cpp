@@ -274,10 +274,19 @@ struct BootRegisters {
                                           reg::rcc_cfgr2,
                                           reg::rcc_ahbenr,
                                           reg::rcc_apb1enr,
+                                          reg::rcc_apb1rstr,
                                           reg::rcc_apb2enr,
                                           reg::flash_acr,
                                           reg::systick_control,
                                           reg::scb_icsr,
+                                          reg::tim2_cr1,
+                                          reg::tim2_sr,
+                                          reg::tim2_egr,
+                                          reg::tim2_cnt,
+                                          reg::tim2_psc,
+                                          reg::tim2_arr,
+                                          reg::tim2_dier,
+                                          reg::dbg_apb1fz,
                                           RCC_BASE + offsetof(RCC_TypeDef, CSR),
                                           RCC_BASE + offsetof(RCC_TypeDef, CIR),
                                           RCC_BASE + offsetof(RCC_TypeDef, AHBRSTR),
@@ -287,6 +296,7 @@ struct BootRegisters {
                                           GPIOA_BASE + offsetof(GPIO_TypeDef, PUPDR),
                                           GPIOB_BASE + offsetof(GPIO_TypeDef, MODER),
                                           GPIOB_BASE + offsetof(GPIO_TypeDef, OTYPER),
+                                          GPIOB_BASE + offsetof(GPIO_TypeDef, OSPEEDR),
                                           GPIOB_BASE + offsetof(GPIO_TypeDef, ODR),
                                           GPIOB_BASE + offsetof(GPIO_TypeDef, PUPDR),
                                           GPIOC_BASE + offsetof(GPIO_TypeDef, MODER),
@@ -299,7 +309,31 @@ struct BootRegisters {
                                           GPIOD_BASE + offsetof(GPIO_TypeDef, OSPEEDR),
                                           GPIOD_BASE + offsetof(GPIO_TypeDef, PUPDR),
                                           GPIOD_BASE + offsetof(GPIO_TypeDef, ODR),
+                                          GPIOE_BASE + offsetof(GPIO_TypeDef, MODER),
+                                          GPIOE_BASE + offsetof(GPIO_TypeDef, OTYPER),
+                                          GPIOE_BASE + offsetof(GPIO_TypeDef, OSPEEDR),
+                                          GPIOE_BASE + offsetof(GPIO_TypeDef, PUPDR),
+                                          GPIOE_BASE + offsetof(GPIO_TypeDef, ODR),
+                                          GPIOF_BASE + offsetof(GPIO_TypeDef, MODER),
+                                          GPIOF_BASE + offsetof(GPIO_TypeDef, OTYPER),
+                                          GPIOF_BASE + offsetof(GPIO_TypeDef, OSPEEDR),
+                                          GPIOF_BASE + offsetof(GPIO_TypeDef, PUPDR),
+                                          GPIOF_BASE + offsetof(GPIO_TypeDef, ODR),
                                           NVIC_BASE + offsetof(NVIC_Type, ICER),
+                                          GPIOA_BASE + offsetof(GPIO_TypeDef, OTYPER),
+                                          GPIOA_BASE + offsetof(GPIO_TypeDef, OSPEEDR),
+                                          GPIOA_BASE + offsetof(GPIO_TypeDef, AFR),
+                                          GPIOA_BASE + offsetof(GPIO_TypeDef, AFR) + 4U,
+                                          TIM1_BASE + offsetof(TIM_TypeDef, CR1),
+                                          TIM1_BASE + offsetof(TIM_TypeDef, DIER),
+                                          TIM1_BASE + offsetof(TIM_TypeDef, PSC),
+                                          TIM1_BASE + offsetof(TIM_TypeDef, ARR),
+                                          TIM1_BASE + offsetof(TIM_TypeDef, CCMR1),
+                                          TIM1_BASE + offsetof(TIM_TypeDef, CCER),
+                                          TIM1_BASE + offsetof(TIM_TypeDef, CCR1),
+                                          TIM1_BASE + offsetof(TIM_TypeDef, CNT),
+                                          TIM1_BASE + offsetof(TIM_TypeDef, EGR),
+                                          TIM1_BASE + offsetof(TIM_TypeDef, BDTR),
                                           NVIC_BASE + offsetof(NVIC_Type, ICPR),
                                           SYSCFG_BASE + offsetof(SYSCFG_TypeDef, CFGR1),
                                           std::uintptr_t{0x1FFFC800},
@@ -313,6 +347,12 @@ struct BootRegisters {
         power_latched_at{UINT32_MAX}, tick_stop_at{UINT32_MAX};
     hw::HardwareError failure{};
     bool tick_stopped{}, barrier_called{};
+    struct Frame {
+        std::array<std::uint8_t, 1024> bytes{};
+        std::uint32_t at{};
+    };
+    std::array<Frame, 128> frames{};
+    std::size_t frame_count{}, frame_byte{};
 
     constexpr BootRegisters() {
         cell(reg::rcc_cr) = RCC_CR_HSION | RCC_CR_HSIRDY;
@@ -327,6 +367,9 @@ struct BootRegisters {
         std::abort();
     }
     std::uint32_t read(const std::uintptr_t address) {
+        if ((address == reg::tim2_cnt) && ((cell(reg::tim2_cr1) & TIM_CR1_CEN) != 0) &&
+            (failure != hw::HardwareError::timer_stopped))
+            ++cell(address);
         const auto pressed =
             (milliseconds >= press_from) && (milliseconds < release_at) ? keys : 0U;
         if (address == GPIOA_BASE + offsetof(GPIO_TypeDef, IDR))
@@ -346,16 +389,44 @@ struct BootRegisters {
         if ((address == reg::systick_control) && ((cell(address) & SysTick_CTRL_ENABLE_Msk) != 0) &&
             !tick_stopped && (milliseconds < tick_stop_at)) {
             ++milliseconds;
+            cell(reg::tim2_cnt) = milliseconds * 1'000U;
             return cell(address) | SysTick_CTRL_COUNTFLAG_Msk;
         }
         return cell(address);
     }
+    std::uint32_t now_us() { return read(reg::tim2_cnt); }
     void write(const std::uintptr_t address, const std::uint32_t value) {
-        if (write_count == writes.size())
-            std::abort();
-        writes[write_count++] = {address, value};
-        for (const auto port : {GPIOB_BASE, GPIOC_BASE, GPIOD_BASE})
+        const auto &lcd = coretx::firmware::i6s::Hardware::lcd;
+        const bool lcd_write =
+            (address == lcd.data_port + offsetof(GPIO_TypeDef, BSRR)) ||
+            ((address == GPIOB_BASE + offsetof(GPIO_TypeDef, BSRR)) &&
+             (((value & 0xFFFFU) | (value >> 16)) &
+              ~(GPIO_BSRR_BS_3 | GPIO_BSRR_BS_4 | GPIO_BSRR_BS_5)) == 0) ||
+            ((address == GPIOD_BASE + offsetof(GPIO_TypeDef, BSRR)) &&
+             (((value & 0xFFFFU) | (value >> 16)) & ~(GPIO_BSRR_BS_2 | GPIO_BSRR_BS_7)) == 0) ||
+            (address == GPIOF_BASE + offsetof(GPIO_TypeDef, BSRR)) ||
+            ((address == GPIOC_BASE + offsetof(GPIO_TypeDef, BSRR)) &&
+             (((value & 0xFFFFU) | (value >> 16)) & ~GPIO_BSRR_BS_9) == 0);
+        if (!lcd_write) {
+            if (write_count == writes.size())
+                std::abort();
+            writes[write_count++] = {address, value};
+        }
+        for (const auto port : {GPIOB_BASE, GPIOC_BASE, GPIOD_BASE, GPIOE_BASE, GPIOF_BASE})
             if (address == port + offsetof(GPIO_TypeDef, BSRR)) {
+                if ((port == GPIOD_BASE) && ((value & GPIO_BSRR_BS_7) != 0) &&
+                    ((cell(GPIOB_BASE + offsetof(GPIO_TypeDef, ODR)) & GPIO_ODR_3) != 0)) {
+                    if (frame_count == frames.size())
+                        std::abort();
+                    auto &frame = frames[frame_count];
+                    frame.bytes[frame_byte++] =
+                        static_cast<std::uint8_t>(cell(GPIOE_BASE + offsetof(GPIO_TypeDef, ODR)));
+                    if (frame_byte == frame.bytes.size()) {
+                        frame.at = milliseconds;
+                        ++frame_count;
+                        frame_byte = 0;
+                    }
+                }
                 if ((port == GPIOB_BASE) && ((value & GPIO_BSRR_BS_15) != 0))
                     power_latched_at = milliseconds;
                 auto &output = cell(port + offsetof(GPIO_TypeDef, ODR));
@@ -405,8 +476,53 @@ bool power_on_startup() {
         I6S::prepare_power();
         if ((io.cell(GPIOB_BASE + offsetof(GPIO_TypeDef, ODR)) & GPIO_ODR_15) != 0)
             return false;
-        if (!I6S::power_on_startup() || (io.milliseconds != timing.ready) ||
-            (io.power_latched_at != timing.ready) || (io.cell(reg::systick_control) != 0))
+        const bool started = I6S::power_on_startup();
+        if (!started || (io.milliseconds != timing.ready) ||
+            (io.power_latched_at != timing.ready) || (io.cell(reg::systick_control) != 0) ||
+            (io.frame_count < 3) || (io.frames[0].at >= 200) || I6S::Display::busy() ||
+            (io.cell(reg::tim2_psc) != 7) ||
+            ((io.cell(reg::rcc_cr) & (RCC_CR_HSEON | RCC_CR_PLLON)) != 0) ||
+            (io.cell(TIM1_BASE + offsetof(TIM_TypeDef, PSC)) != 7) ||
+            ((io.cell(TIM1_BASE + offsetof(TIM_TypeDef, CR1)) & TIM_CR1_CEN) != 0))
+            return false;
+        bool beeped{};
+        for (std::size_t i = 0; i < io.write_count; ++i)
+            beeped |= (io.writes[i].first == TIM1_BASE + offsetof(TIM_TypeDef, CR1)) &&
+                      ((io.writes[i].second & TIM_CR1_CEN) != 0);
+        if (!beeped)
+            return false;
+        coretx::ui::Framebuffer expected{};
+        expected.text(46, 8, "CoreTX");
+        const std::string_view action{coretx::ui::tr::power_on_action};
+        const std::string_view hold{coretx::ui::tr::power_on_hold};
+        expected.text((128 - static_cast<int>(action.size()) * 6) / 2, 26, action);
+        expected.text((128 - static_cast<int>(hold.size()) * 6) / 2, 36, hold);
+        expected.rectangle(12, 52, 104, 8);
+        expected.rectangle(13, 53, 102, 6, false);
+        if (io.frames[0].bytes != expected.bytes())
+            return false;
+        const auto bar_width = [](const BootRegisters::Frame &frame) {
+            unsigned width{};
+            for (std::size_t x = 14; x < 114; ++x)
+                if ((frame.bytes[6 * 128 + x] & (1U << 6)) != 0)
+                    ++width;
+            return width;
+        };
+        if ((bar_width(io.frames[0]) != 0) || (bar_width(io.frames[io.frame_count - 1]) != 100))
+            return false;
+        bool progressing{}, reset{};
+        unsigned previous{};
+        for (std::size_t i = 0; i < io.frame_count; ++i) {
+            const auto width = bar_width(io.frames[i]);
+            progressing |=
+                (width >= 30) && (width <= 70) && (io.frames[i].at < io.power_latched_at);
+            reset |= (width < previous);
+            previous = width;
+            for (std::size_t byte = 0; byte < 6 * 128; ++byte)
+                if (io.frames[i].bytes[byte] != io.frames[0].bytes[byte])
+                    return false;
+        }
+        if (!progressing || (reset != (timing.release != UINT32_MAX)))
             return false;
     }
     for (const auto flags :
@@ -417,7 +533,8 @@ bool power_on_startup() {
         auto &io = Test::registers;
         io.cell(RCC_BASE + offsetof(RCC_TypeDef, CSR)) = flags;
         I6S::prepare_power();
-        if (!I6S::power_on_startup() || (io.milliseconds != 0) || (io.power_latched_at != 0))
+        if (!I6S::power_on_startup() || (io.milliseconds != 0) || (io.power_latched_at != 0) ||
+            (io.frame_count != 0) || ((io.cell(reg::rcc_apb1enr) & RCC_APB1ENR_TIM2EN) != 0))
             return false;
     }
     Test::reset_registers();
@@ -434,6 +551,13 @@ bool power_on_startup() {
             (io.cell(reg::systick_control) != 0))
             return false;
     }
+    Test::reset_registers();
+    auto &io = Test::registers;
+    io.failure = hw::HardwareError::timer_stopped;
+    I6S::prepare_power();
+    if (I6S::power_on_startup() || (io.power_latched_at != UINT32_MAX) || (io.frame_count != 0) ||
+        (io.cell(reg::systick_control) != 0))
+        return false;
     return true;
 }
 

@@ -2283,7 +2283,7 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
         std::array<std::uint8_t, 23> info{0xEA, 21, 0x29, 0xEA, 0xEE, 'T', 'X', 0};
         info[20] = 2;
         feed(info);
-        tap(12, 16);
+        tap(12, 50);
         if (c.crsf_config.mode() != coretx::crsf::config::Mode::parameters)
             return false;
         coretx::crsf::config::Frame outbound{};
@@ -2301,19 +2301,28 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
             feed(value);
         }
         const auto change = [&] {
-            tap(90, 24);
-            touch(90, 24, true);
-            touch(90, 24, true, s::Gesture::up);
-            touch(90, 24, false);
+            tap(12, 50);
+            touch(64, 32, true);
+            touch(64, 32, true, s::Gesture::up);
+            touch(64, 32, false);
         };
+        const auto confirm = [&] {
+            touch(12, 50, true);
+            for (unsigned i = 0; i < 81; ++i)
+                (void)step(app, c, c.now + 10'000U);
+            touch(12, 50, false);
+        };
+        touch(64, 32, true);
+        touch(64, 32, true, s::Gesture::down);
+        touch(64, 32, false);
         change();
         if (!app.crsf_menu().editing() || (app.diagnostics().page() != 4))
             return false;
-        tap(12, 4);
+        tap(90, 50);
         if (app.crsf_menu().editing() || c.crsf_config.pending_write())
             return false;
         change();
-        tap(90, 24);
+        confirm();
         if (!c.crsf_config.pending_write() || app.crsf_menu().editing() || !c.tx_valid ||
             (c.crsf_config.next_frame(coretx::TimestampUs{c.now}, outbound) != 8) ||
             (outbound[5] != 2) || (outbound[6] != 26))
@@ -2545,9 +2554,11 @@ template <template <typename> typename BoardPolicy> bool model_recovery_dialog()
             return false;
         const auto choose = [&](const bool second) {
             if constexpr (Board::Input::touch) {
-                c.touch_sample = {0, 0, 60, static_cast<std::uint8_t>(second ? 46 : 34), 0};
+                c.touch_sample = {0, 0, 60, 32, 1, second ? s::Gesture::down : s::Gesture::up};
                 (void)step(app, c, c.now + 1000U);
-                c.touch_sample.contacts = 1;
+                c.touch_sample.contacts = 0;
+                (void)step(app, c, c.now + 1000U);
+                c.touch_sample = {0, 0, 30, 50, 1, s::Gesture::none};
                 (void)step(app, c, c.now + 1000U);
                 c.touch_sample.contacts = 0;
                 (void)step(app, c, c.now + 1000U);

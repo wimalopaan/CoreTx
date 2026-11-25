@@ -8,8 +8,10 @@
 #include "boards/i6s/setup_controls.hpp"
 #include "boards/i6s/touch_input.hpp"
 #include "boards/i6x/keys.hpp"
+#include "coretx/ui/translation.hpp"
 #include "platform/stm32f072/adc.hpp"
 #include "platform/stm32f072/bootloader.hpp"
+#include "platform/stm32f072/buzzer.hpp"
 #include "platform/stm32f072/eeprom.hpp"
 #include "platform/stm32f072/lcd.hpp"
 #include "platform/stm32f072/measurements.hpp"
@@ -48,6 +50,8 @@ template <typename Io, typename Assignment = Hardware> struct SenderBoard {
     using Watchdog = firmware::Watchdog<Io>;
     // The i6S switches itself off with a held power button; the i6X has a mechanical switch.
     using Power = std::conditional_t<Hardware::power_latch, i6s::PowerButton, void>;
+    inline static constexpr std::uint32_t startup_tone_hz = 2'200U;
+    inline static constexpr DurationUs startup_tone_duration{150'000};
     using Bootloader = stm32f072::Bootloader<Io>;
     using Modules = RfModules<Io, Hardware>;
     using ExternalRFModule = typename Modules::ExternalRFModule;
@@ -65,10 +69,27 @@ template <typename Io, typename Assignment = Hardware> struct SenderBoard {
         if constexpr (Hardware::power_latch) {
             if (Bootloader::cold_start()) {
                 i6s::initialize_power_button<Io, Hardware>();
+                if ((Clock<Io, Hardware::clock_timer>::initialize_timer(8'000'000U) !=
+                     stm32f072::HardwareError::none) ||
+                    (Display::initialize() != LcdError::none))
+                    return false;
+                coretx::ui::Framebuffer display{};
+                display.text(46, 8, "CoreTX");
+                const std::string_view action{coretx::ui::tr::power_on_action};
+                const std::string_view hold{coretx::ui::tr::power_on_hold};
+                display.text((display.width - static_cast<int>(action.size()) * 6) / 2, 26, action);
+                display.text((display.width - static_cast<int>(hold.size()) * 6) / 2, 36, hold);
+                display.rectangle(12, 52, 104, 8);
+                display.rectangle(13, 53, 102, 6, false);
+                Display::begin_frame();
+                using Sound = Buzzer<Io, Hardware::buzzer_timer, Hardware::buzzer>;
+                Sound::initialize(8'000'000U);
+                Sound::play(Io::now_us(), startup_tone_hz, startup_tone_duration);
                 Bootloader::start_sampling();
                 auto pressed = power_button_pressed();
                 std::uint32_t held_ms{};
-                while (held_ms < (Power::startup_hold_duration.count() / 1'000U)) {
+                constexpr auto hold_ms = Power::startup_hold_duration.count() / 1'000U;
+                while (held_ms < hold_ms) {
                     if (!Bootloader::wait_tick()) {
                         Bootloader::stop_sampling();
                         return false;
@@ -76,9 +97,25 @@ template <typename Io, typename Assignment = Hardware> struct SenderBoard {
                     const auto previous = pressed;
                     pressed = power_button_pressed();
                     held_ms = pressed && previous ? held_ms + 1U : 0U;
+                    Sound::service(Io::now_us());
+                    if (!Display::busy()) {
+                        display.rectangle(14, 54, 100, 4, false);
+                        display.rectangle(14, 54, static_cast<int>(held_ms * 100U / hold_ms), 4);
+                        Display::begin_frame();
+                    }
+                    if (Display::service(display) != LcdError::none) {
+                        Bootloader::stop_sampling();
+                        return false;
+                    }
                 }
                 Bootloader::stop_sampling();
                 i6s::hold_power<Io, Hardware>();
+                if (!finish_display_frame(display))
+                    return false;
+                display.rectangle(14, 54, 100, 4);
+                Display::begin_frame();
+                if (!finish_display_frame(display))
+                    return false;
             }
         }
         return true;
@@ -131,6 +168,10 @@ template <typename Io, typename Assignment = Hardware> struct SenderBoard {
         coretx::ui::Framebuffer display{};
         display.text(22, 28, "DFU-Bootloader");
         Display::begin_frame();
+        return finish_display_frame(display);
+    }
+    [[nodiscard]] static bool
+    finish_display_frame(const coretx::ui::Framebuffer &display) noexcept {
         const auto started = Io::now_us();
         for (std::uint32_t attempt = 0; attempt < stm32f072::ready_timeout; ++attempt) {
             if ((Display::service(display) != LcdError::none) ||
