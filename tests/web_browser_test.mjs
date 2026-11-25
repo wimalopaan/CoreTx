@@ -256,6 +256,13 @@ try {
 
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 });
+    await page.waitForFunction(() => {
+      const lcd = document.querySelector("#lcd").getBoundingClientRect();
+      const left = document.querySelector("#trims-left").getBoundingClientRect();
+      const right = document.querySelector("#trims-right").getBoundingClientRect();
+      return left.right <= lcd.left && right.left >= lcd.right &&
+        document.documentElement.scrollWidth <= innerWidth;
+    });
     assert.ok(await profileLabelBesideSelector(), "Profile label sits beside the dropdown on mobile");
     assert.ok(await page.locator("#lcd").isVisible());
     assert.ok(await sticksAboveLCD(), "Sticks are above the LCD on mobile");
