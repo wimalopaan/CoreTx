@@ -82,9 +82,10 @@ bool boot(Store &store, const coretx::Model &legacy = fw::diagnostic_model) {
     return settle(store, legacy);
 }
 
-bool legacy_curve_record(const md::Data &data, const std::uint8_t version, md::Record &record) {
+bool legacy_curve_record(const md::Data &data, const std::uint8_t version, md::Record &record,
+                         const std::size_t index = 7, const bool present = true) {
     namespace codec = coretx::storage::detail;
-    if (!md::encode(data, 7, true, 0xFFFFFFFF, record))
+    if (!md::encode(data, index, present, 0xFFFFFFFF, record))
         return false;
     record[4] = version;
     std::fill(record.begin() + 34, record.end(), 0xFF);
@@ -98,7 +99,7 @@ bool legacy_curve_record(const md::Data &data, const std::uint8_t version, md::R
         return false;
     if ((version >= 8) && !md::transfer_curves(out, data.model, true))
         return false;
-    if ((version >= 9) && !codec::transfer_tank(out, data.model))
+    if ((version >= 9) && !codec::transfer_tank(out, data.model, true, version >= 10))
         return false;
     codec::Writer crc{std::span{record}.last(4)};
     crc.word(coretx::storage::crc32(std::span{record}.first(md::record_size - 4)));
@@ -258,7 +259,7 @@ bool tank_codec() {
     md::Data data{};
     data.radio = legacy_radio;
     data.model.inputs.resize<coretx::max_input_lines>();
-    data.model.mixes.resize<18>();
+    data.model.mixes.resize<17>();
     for (std::size_t i = 0; i < data.model.inputs.size(); ++i) {
         data.model.inputs[i].destination = static_cast<std::uint8_t>(i / 2);
         data.model.inputs[i].source.index = static_cast<std::uint8_t>(i);
@@ -278,15 +279,20 @@ bool tank_codec() {
     tank.steering_percent = 73;
     tank.hysteresis_percent = 20;
     tank.reverse_steering = false;
+    tank.third_motor = true;
+    tank.third_channel = 13;
     if (!coretx::configure_tank(data.model, tank))
         return false;
+    tank = data.model.tank;
+    data.model.curves[tank.third_curve - 1].y.back() = 73;
     md::Record record{}, again{};
     md::Data restored{};
     md::Info info{};
     if (!md::encode(data, 7, true, 11, record) ||
         (md::decode(record, 7, tx, restored, info) != 1) || (restored.model.tank != tank) ||
         !md::encode(restored, 7, true, info.generation, again) || (record != again) ||
-        (restored.model.mixes.size() != coretx::max_mix_lines))
+        (restored.model.mixes.size() != coretx::max_mix_lines) ||
+        (restored.model.curves != data.model.curves))
         return false;
     for (std::size_t i = 0; i < restored.model.mixes.size(); ++i)
         if ((restored.model.mixes[i].role != data.model.mixes[i].role) ||
@@ -324,6 +330,110 @@ bool obsolete_models_can_be_recreated() {
     (void)settle(store);
     return !store.editable() && store.can_initialize() && store.initialize_models() &&
            settle(store) && store.editable() && (store.data().radio.output == RadioOutput::off);
+}
+
+bool readable_old_formats_require_conversion() {
+    for (std::uint8_t version = coretx::storage::oldest_format_version;
+         version < md::format_version; ++version) {
+        for (const unsigned variant : {0U, 1U, 2U, 3U}) {
+            struct Scenario {};
+            using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
+            using Store = fw::ModelStorage<Test::Board>;
+            Test::reset();
+            auto &c = Test::context;
+            Store initial{};
+            if (!boot(initial))
+                return false;
+            c.writes = 0;
+            md::Data data{};
+            data.radio = legacy_radio;
+            md::Record record{};
+            if (!md::encode(data, 0, true, 1, record))
+                return false;
+            std::copy(record.begin(), record.end(), c.bytes.begin() + md::base);
+            // Active model, inactive model, older backup bank and deleted-model record.
+            const std::size_t slot = (variant == 1) || (variant == 3) ? 7 : 0;
+            const std::size_t bank = variant == 2 ? 1 : 0;
+            if (!legacy_curve_record(data, version, record, slot, variant != 3))
+                return false;
+            md::Data decoded{};
+            md::Info info{};
+            if (md::decode(record, slot, tx, decoded, info) != 1)
+                return false;
+            std::copy(record.begin(), record.end(),
+                      c.bytes.begin() + md::base + (slot * 2 + bank) * md::record_size);
+            const auto before = c.bytes;
+            Store store{};
+            store.initialize(tx);
+            (void)settle(store);
+            if (!store.loaded() || store.editable() || store.busy() ||
+                (store.can_convert() != fw::features::storage_converter) ||
+                !store.recovery_required() || store.save() || store.take_changed() ||
+                (store.message() != coretx::ui::tr::models_version) ||
+                (store.detected_version() != version) ||
+                (store.expected_version() != md::format_version) || (c.bytes != before) ||
+                (c.writes != 0))
+                return false;
+            if constexpr (!fw::features::storage_converter) {
+                if (store.convert_models())
+                    return false;
+                continue;
+            }
+            if (!store.convert_models() || !settle(store) || !store.editable() ||
+                store.recovery_required() || store.can_convert() ||
+                (store.data().radio != data.radio) || (store.data().name != data.name) ||
+                !std::equal(c.bytes.begin(), c.bytes.begin() + md::base, before.begin()) ||
+                !std::equal(c.bytes.begin() + md::directory_base,
+                            c.bytes.begin() + fw::model_migration::address,
+                            before.begin() + md::directory_base))
+                return false;
+            const auto converted = c.bytes;
+            Store reboot{};
+            if (!boot(reboot) || reboot.recovery_required() || reboot.can_convert() ||
+                (c.bytes != converted))
+                return false;
+        }
+    }
+    return true;
+}
+
+bool conversion_preflight_refuses_unreadable_models() {
+    if constexpr (!fw::features::storage_converter)
+        return true;
+    for (const bool future : {false, true}) {
+        struct Scenario {};
+        using Test = coretx::test::FakeApplication<Scenario, Context, Memory>;
+        using Store = fw::ModelStorage<Test::Board>;
+        Test::reset();
+        auto &c = Test::context;
+        Store initial{};
+        if (!boot(initial))
+            return false;
+        md::Data data{};
+        data.radio = legacy_radio;
+        md::Record record{};
+        if (!legacy_curve_record(data, 9, record, 0))
+            return false;
+        std::copy(record.begin(), record.end(), c.bytes.begin() + md::base);
+        if (!md::encode(data, 7, true, 1, record))
+            return false;
+        if (future) {
+            record[4] = md::format_version + 1;
+            coretx::storage::detail::Writer crc{std::span{record}.last(4)};
+            crc.word(coretx::storage::crc32(std::span{record}.first(record.size() - 4)));
+        } else
+            record[700] ^= 1;
+        std::copy(record.begin(), record.end(), c.bytes.begin() + md::base + 14 * md::record_size);
+        const auto before = c.bytes;
+        const auto writes = c.writes;
+        Store store{};
+        store.initialize(tx);
+        (void)settle(store);
+        if (!store.recovery_required() || store.can_convert() || store.convert_models() ||
+            store.editable() || (c.bytes != before) || (c.writes != writes))
+            return false;
+    }
+    return true;
 }
 
 bool active_first_loading() {
@@ -1529,11 +1639,40 @@ bool tank_menu_persistence() {
     press(Key::ok);
     if (!settle(store) || store.data().model.tank.reverse_steering)
         return false;
+    press(Key::down);
+    press(Key::down);
+    press(Key::ok);
+    for (int i = 0; i < 10; ++i)
+        press(Key::up);
+    press(Key::ok);
+    if (!settle(store) || (store.data().model.tank.third_channel != 12))
+        return false;
+    press(Key::up);
+    press(Key::ok);
+    press(Key::up);
+    press(Key::ok);
+    if (!settle(store) || !store.data().model.tank.third_motor)
+        return false;
+    const auto third_curve = store.data().model.tank.third_curve;
+    press(Key::down);
+    press(Key::down);
+    press(Key::ok);
+    press(Key::down);
+    press(Key::down);
+    press(Key::down);
+    press(Key::ok);
+    press(Key::up);
+    press(Key::ok);
+    if (!settle(store) || (store.data().model.curves[third_curve - 1].y[3] != 1))
+        return false;
     Store reboot{};
     if (!boot(reboot) || !reboot.data().model.tank.enabled ||
         reboot.data().model.tank.reverse_steering ||
         (reboot.data().model.tank.hysteresis_percent != 5) ||
-        (reboot.data().model.tank.steering_percent != 75))
+        (reboot.data().model.tank.steering_percent != 75) ||
+        !reboot.data().model.tank.third_motor || (reboot.data().model.tank.third_channel != 12) ||
+        (reboot.data().model.tank.third_curve != third_curve) ||
+        (reboot.data().model.curves[third_curve - 1].y[3] != 1))
         return false;
     diagnostics.use_model(reboot.data().model);
     menu.open();
@@ -1580,7 +1719,9 @@ bool tank_menu_persistence() {
     Store disabled{};
     return boot(disabled) && !disabled.data().model.tank.enabled &&
            (disabled.data().model.tank.steering_percent == 75) &&
-           (disabled.data().model.tank.left_channel == 10);
+           (disabled.data().model.tank.left_channel == 10) &&
+           (disabled.data().model.tank.third_curve == third_curve) &&
+           (disabled.data().model.curves[third_curve - 1].y[3] == 1);
 }
 #else
 bool tank_module_disabled() {
@@ -1654,6 +1795,10 @@ int main() {
     check(active_first_loading(), "all model banks are checked before exposing the active model");
     check(background_loading_errors(), "errors in inactive models block startup and all writes");
     check(obsolete_models_can_be_recreated(), "obsolete models rejected, explicit reset allowed");
+    check(readable_old_formats_require_conversion(),
+          "readable old formats require consent, preserve data on conversion and reboot normally");
+    check(conversion_preflight_refuses_unreadable_models(),
+          "unreadable models prevent offering startup conversion without writing");
     check(dashboard_feature_gates(), "dashboard pages and model menus follow feature options");
     check(trim_menu_persistence(), "trim modes, cancellation and values persist per model");
     check(rf_ui_interlocks(), "optional RF UI interlocks");

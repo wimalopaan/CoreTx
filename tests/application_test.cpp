@@ -2527,8 +2527,10 @@ template <template <typename> typename BoardPolicy> bool active_model_background
 }
 
 template <template <typename> typename BoardPolicy> bool model_recovery_dialog() {
-    for (unsigned action = 0; action < 3; ++action) {
-        const bool reset = action != 0;
+    for (unsigned action = 0; action < (fw::features::storage_converter ? 8U : 6U); ++action) {
+        const bool old_format = action >= 3;
+        const auto choice = action % 3;
+        const bool reset = choice != 0;
         struct Scenario {};
         using Test = coretx::test::FakeApplication<Scenario, Context, BoardPolicy>;
         using Board = typename Test::Board;
@@ -2545,36 +2547,115 @@ template <template <typename> typename BoardPolicy> bool model_recovery_dialog()
                        {0x87654321},
                        fw::RadioOutput::internal,
                        coretx::afhds2a::ChannelMode::standard14};
+        model.model.inputs[0].weight_percent = coretx::InputWeight::constant<61>();
         fw::models::Record record{};
         if (!fw::models::encode(model, 0, true, 1, record))
             return false;
-        record[4] = fw::models::format_version + 1;
+        if (old_format) {
+            namespace codec = coretx::storage::detail;
+            const auto &snapshot = model.model;
+            codec::Writer out{std::span{record}.first(record.size() - 4), 34};
+            if (!codec::transfer_model_counts(out, snapshot) ||
+                !codec::transfer_model_lines(out, snapshot, true) ||
+                !codec::transfer_model_extension(out, snapshot) ||
+                !codec::transfer_multiswitch(out, snapshot, true) ||
+                !codec::transfer_dashboard_options(out, snapshot) ||
+                !codec::transfer_multiswitch_controls(out, snapshot) ||
+                !fw::models::transfer_curves(out, snapshot, true) ||
+                !codec::transfer_tank(out, snapshot, true, false))
+                return false;
+            std::fill(record.begin() + static_cast<std::ptrdiff_t>(out.position), record.end() - 4,
+                      0xFF);
+        }
+        const auto version =
+            old_format ? std::uint8_t{9} : std::uint8_t{fw::models::format_version + 1};
+        record[4] = version;
         coretx::storage::detail::Writer crc{std::span{record}.last(4)};
         crc.word(coretx::storage::crc32(std::span{record}.first(record.size() - 4)));
+        if (old_format) {
+            fw::models::Data decoded{};
+            fw::models::Info info{};
+            if (fw::models::decode(record, 0, model.radio.transmitter, decoded, info) != 1)
+                return false;
+        }
         std::copy(record.begin(), record.end(), c.eeprom.begin() + fw::models::base);
+        std::array<std::uint8_t, 64> directory{};
+        directory.fill(0xFF);
+        coretx::storage::detail::Writer out{directory};
+        out.word(fw::models::directory_magic);
+        out.field(std::uint8_t{1});
+        out.field(std::uint8_t{0});
+        out.word(std::uint32_t{1});
+        coretx::storage::detail::Writer directory_crc{std::span{directory}.last(4)};
+        directory_crc.word(coretx::storage::crc32(std::span{directory}.first(60)));
+        std::copy(directory.begin(), directory.end(),
+                  c.eeprom.begin() + fw::models::directory_base);
         const auto before = c.eeprom;
         fw::Application<Board, typename Board::Input> app{};
         (void)app.initialize();
         settle_menu(app, c);
         if (!app.models().recovery_required() || app.models().editable() || (c.eeprom != before) ||
             c.powered || c.internal_active ||
-            (app.models().detected_version() != fw::models::format_version + 1))
+            (app.models().message() != coretx::ui::tr::models_version) ||
+            (app.models().can_convert() != (old_format && fw::features::storage_converter)) ||
+            (app.models().detected_version() != version) ||
+            (app.models().expected_version() != fw::models::format_version))
             return false;
-        const auto choose = [&](const bool second) {
+        const auto navigate = [&](const Key key) {
             if constexpr (Board::Input::touch) {
-                c.touch_sample = {0, 0, 60, 32, 1, second ? s::Gesture::down : s::Gesture::up};
+                c.touch_sample = {0,  0, 60,
+                                  32, 1, key == Key::down ? s::Gesture::down : s::Gesture::up};
                 (void)step(app, c, c.now + 1000U);
                 c.touch_sample.contacts = 0;
                 (void)step(app, c, c.now + 1000U);
+            } else
+                press_key(app, c, key);
+        };
+        const auto choose = [&](const unsigned selection) {
+            navigate(Key::up);
+            navigate(Key::up);
+            for (unsigned i = 0; i < selection; ++i)
+                navigate(Key::down);
+            if constexpr (Board::Input::touch) {
                 c.touch_sample = {0, 0, 30, 50, 1, s::Gesture::none};
                 (void)step(app, c, c.now + 1000U);
                 c.touch_sample.contacts = 0;
                 (void)step(app, c, c.now + 1000U);
             } else {
-                press_key(app, c, second ? Key::down : Key::up);
                 press_key(app, c, Key::ok);
             }
         };
+        if (action >= 6) {
+            c.memory_fail_writes = action == 7;
+            choose(2);
+            for (unsigned i = 0; !app.models().loaded() && (i < 3000); ++i) {
+                if (c.powered || c.internal_active || (app.output() != fw::RadioOutput::off))
+                    return false;
+                (void)step(app, c, c.now + 1000U);
+            }
+            if (action == 7) {
+                if (!app.models().recovery_required() || app.models().editable() ||
+                    app.models().can_convert() || (c.eeprom != before) ||
+                    (app.output() != fw::RadioOutput::off) || c.powered || c.internal_active)
+                    return false;
+                continue;
+            }
+            if (!app.models().editable() || app.models().recovery_required() ||
+                (app.models().data().radio != model.radio) ||
+                (app.models().data().name != model.name) ||
+                (app.models().data().model.inputs[0].weight_percent.value() != 61) ||
+                !std::equal(c.eeprom.begin(), c.eeprom.begin() + fw::models::base, before.begin()))
+                return false;
+            const auto converted = c.eeprom;
+            fw::Application<Board, typename Board::Input> reboot{};
+            (void)reboot.initialize();
+            settle_menu(reboot, c);
+            if (!reboot.models().editable() || reboot.models().recovery_required() ||
+                (c.eeprom != converted) ||
+                (reboot.models().data().model.inputs[0].weight_percent.value() != 61))
+                return false;
+            continue;
+        }
         if (reset) {
             choose(true);
             if ((c.eeprom != before) || app.models().busy())
@@ -2583,10 +2664,10 @@ template <template <typename> typename BoardPolicy> bool model_recovery_dialog()
             if ((c.eeprom != before) || app.models().busy())
                 return false;
             choose(true);
-            c.memory_fail_writes = action == 2;
+            c.memory_fail_writes = choice == 2;
             choose(true);
             settle_menu(app, c);
-            if (action == 2) {
+            if (choice == 2) {
                 if (!app.models().recovery_required() || app.models().editable() ||
                     (c.eeprom != before))
                     return false;

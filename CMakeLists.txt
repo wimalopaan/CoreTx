@@ -13,6 +13,7 @@ option(CORETX_A7105 "Enable internal A7105 / AFHDS 2A" ON)
 option(CORETX_CRSF "Enable external CRSF module" ON)
 option(CORETX_MULTISWITCH "Enable MultiSwitch dashboards and SET4 commands (requires CRSF)" ON)
 option(CORETX_MODUL_TANKMIX "Enable the managed tank mixer module" ON)
+option(CORETX_STORAGE_CONVERTER "Enable lossless model conversion in the startup dialog" OFF)
 option(CORETX_EXTENDED_INPUTS "Enable optional i6X/i6S analog and digital hardware inputs" ON)
 option(CORETX_SECURE_UI "Require RF OFF for protected UI operations" OFF)
 option(CORETX_I2C_FAST_MODE "Use 400 kHz Fast mode instead of 100 kHz for storage I2C" ON)
@@ -74,6 +75,7 @@ target_compile_definitions(coretx INTERFACE
     CORETX_CRSF=$<BOOL:${CORETX_CRSF}>
     CORETX_MULTISWITCH=$<AND:$<BOOL:${CORETX_CRSF}>,$<BOOL:${CORETX_MULTISWITCH}>>
     CORETX_MODUL_TANKMIX=$<OR:$<BOOL:${CORETX_MODUL_TANKMIX}>,$<BOOL:$<TARGET_PROPERTY:CORETX_CONVERTER>>>
+    CORETX_STORAGE_CONVERTER=$<BOOL:${CORETX_STORAGE_CONVERTER}>
     CORETX_I6S=$<BOOL:${CORETX_I6S}>
     CORETX_EXTENDED_INPUTS=$<BOOL:${CORETX_EXTENDED_INPUTS}>
     CORETX_SECURE_UI=$<BOOL:${CORETX_SECURE_UI}>

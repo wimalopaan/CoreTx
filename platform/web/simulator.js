@@ -61,10 +61,13 @@ if (typeof document !== "undefined") startBrowser();
 function startBrowser() {
   const $ = id => document.getElementById(id);
   const elements = Object.fromEntries([
-    "profile", "profile-badge", "native-controls", "analog-controls", "switches", "sticks",
-    "trims", "axes", "lcd", "lcd-frame", "lcd-hint", "channels", "output-state", "run-status",
-    "storage-status", "rf-status", "notice", "storage-warning", "fatal", "download",
-    "import-file", "commit-import", "restore", "reset", "save-detail",
+    "profile", "expert-mode", "analog-panel", "storage-panel",
+    "native-controls", "analog-controls", "switches", "sticks", "stick-centering",
+    "trims-left", "trims-right", "axes", "lcd", "lcd-frame", "lcd-controls", "lcd-hint",
+    "navigation", "control-hint",
+    "channels", "output-state", "run-status", "storage-status", "rf-status", "notice",
+    "storage-warning", "fatal", "download", "import-file", "commit-import", "restore",
+    "reset", "save-detail",
   ].map(id => [id, $(id)]));
   const context = elements.lcd.getContext("2d", { alpha: false });
   const image = context?.createImageData(128, 64);
@@ -77,6 +80,7 @@ function startBrowser() {
   const channelViews = [];
   const holds = new Map();
   const keyboardHolds = new Map();
+  const navigationKeys = new Map();
   const pointerReleases = new Set();
   const dynamicReleases = new Set();
   let module = null;
@@ -285,10 +289,17 @@ function startBrowser() {
       switches.fill(0);
       analogs.fill(2048);
       elements.profile.value = profile;
-      elements["profile-badge"].textContent = `FS-${profile.slice(0, 2)}${profile.slice(2).toUpperCase()}`;
       elements["lcd-hint"].textContent = profile === "i6s"
-        ? "Touch-LCD: Antippen, Wischen und Halten wie am Sender; alternativ Sendertasten."
+        ? "Touch-LCD: Antippen, Wischen und Halten wie am Sender; Zusatzknoepfe beruehren die LCD-Touchleisten."
         : "LCD der nativen Firmware; Bedienung mit den Sendertasten.";
+      elements["control-hint"].textContent = profile === "i6s"
+        ? "LCD-Touchleisten: Oben, OK und Zurueck. OK halten oeffnet das Sendermenue. " +
+          "Tastatur: Pfeil hoch / Enter / Escape beruehren dieselben LCD-Flaechen."
+        : "Sendertasten: Hoch, Runter, OK und Zurueck. OK oder Zurueck halten fuer Langdruck. " +
+          "Tastatur: Pfeil hoch / runter, Enter / Escape; ebenfalls halten statt zusaetzlicher Langdruck-Tasten.";
+      elements.lcd.setAttribute("aria-label", profile === "i6s"
+        ? "Touch-LCD, 128 mal 64 Pixel. Pfeil hoch, Enter und Escape bedienen die LCD-Touchleisten."
+        : "Sender-LCD, 128 mal 64 Pixel. Pfeil hoch und runter, Enter fuer OK, Escape fuer Zurueck.");
       elements.lcd.classList.toggle("touch", profile === "i6s");
       buildPhysicalControls();
       storageWarning(stored.warning || stored.error || "");
@@ -469,7 +480,7 @@ function startBrowser() {
       pad.className = "stick-pad";
       pad.setAttribute("role", "group");
       pad.setAttribute("aria-labelledby", label.id);
-      pad.setAttribute("aria-description", "Ziehen mit Maus oder Touch. Tastatur und genaue Werte unter Analoge Eingaenge.");
+      pad.setAttribute("aria-description", "Ziehen mit Maus oder Touch. Tastatur und genaue Werte unter Analoge Eingaenge im Expertenmodus.");
       const knob = document.createElement("span");
       knob.className = "stick-knob";
       pad.append(knob);
@@ -497,9 +508,7 @@ function startBrowser() {
       for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
         pad.addEventListener(type, event => { if (pointer === event.pointerId) release(); });
       }
-      const options = document.createElement("div");
-      options.className = "spring-options";
-      for (const [index, title] of [[x, "X"], [y, "Y"]]) {
+      for (const index of [x, y]) {
         const toggleLabel = document.createElement("label");
         const input = document.createElement("input");
         input.type = "checkbox";
@@ -515,11 +524,12 @@ function startBrowser() {
             notice(`Geberoptionen nicht gespeichert: ${error.message}.`, true);
           }
         });
-        toggleLabel.append(input, document.createTextNode(`${title} zentrieren`));
-        options.append(toggleLabel);
+        toggleLabel.append(input, document.createTextNode(AXES[index][0]));
+        elements["stick-centering"].append(toggleLabel);
       }
-      wrapper.append(label, pad, options);
-      elements.sticks.append(wrapper);
+      wrapper.append(label, pad);
+      if (right) elements.sticks.append(wrapper);
+      else elements.sticks.insertBefore(wrapper, elements["stick-centering"]);
       stickViews.push({ x, y, knob, right });
     }
   }
@@ -531,26 +541,85 @@ function startBrowser() {
     }
     dynamicReleases.clear();
     elements.switches.replaceChildren();
-    elements.trims.replaceChildren();
+    elements["trims-left"].replaceChildren();
+    elements["trims-right"].replaceChildren();
+    elements["trims-left"].hidden = profile === "i6s";
+    elements["trims-right"].hidden = profile === "i6s";
+    elements["lcd-controls"].classList.toggle("has-trims", profile === "i6x");
+    elements.navigation.replaceChildren();
+    navigationKeys.clear();
+    elements.navigation.classList.toggle("touch-controls", profile === "i6s");
+    elements.navigation.setAttribute("aria-label", profile === "i6s" ? "LCD-Touchleisten" : "Sendertasten");
+    const controls = profile === "i6s" ? [
+      { label: "LCD: Oben", shortcut: "ArrowUp", touch: [64, 7] },
+      { label: "LCD: OK", shortcut: "Enter", touch: [32, 55] },
+      { label: "LCD: Zurueck", shortcut: "Escape", touch: [96, 55] },
+    ] : [
+      { label: "Hoch", shortcut: "ArrowUp", key: 1 },
+      { label: "Runter", shortcut: "ArrowDown", key: 2 },
+      { label: "OK", shortcut: "Enter", key: 5 },
+      { label: "Zurueck", shortcut: "Escape", key: 6 },
+    ];
+    for (const control of controls) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = control.label;
+      button.classList.toggle("primary", control.shortcut === "Enter");
+      const id = control.key ? `k${control.key}` : `touch:${control.touch.join(",")}`;
+      let setter;
+      if (control.key) {
+        button.dataset.key = control.key;
+        setter = down => module._sim_key(control.key, Number(down));
+      } else {
+        const [x, y] = control.touch;
+        button.dataset.touch = control.touch.join(",");
+        setter = down => {
+          if (down) {
+            if (touch) return;
+            touch = { id, x, y };
+            module._sim_touch(x, y, 1);
+          } else if (touch?.id === id) endTouch();
+        };
+        for (const type of ["pointercancel", "lostpointercapture", "blur"]) {
+          button.addEventListener(type, () => {
+            if (touch?.id === id) endTouch(true);
+          });
+        }
+      }
+      navigationKeys.set(control.shortcut, { id, setter });
+      bindHold(button, id, setter, true);
+      elements.navigation.append(button);
+    }
     ["SA", "SB", "SC", "SD"].forEach((name, index) => {
-      const label = document.createElement("label");
+      const label = document.createElement("div");
       label.className = "switch-control";
       const threeWay = index === 2 || (index === 1 && profile === "i6s");
-      label.append(document.createTextNode(`${name} / ${threeWay ? 3 : 2}-fach`));
-      const select = document.createElement("select");
-      select.setAttribute("aria-label", `Schalter ${name}`);
-      for (const [value, text] of [[0, "Oben"], [1, "Mitte"], [2, "Unten"]]) {
-        if (value === 1 && !threeWay) continue;
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = text;
-        select.append(option);
-      }
-      select.addEventListener("change", () => {
-        switches[index] = Number(select.value);
+      const caption = document.createElement("span");
+      caption.textContent = `${name} / ${threeWay ? 3 : 2}-fach`;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "switch-toggle";
+      button.dataset.position = "0";
+      button.setAttribute("aria-label", `Schalter ${name}`);
+      const lever = document.createElement("span");
+      lever.className = "switch-lever";
+      lever.setAttribute("aria-hidden", "true");
+      button.append(lever);
+      const position = document.createElement("span");
+      position.className = "switch-position";
+      position.id = `switch-position-${index}`;
+      position.textContent = "Oben";
+      position.setAttribute("aria-live", "polite");
+      button.setAttribute("aria-describedby", position.id);
+      button.title = `${threeWay ? 3 : 2} Stellungen; mit Klick, Enter oder Leertaste umschalten.`;
+      const positions = threeWay ? [0, 1, 2] : [0, 2];
+      button.addEventListener("click", () => {
+        switches[index] = positions[(positions.indexOf(switches[index]) + 1) % positions.length];
+        button.dataset.position = String(switches[index]);
+        position.textContent = ["Oben", "Mitte", "Unten"][switches[index]];
         nativeCall(() => module._sim_set_switch(index, switches[index]));
       });
-      label.append(select);
+      label.append(caption, button, position);
       elements.switches.append(label);
     });
     if (profile === "i6s") {
@@ -583,11 +652,12 @@ function startBrowser() {
           bindHold(button, `t${index}`, down => module._sim_trim(index, Number(down)), true);
           pair.append(button);
         });
-        elements.trims.append(pair);
+        elements[axis < 2 ? "trims-right" : "trims-left"].append(pair);
       });
     }
     for (let i = 0; i < 8; i++) setAnalog(i, analogs[i]);
     updateStickPositions();
+    resizeLCD();
   }
 
   function buildChannels() {
@@ -719,6 +789,7 @@ function startBrowser() {
   }
 
   function releaseAll() {
+    endTouch(true);
     for (const release of pointerReleases) release();
     for (const hold of holds.values()) {
       // Avoid nativeCall recursion while recovering from a trap.
@@ -731,7 +802,6 @@ function startBrowser() {
     holds.clear();
     keyboardHolds.clear();
     document.querySelectorAll("button.held").forEach(button => button.classList.remove("held"));
-    endTouch(true);
     if (axisViews.length === 8) {
       for (let i = 0; i < 4; i++) if (springs[i]) setAnalog(i, 2048);
     }
@@ -745,19 +815,18 @@ function startBrowser() {
   document.addEventListener("keydown", event => {
     if (event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey ||
       isFormEdit(event.target) || !initialized || failed || changing) return;
-    const key = { ArrowUp: 1, ArrowDown: 2, ArrowLeft: 3, ArrowRight: 4,
-      Enter: event.shiftKey ? 7 : 5, Escape: event.shiftKey ? 8 : 6 }[event.key];
-    if (!key) return;
+    const control = navigationKeys.get(event.key);
+    if (!control) return;
     event.preventDefault();
-    keyboardHolds.set(event.code, key);
-    setHold(`k${key}`, `keyboard:${event.code}`, true, down => module._sim_key(key, Number(down)));
+    keyboardHolds.set(event.code, control);
+    setHold(control.id, `keyboard:${event.code}`, true, control.setter);
   });
   document.addEventListener("keyup", event => {
-    const key = keyboardHolds.get(event.code);
-    if (!key) return;
+    const control = keyboardHolds.get(event.code);
+    if (!control) return;
     event.preventDefault();
     keyboardHolds.delete(event.code);
-    setHold(`k${key}`, `keyboard:${event.code}`, false, down => module._sim_key(key, Number(down)));
+    setHold(control.id, `keyboard:${event.code}`, false, control.setter);
   });
 
   elements.lcd.addEventListener("pointerdown", event => {
@@ -782,6 +851,12 @@ function startBrowser() {
     });
   }
 
+  elements["expert-mode"].addEventListener("change", () => {
+    const expert = elements["expert-mode"].checked;
+    elements["analog-panel"].hidden = !expert;
+    elements["storage-panel"].hidden = !expert;
+    document.body.classList.toggle("expert-mode", expert);
+  });
   elements.profile.addEventListener("change", () => changeProfile(elements.profile.value));
   elements.download.addEventListener("click", () => {
     try {
@@ -909,10 +984,6 @@ function startBrowser() {
   buildAxes();
   buildSticks();
   buildChannels();
-  document.querySelectorAll("[data-key]").forEach(button => {
-    const key = Number(button.dataset.key);
-    bindHold(button, `k${key}`, down => module._sim_key(key, Number(down)));
-  });
   resizeLCD();
   if (!context) {
     elements.fatal.textContent = "Canvas 2D nicht verfuegbar. Bitte einen Browser mit Canvas-Unterstuetzung verwenden.";

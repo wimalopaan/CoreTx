@@ -889,6 +889,95 @@ constexpr bool tank_reversal_option() {
 }
 static_assert(tank_reversal_option());
 
+constexpr bool tank_third_motor() {
+    using namespace coretx;
+    Model model{};
+    model.inputs.resize<2>();
+    model.inputs[0].trim = TrimSource::none;
+    model.inputs[1].destination = 1;
+    model.inputs[1].source.index = 1;
+    model.curves[0].y[0] = -90; // Preserve edited but unreferenced curves.
+    model.inputs[1].curve = 2;
+    TankMixer tank{};
+    tank.enabled = true;
+    tank.third_motor = true;
+    tank.third_channel = 15;
+    if (!configure_tank(model, tank) || (model.mixes.size() != 7) ||
+        (model.tank.third_curve != 3) ||
+        (model.curves[2] != Curve{{-50, 0, 25}, {0, 0, 0, 0, 100}}))
+        return false;
+    Controls controls{};
+    LogicalState state{};
+    controls.analogs[1] = 300;
+    constexpr std::array drives{-1024, -512, 0, 256, 640, 1024};
+    constexpr std::array expected{0, 0, 0, 0, 512, 1024};
+    for (std::size_t i = 0; i < drives.size(); ++i) {
+        controls.analogs[0] = static_cast<std::int16_t>(drives[i]);
+        const auto result = evaluate(model, controls, state);
+        if (!result || (result.frame.channels[15] != expected[i]) ||
+            !tank_mix_active(MixRole::tank_third, result.frame))
+            return false;
+    }
+    // The third output follows the processed drive input and normal output settings.
+    model.inputs[0].weight_percent = InputWeight::constant<-100>();
+    model.outputs[15].reversed = true;
+    controls.analogs[0] = -640;
+    if (evaluate(model, controls).frame.channels[15] != -512)
+        return false;
+    model.curves[2].y.back() = 50;
+    tank.steering_percent = 50;
+    if (!configure_tank(model, tank) || (model.tank.third_curve != 3) ||
+        (evaluate(model, controls).frame.channels[15] != -256))
+        return false;
+    for (const unsigned mutation : {0U, 1U, 2U, 3U, 4U, 5U}) {
+        auto bad = model;
+        switch (mutation) {
+        case 0:
+            bad.mixes[6].role = MixRole::tank_drive;
+            break;
+        case 1:
+            bad.mixes[0].role = MixRole::tank_third;
+            break;
+        case 2:
+            bad.mixes[6].curve = 1;
+            break;
+        case 3:
+            bad.tank.third_curve = 0;
+            break;
+        case 4:
+            (void)bad.mixes.try_erase(6);
+            break;
+        case 5:
+            bad.tank.third_channel = bad.tank.left_channel;
+            break;
+        }
+        if (validate(bad))
+            return false;
+    }
+    tank.third_motor = false;
+    if (!configure_tank(model, tank) || (model.mixes.size() != 6))
+        return false;
+    tank.third_motor = true;
+    if (!configure_tank(model, tank) || (model.curves[2].y.back() != 50))
+        return false;
+    tank.enabled = false;
+    if (!configure_tank(model, tank) || !model.mixes.empty() || (model.tank.third_curve != 3))
+        return false;
+    Model unavailable{};
+    unavailable.curves.fill(Curve{{-50, 0, 50}, {0, 0, 0, 0, 0}});
+    tank.enabled = true;
+    if ((configure_tank(unavailable, tank).code != ErrorCode::curve_capacity) ||
+        !unavailable.mixes.empty() || unavailable.tank.third_motor ||
+        (unavailable.curves[0].y.back() != 0))
+        return false;
+    Model conflict{};
+    conflict.mixes.resize<1>();
+    conflict.mixes[0].destination = 15;
+    return (configure_tank(conflict, tank).code == ErrorCode::tank_conflict) &&
+           (conflict.mixes.size() == 1) && (conflict.curves[0] == Curve{});
+}
+static_assert(tank_third_motor());
+
 constexpr bool tank_configuration_validation() {
     using namespace coretx;
     Model model{};
@@ -996,6 +1085,7 @@ int main() {
 #if CORETX_MODUL_TANKMIX
     CHECK(tank_pipeline());
     CHECK(tank_reversal_option());
+    CHECK(tank_third_motor());
     CHECK(tank_configuration_validation());
 #else
     CHECK(tank_unavailable());

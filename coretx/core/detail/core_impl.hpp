@@ -34,17 +34,30 @@ constexpr bool valid_tank(const TankMixer &tank) noexcept {
     return (tank.drive_input < input_count) && (tank.steering_input < input_count) &&
            (tank.left_channel < channel_count) && (tank.right_channel < channel_count) &&
            (tank.left_channel != tank.right_channel) && (tank.steering_percent <= 100) &&
-           in_range(tank.hysteresis_percent, 1, 20);
+           in_range(tank.hysteresis_percent, 1, 20) && (tank.third_channel < channel_count) &&
+           (tank.third_curve <= curve_count) &&
+           (!tank.third_motor || ((tank.third_channel != tank.left_channel) &&
+                                  (tank.third_channel != tank.right_channel))) &&
+           (!tank.enabled || !tank.third_motor || (tank.third_curve != 0));
 }
 
 #if CORETX_MODUL_TANKMIX
+constexpr bool tank_channel(const TankMixer &tank, const std::size_t channel) noexcept {
+    return (channel == tank.left_channel) || (channel == tank.right_channel) ||
+           (tank.third_motor && (channel == tank.third_channel));
+}
+
 constexpr MixLine tank_line(const TankMixer &tank, const std::uint8_t channel,
                             const MixRole role) noexcept {
     MixLine line{};
     line.destination = channel;
     line.role = role;
-    line.source.index = role == MixRole::tank_drive ? tank.drive_input : tank.steering_input;
-    if (role != MixRole::tank_drive) {
+    line.source.index = (role == MixRole::tank_drive) || (role == MixRole::tank_third)
+                            ? tank.drive_input
+                            : tank.steering_input;
+    if (role == MixRole::tank_third)
+        line.curve = tank.third_curve;
+    else if (role != MixRole::tank_drive) {
         const bool positive = (channel == tank.left_channel) == (role == MixRole::tank_forward);
         (void)line.weight_percent.try_set(positive ? tank.steering_percent
                                                    : -tank.steering_percent);
@@ -60,7 +73,7 @@ constexpr bool canonical_tank_line(const MixLine &line, const TankMixer &tank) n
            (line.condition.position == SwitchPosition::up) && !line.condition.inverted &&
            (line.multiplex == Multiplex::add) && line.carry_trim &&
            (line.weight_percent == expected.weight_percent) && (line.offset_percent.value() == 0) &&
-           (line.curve == 0);
+           (line.curve == expected.curve);
 }
 #endif
 
@@ -482,7 +495,7 @@ constexpr Status validate(const Model &model) noexcept {
         }
     }
 #if CORETX_MODUL_TANKMIX
-    std::array<std::uint8_t, 2> tank_roles{};
+    std::array<std::uint8_t, 3> tank_roles{};
 #else
     if (model.tank.enabled)
         return {ErrorCode::tank_unavailable, Stage::model, 0};
@@ -490,17 +503,22 @@ constexpr Status validate(const Model &model) noexcept {
     for (std::size_t i = 0; i < model.mixes.size(); ++i) {
         const auto &line = model.mixes[i];
 #if CORETX_MODUL_TANKMIX
-        if (line.role > MixRole::tank_reverse)
+        if (line.role > MixRole::tank_third)
             return {ErrorCode::tank_settings, Stage::mixes, i};
-        const bool reserved = (line.destination == model.tank.left_channel) ||
-                              (line.destination == model.tank.right_channel);
+        const bool reserved = detail::tank_channel(model.tank, line.destination);
         if (line.role == MixRole::manual) {
             if (model.tank.enabled && reserved)
                 return {ErrorCode::tank_conflict, Stage::mixes, i};
         } else {
             if (!model.tank.enabled || !reserved || !detail::canonical_tank_line(line, model.tank))
                 return {ErrorCode::tank_settings, Stage::mixes, i};
-            auto &roles = tank_roles[line.destination == model.tank.left_channel ? 0 : 1];
+            const bool third =
+                model.tank.third_motor && (line.destination == model.tank.third_channel);
+            if (third != (line.role == MixRole::tank_third))
+                return {ErrorCode::tank_settings, Stage::mixes, i};
+            auto &roles = tank_roles[third                                         ? 2
+                                     : line.destination == model.tank.left_channel ? 0
+                                                                                   : 1];
             const auto bit =
                 static_cast<std::uint8_t>(1U << (static_cast<unsigned>(line.role) - 1));
             if ((roles & bit) != 0)
@@ -530,7 +548,8 @@ constexpr Status validate(const Model &model) noexcept {
         }
     }
 #if CORETX_MODUL_TANKMIX
-    if (model.tank.enabled && ((tank_roles[0] != 7) || (tank_roles[1] != 7)))
+    if (model.tank.enabled && ((tank_roles[0] != 7) || (tank_roles[1] != 7) ||
+                               (tank_roles[2] != (model.tank.third_motor ? 8 : 0))))
         return {ErrorCode::tank_settings, Stage::model, 0};
 #endif
     for (std::size_t i = 0; i < channel_count; ++i) {
@@ -543,7 +562,29 @@ constexpr Status validate(const Model &model) noexcept {
 }
 
 #if CORETX_MODUL_TANKMIX
-constexpr Status configure_tank(Model &model, const TankMixer &tank) noexcept {
+constexpr Status configure_tank(Model &model, const TankMixer &settings) noexcept {
+    auto tank = settings;
+    if (tank.third_curve == 0)
+        tank.third_curve = model.tank.third_curve;
+    bool initialize_curve{};
+    if (tank.third_motor && (tank.third_curve == 0)) {
+        for (std::size_t i = 0; i < curve_count; ++i) {
+            if (model.curves[i] != Curve{})
+                continue;
+            bool used = model.tank.third_curve == i + 1;
+            for (const auto &line : model.inputs)
+                used |= line.curve == i + 1;
+            for (const auto &line : model.mixes)
+                used |= line.curve == i + 1;
+            if (!used) {
+                tank.third_curve = static_cast<std::uint8_t>(i + 1);
+                initialize_curve = true;
+                break;
+            }
+        }
+        if (tank.third_curve == 0)
+            return {ErrorCode::curve_capacity, Stage::model, curve_count};
+    }
     if (!detail::valid_tank(tank))
         return {ErrorCode::tank_settings, Stage::model, 0};
     if (const auto status = validate(model); !status)
@@ -554,33 +595,41 @@ constexpr Status configure_tank(Model &model, const TankMixer &tank) noexcept {
         if (line.role != MixRole::manual)
             continue;
         ++manual_count;
-        if (tank.enabled &&
-            ((line.destination == tank.left_channel) || (line.destination == tank.right_channel)))
+        if (tank.enabled && detail::tank_channel(tank, line.destination))
             return {ErrorCode::tank_conflict, Stage::mixes, i};
     }
-    if (manual_count + (tank.enabled ? 6U : 0U) > max_mix_lines)
+    if (manual_count + (tank.enabled ? (tank.third_motor ? 7U : 6U) : 0U) > max_mix_lines)
         return {ErrorCode::capacity, Stage::mixes, manual_count};
     for (auto i = model.mixes.size(); i > 0; --i)
         if (model.mixes[i - 1].role != MixRole::manual)
             (void)model.mixes.try_erase(i - 1);
     // Preflight above guarantees all insertions succeed; no model-sized stack copy is needed.
     for (std::size_t channel = 0; channel < channel_count; ++channel) {
-        if (tank.enabled && ((channel == tank.left_channel) || (channel == tank.right_channel))) {
+        if (tank.enabled && detail::tank_channel(tank, channel)) {
             std::size_t index{};
             while ((index < model.mixes.size()) && (model.mixes[index].destination < channel))
                 ++index;
-            for (const auto role :
-                 {MixRole::tank_drive, MixRole::tank_forward, MixRole::tank_reverse})
+            if (tank.third_motor && (channel == tank.third_channel))
                 (void)model.mixes.try_insert(
-                    index++, detail::tank_line(tank, static_cast<std::uint8_t>(channel), role));
+                    index, detail::tank_line(tank, static_cast<std::uint8_t>(channel),
+                                             MixRole::tank_third));
+            else {
+                for (const auto role :
+                     {MixRole::tank_drive, MixRole::tank_forward, MixRole::tank_reverse})
+                    (void)model.mixes.try_insert(
+                        index++, detail::tank_line(tank, static_cast<std::uint8_t>(channel), role));
+            }
         }
     }
+    if (initialize_curve)
+        model.curves[tank.third_curve - 1] = {{-50, 0, 25}, {0, 0, 0, 0, 100}};
     model.tank = tank;
     return {};
 }
 
 constexpr bool tank_mix_active(const MixRole role, const Frame &frame) noexcept {
     return (role == MixRole::manual) || (role == MixRole::tank_drive) ||
+           (role == MixRole::tank_third) ||
            ((role == MixRole::tank_forward) && !frame.tank_reverse) ||
            ((role == MixRole::tank_reverse) && frame.tank_reverse);
 }
@@ -726,6 +775,8 @@ constexpr const char *error_message(const ErrorCode &code) noexcept {
         return "tank channel contains manual mixer lines";
     case ErrorCode::capacity:
         return "not enough mixer line capacity";
+    case ErrorCode::curve_capacity:
+        return "no unused default model curve";
     case ErrorCode::tank_unavailable:
         return "tank mixer module not compiled in";
     }

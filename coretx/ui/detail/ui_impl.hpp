@@ -39,8 +39,9 @@ inline constexpr std::array<std::string_view, 11> mix_fields{
     "TARGET", "SWITCH",   "SW POS",   "SW NOT", "CURVE"};
 inline constexpr std::array<std::string_view, 2> curve_fields{"X %", "Y %"};
 #if CORETX_MODUL_TANKMIX
-inline constexpr std::array<std::string_view, 8> tank_fields{
-    "ENABLED", "DRIVE", "STEERING", "LEFT CH", "RIGHT CH", "STEER %", "HYST %", "STEER REV"};
+inline constexpr std::array<std::string_view, 11> tank_fields{
+    "ENABLED", "DRIVE",     "STEERING",  "LEFT CH", "RIGHT CH", "STEER %",
+    "HYST %",  "STEER REV", "3RD MOTOR", "3RD CH",  "3RD CURVE"};
 #endif
 inline constexpr std::array<std::string_view, 4> output_fields{"MIN 0.1%", "MAX 0.1%", "SUB 0.1%",
                                                                "REVERSE"};
@@ -63,6 +64,7 @@ struct ActionResult {
 constexpr std::string_view tank_label(const MixRole role) noexcept {
     return role == MixRole::tank_drive     ? "TANK DRIVE"
            : role == MixRole::tank_forward ? "TANK FWD"
+           : role == MixRole::tank_third   ? "TANK MOTOR 3"
                                            : "TANK REV";
 }
 
@@ -82,8 +84,14 @@ constexpr int tank_value(const TankMixer &tank, const std::size_t row) noexcept 
         return tank.steering_percent;
     case 6:
         return tank.hysteresis_percent;
-    default:
+    case 7:
         return tank.reverse_steering;
+    case 8:
+        return tank.third_motor;
+    case 9:
+        return tank.third_channel;
+    default:
+        return tank.third_curve;
     }
 }
 #endif
@@ -618,6 +626,12 @@ constexpr void Interface::set_value(Model &model, const int value) noexcept {
         case 7:
             tank_draft_.reverse_steering = value != 0;
             break;
+        case 8:
+            tank_draft_.third_motor = value != 0;
+            break;
+        case 9:
+            tank_draft_.third_channel = static_cast<std::uint8_t>(value);
+            break;
         }
         return;
     }
@@ -805,11 +819,12 @@ constexpr void Interface::change(Model &model, const int direction, const bool c
 #if CORETX_MODUL_TANKMIX
     else if (page_ == Page::tank) {
         const auto selected = row(model);
-        maximum = (selected == 0) || (selected == 7) ? 1
-                  : selected <= 2                    ? static_cast<int>(input_count) - 1
-                  : selected <= 4                    ? static_cast<int>(channel_count) - 1
-                  : selected == 5                    ? 100
-                                                     : 20;
+        maximum = (selected == 0) || (selected == 7) || (selected == 8) ? 1
+                  : selected == 9 ? static_cast<int>(channel_count) - 1
+                  : selected <= 2 ? static_cast<int>(input_count) - 1
+                  : selected <= 4 ? static_cast<int>(channel_count) - 1
+                  : selected == 5 ? 100
+                                  : 20;
         minimum = selected == 6 ? 1 : 0;
         step = coarse && (selected >= 5) ? 10 : 1;
     }
@@ -849,6 +864,15 @@ constexpr bool Interface::line_page() const noexcept {
 }
 
 constexpr void Interface::begin_edit(const Model &model) noexcept {
+#if CORETX_MODUL_TANKMIX
+    if ((page_ == Page::tank) && (row(model) == 10)) {
+        if (model.tank.third_curve != 0)
+            open_curve(static_cast<std::uint8_t>(model.tank.third_curve - 1));
+        else
+            notice_ = "ENABLE 3RD MOTOR FIRST";
+        return;
+    }
+#endif
     if (managed_mix(model)) {
         notice_ = "TANK READ ONLY";
         return;
@@ -1373,12 +1397,18 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
             const auto &tank = editing_ && (line == selected) ? tank_draft_ : model.tank;
             const int current = detail::tank_value(tank, line);
             display.text(1, y, detail::tank_fields[line], ink);
-            if ((line == 0) || (line == 7))
+            if ((line == 0) || (line == 7) || (line == 8))
                 display.text(104, y, current ? "ON" : "OFF", ink);
-            else if (line <= 4)
+            else if ((line <= 4) || (line == 9))
                 detail::indexed_label(display, 98, y, line <= 2 ? "I" : "CH",
                                       static_cast<std::size_t>(current), ink);
-            else
+            else if (line == 10) {
+                if (current != 0)
+                    detail::indexed_label(display, 104, y, "C",
+                                          static_cast<std::size_t>(current - 1), ink);
+                else
+                    display.text(104, y, "---", ink);
+            } else
                 display.number(126, y, current, ink);
         } else
 #endif

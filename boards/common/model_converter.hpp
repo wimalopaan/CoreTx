@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "boards/common/model_storage.hpp"
+#include "boards/common/model_codec.hpp"
+#include "boards/common/model_migration.hpp"
+#include "boards/common/slot_transfer.hpp"
 
 namespace coretx::firmware {
 
 // Updating the native format requires explicit converter/fixture review.
-inline constexpr std::uint8_t converter_target = 9;
+inline constexpr std::uint8_t converter_target = 10;
 static_assert(converter_target == storage::format_version,
               "Update the converter and its independent version fixtures");
 static_assert(storage::oldest_format_version == 6,
               "Review supported source versions and converter fixtures");
 
-template <typename Memory> class ModelConverter {
+template <typename Memory> class ModelConversion {
     static_assert(Memory::page_size == 64);
     using Transfer = SlotTransfer<Memory>;
     enum class Stage : std::uint8_t {
@@ -36,8 +38,16 @@ template <typename Memory> class ModelConverter {
     };
 
   public:
+    constexpr ModelConversion(models::Record &record, models::Data &data) noexcept
+        : record_{record}, data_{data} {}
+    ModelConversion(const ModelConversion &) = delete;
+    ModelConversion &operator=(const ModelConversion &) = delete;
     enum class State : std::uint8_t { reading, preview, converting, complete, failed };
     void initialize(const afhds2a::TxId transmitter) noexcept {
+        auto &record = record_;
+        auto &data = data_;
+        std::destroy_at(this);
+        std::construct_at(this, record, data);
         transmitter_ = transmitter;
         transfer_.read(model_migration::address, marker_);
     }
@@ -339,9 +349,9 @@ template <typename Memory> class ModelConverter {
         stage_ = Stage::scan;
         read_bank();
     }
-    models::Record record_{};
+    models::Record &record_;
     model_migration::Record marker_{};
-    models::Data data_{models::empty_model};
+    models::Data &data_;
     std::array<Bank, models::count * 2> banks_{};
     std::array<std::uint8_t, models::count> selected_{};
     Transfer transfer_{};
@@ -353,5 +363,25 @@ template <typename Memory> class ModelConverter {
     const char *error_ = "";
     Stage stage_{Stage::marker};
     bool resume_{}, repair_marker_{}, writing_{}, directory_valid_{}, final_scan_{};
+};
+
+template <typename Memory> class ModelConverter {
+    models::Record record_{};
+    models::Data data_{models::empty_model};
+    ModelConversion<Memory> conversion_{record_, data_};
+
+  public:
+    using State = ModelConversion<Memory>::State;
+    void initialize(const afhds2a::TxId transmitter) noexcept {
+        conversion_.initialize(transmitter);
+    }
+    [[nodiscard]] State state() const noexcept { return conversion_.state(); }
+    [[nodiscard]] const char *error() const noexcept { return conversion_.error(); }
+    [[nodiscard]] unsigned model_count() const noexcept { return conversion_.model_count(); }
+    [[nodiscard]] std::uint16_t versions() const noexcept { return conversion_.versions(); }
+    [[nodiscard]] bool resuming() const noexcept { return conversion_.resuming(); }
+    [[nodiscard]] bool repairing_marker() const noexcept { return conversion_.repairing_marker(); }
+    bool confirm() noexcept { return conversion_.confirm(); }
+    void service(const TimestampUs now) noexcept { conversion_.service(now); }
 };
 } // namespace coretx::firmware

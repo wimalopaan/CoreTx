@@ -77,7 +77,8 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         storage_.initialize(Board::transmitter_id());
         model_applied_ = false;
         recovery_ = Recovery::none;
-        recovery_selected_ = recovery_drawn_ = false;
+        recovery_selected_ = 0;
+        recovery_drawn_ = false;
         menu_ = {};
         if constexpr (has_external_rf)
             crsf_.reset();
@@ -104,13 +105,15 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         }
         service_storage(now);
         if (storage_.models.recovery_required() &&
-            ((recovery_ == Recovery::none) || (recovery_ == Recovery::resetting))) {
+            ((recovery_ == Recovery::none) || (recovery_ == Recovery::resetting) ||
+             (recovery_ == Recovery::converting))) {
             select_output(RadioOutput::off, now);
             Board::power_off();
             recovery_ = Recovery::choice;
             recovery_selected_ = false;
             drawn_at_ = now - redraw_interval;
-        } else if ((recovery_ == Recovery::resetting) && storage_.models.editable())
+        } else if (((recovery_ == Recovery::resetting) || (recovery_ == Recovery::converting)) &&
+                   storage_.models.editable())
             recovery_ = Recovery::none;
         diagnostics_.allow_logical_commit(!menu_.pending_model_edit());
 
@@ -842,18 +845,28 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         render_dashboard_page(model);
         Display::begin_frame();
     }
-    enum class Recovery : std::uint8_t { none, choice, confirm, resetting, power_off };
+    enum class Recovery : std::uint8_t { none, choice, confirm, resetting, converting, power_off };
     constexpr void handle_recovery(Key key, const TimestampUs now) noexcept {
-        if ((recovery_ == Recovery::resetting) || (recovery_ == Recovery::power_off))
+        if ((recovery_ == Recovery::resetting) || (recovery_ == Recovery::converting) ||
+            (recovery_ == Recovery::power_off))
             return;
-        if ((key == Key::up) || (key == Key::down))
-            recovery_selected_ = key == Key::down;
-        else if ((key == Key::cancel) || (key == Key::cancel_long)) {
+        if ((key == Key::up) || (key == Key::down)) {
+            const std::uint8_t last =
+                (recovery_ == Recovery::choice) && storage_.models.can_convert() ? 2 : 1;
+            if ((key == Key::down) && (recovery_selected_ < last))
+                ++recovery_selected_;
+            else if ((key == Key::up) && (recovery_selected_ > 0))
+                --recovery_selected_;
+        } else if ((key == Key::cancel) || (key == Key::cancel_long)) {
             recovery_ = Recovery::choice;
             recovery_selected_ = false;
         } else if (key == Key::ok) {
             if (recovery_ == Recovery::choice) {
-                recovery_ = recovery_selected_ ? Recovery::confirm : Recovery::power_off;
+                if (recovery_selected_ == 2) {
+                    if (storage_.models.convert_models())
+                        recovery_ = Recovery::converting;
+                } else
+                    recovery_ = recovery_selected_ ? Recovery::confirm : Recovery::power_off;
                 recovery_selected_ = false;
             } else if (!recovery_selected_)
                 recovery_ = Recovery::choice;
@@ -874,7 +887,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             framebuffer_.text(0, 20, tr::models_recovery_switch_off);
             framebuffer_.text(0, 40, tr::models_recovery_converter);
             recovery_drawn_ = true;
-        } else if (recovery_ == Recovery::resetting)
+        } else if ((recovery_ == Recovery::resetting) || (recovery_ == Recovery::converting))
             framebuffer_.text(0, 24, storage_.models.message());
         else {
             const bool confirm = recovery_ == Recovery::confirm;
@@ -882,21 +895,19 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
                               confirm ? tr::models_recovery_confirm : storage_.models.message());
             if (const auto version = storage_.models.detected_version(); !confirm && version) {
                 const std::uint32_t expected = storage_.models.expected_version();
-                const auto minimum = expected == models::format_version
-                                         ? coretx::storage::oldest_format_version
-                                         : expected;
                 framebuffer_.text(0, 20, "Format:");
                 framebuffer_.unsigned_number(47, 20, *version);
-                framebuffer_.text(56, 20, "/");
-                framebuffer_.unsigned_number(75, 20, minimum);
-                framebuffer_.text(80, 20, "-");
-                framebuffer_.unsigned_number(99, 20, expected);
+                framebuffer_.text(56, 20, "->");
+                framebuffer_.unsigned_number(92, 20, expected);
             }
-            framebuffer_.text(0, recovery_selected_ ? 44 : 32, ">");
+            const bool convert = !confirm && storage_.models.can_convert();
+            framebuffer_.text(0, 32 + recovery_selected_ * 12, ">");
             framebuffer_.text(8, 32,
                               confirm ? tr::models_recovery_cancel : tr::models_recovery_off);
             framebuffer_.text(8, 44,
                               confirm ? tr::models_recovery_delete : tr::models_recovery_reset);
+            if (convert)
+                framebuffer_.text(8, 56, tr::models_recovery_convert);
         }
         framebuffer_.compact(false);
     }
@@ -1044,7 +1055,8 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
     bool input_applied_{};
     bool adc_extended_{};
     Recovery recovery_{};
-    bool recovery_selected_{}, recovery_drawn_{};
+    std::uint8_t recovery_selected_{};
+    bool recovery_drawn_{};
     [[no_unique_address]]
     std::conditional_t<has_power, Power, DisabledFeature> power_{};
 };

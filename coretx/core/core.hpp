@@ -141,7 +141,7 @@ struct LogicalFrame {
 enum class InputSide : std::uint8_t { both, negative, positive };
 enum class TrimSource : std::uint8_t { automatic, none, stick1, stick2, stick3, stick4 };
 enum class Multiplex : std::uint8_t { add, multiply, replace };
-enum class MixRole : std::uint8_t { manual, tank_drive, tank_forward, tank_reverse };
+enum class MixRole : std::uint8_t { manual, tank_drive, tank_forward, tank_reverse, tank_third };
 
 struct TankMixer {
     // Retain storage metadata in module-free builds for lossless inactive-model roundtrips.
@@ -149,6 +149,10 @@ struct TankMixer {
     std::uint8_t drive_input{0}, steering_input{1}, left_channel{0}, right_channel{1},
         steering_percent{100}, hysteresis_percent{3};
     bool reverse_steering{true};
+    bool third_motor{};
+    std::uint8_t third_channel{2};
+    // Assigned on first use; retained with the editable model curve while disabled.
+    std::uint8_t third_curve{};
     constexpr bool operator==(const TankMixer &) const noexcept = default;
 };
 
@@ -347,7 +351,8 @@ enum class ErrorCode : std::uint8_t {
     tank_settings,
     tank_conflict,
     capacity,
-    tank_unavailable
+    tank_unavailable,
+    curve_capacity
 };
 
 enum class Stage : std::uint8_t { model, inputs, mixes, outputs, controls };

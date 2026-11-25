@@ -10,7 +10,7 @@ namespace coretx::storage {
 inline constexpr std::size_t slot_size = 1024;
 inline constexpr std::size_t header_size = 16;
 inline constexpr std::uint16_t oldest_format_version = 6;
-inline constexpr std::uint16_t format_version = 9;
+inline constexpr std::uint16_t format_version = 10;
 using Record = std::array<std::uint8_t, slot_size>;
 
 struct State {

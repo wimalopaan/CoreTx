@@ -8,7 +8,7 @@ namespace {
 namespace fw = coretx::firmware;
 namespace md = fw::models;
 constexpr coretx::afhds2a::TxId tx{0x12345678};
-constexpr auto fixture_versions = std::to_array<std::uint8_t>({6, 7, 8});
+constexpr auto fixture_versions = std::to_array<std::uint8_t>({6, 7, 8, 9});
 static_assert(fixture_versions.front() == coretx::storage::oldest_format_version);
 static_assert(fixture_versions.back() + 1 == fw::converter_target &&
                   fixture_versions.size() ==
@@ -60,7 +60,7 @@ md::Record fixture(std::uint8_t version, std::uint8_t slot = 0, std::uint32_t ge
     constexpr std::array<std::uint8_t, 7> old_input{0x40, 0x04, 0x42, 0xDC, 0x48, 0x3C, 0x02};
     constexpr std::array<std::uint8_t, 7> curve_input{0x40, 0x04, 0x42, 0xDC, 0x48, 0x3C, 0x1A};
     constexpr std::array<std::uint8_t, 6> mixer{0x13, 0x00, 0x04, 0xCF, 0xF2, 0x2A};
-    for (const auto byte : version == 8 ? curve_input : old_input)
+    for (const auto byte : version >= 8 ? curve_input : old_input)
         r[p++] = byte;
     for (const auto byte : mixer)
         r[p++] = byte;
@@ -84,11 +84,16 @@ md::Record fixture(std::uint8_t version, std::uint8_t slot = 0, std::uint32_t ge
         r[p++] = 0;
     for (auto byte : {0xDB, 42, 0x81, 127, 10})
         r[p++] = static_cast<std::uint8_t>(byte);
-    if (version == 8) {
+    if (version >= 8) {
         for (unsigned i = 0; i < 4; ++i)
             for (auto byte : {0xB5, 0, 60, 0x9C, 0xE7, 12, 50, 100})
                 r[p++] = static_cast<std::uint8_t>(byte);
         r[p++] = 1; // Mixer curve 4: high selection bit, stored after curve coordinates.
+    }
+    if (version >= 9) {
+        // Historical v9 tank defaults, reversal disabled, one manual mixer role.
+        for (auto byte : {0x10, 0x08, 0xF2, 0x08, 0x00})
+            r[p++] = static_cast<std::uint8_t>(byte);
     }
     seal(r);
     return r;
@@ -106,8 +111,8 @@ void fixture_lines(const md::Data &data, const std::uint8_t source_version) {
     CHECK(mix.source.index == 0 && !mix.source.inverted);
     CHECK(mix.weight_percent.value() == -321 && mix.offset_percent.value() == 187);
     CHECK(mix.multiplex == coretx::Multiplex::replace && mix.carry_trim);
-    CHECK(input.curve == (source_version == 8 ? 3 : 0));
-    CHECK(mix.curve == (source_version == 8 ? 4 : 0));
+    CHECK(input.curve == (source_version >= 8 ? 3 : 0));
+    CHECK(mix.curve == (source_version >= 8 ? 4 : 0));
 }
 
 struct Memory {
@@ -130,7 +135,7 @@ struct Memory {
                         marker.begin());
             fw::model_migration::Info info{};
             CHECK(fw::model_migration::decode(marker, info) == fw::model_migration::Status::valid);
-            CHECK(info.kind == fw::model_migration::Kind::conversion && info.target == 9);
+            CHECK(info.kind == fw::model_migration::Kind::conversion && info.target == 10);
         }
         ++writes;
         if (cut && writes == cut) {
@@ -199,7 +204,7 @@ void converted(const std::array<std::uint8_t, 16384> &original) {
         md::Data data{md::empty_model};
         md::Info info{};
         CHECK(md::decode(r, slot, tx, data, info) == 1);
-        CHECK(r[4] == 9 && info.present == (slot != 2));
+        CHECK(r[4] == 10 && info.present == (slot != 2));
         CHECK(info.generation == (slot == 0 ? 11U : slot == 1 ? 0U : 2U));
         CHECK(data.radio.receiver.value == 0x87654321 && data.radio.transmitter == tx);
         CHECK(data.radio.output == fw::RadioOutput::internal && data.baud_index == 1);
@@ -237,7 +242,7 @@ void refusals() {
         seed();
         auto r = fixture(6);
         if (which == 0 || which == 1) {
-            r[4] = which == 0 ? 10 : 5;
+            r[4] = which == 0 ? 11 : 5;
             seal(r);
             put(r, 0);
         } else if (which == 2) {
@@ -250,7 +255,7 @@ void refusals() {
             directory(1, 1, 0x7FFFFFFFU);
         else if (which == 6) {
             fw::model_migration::Record marker{};
-            fw::model_migration::encode(fw::model_migration::Kind::reset, 9, marker);
+            fw::model_migration::encode(fw::model_migration::Kind::reset, 10, marker);
             std::copy(marker.begin(), marker.end(),
                       Memory::bytes.begin() + fw::model_migration::address);
         } else if (which == 7)
@@ -318,11 +323,15 @@ void mixed_target_and_tank() {
     md::Data data{md::empty_model};
     md::Info info{};
     CHECK(md::decode(fixture(8, 3), 3, tx, data, info) == 1);
+    data.model.curves[0] = {};
     auto tank = data.model.tank;
     tank.enabled = true;
     tank.steering_percent = 73;
     tank.reverse_steering = false;
+    tank.third_motor = true;
+    tank.third_channel = 15;
     CHECK(coretx::configure_tank(data.model, tank));
+    data.model.curves[data.model.tank.third_curve - 1].y.back() = 80;
     md::Record target{};
     CHECK(md::encode(data, 3, true, 1, target));
     put(target, 3, 1);
@@ -364,7 +373,7 @@ void newest_wrap() {
     md::Data data{md::empty_model};
     md::Info info{};
     CHECK(md::decode(actual, 0, tx, data, info) == 1);
-    CHECK(actual[4] == 9 && info.generation == 2 && data.name[0] == 'N');
+    CHECK(actual[4] == 10 && info.generation == 2 && data.name[0] == 'N');
     CHECK(!data.model.multiswitch_beep);
 }
 void marker_prefix_repairs() {
@@ -376,7 +385,7 @@ void marker_prefix_repairs() {
     CHECK(completed.confirm() && settle(completed) == State::complete);
     const auto targets = Memory::bytes;
     fw::model_migration::Record expected{};
-    fw::model_migration::encode(fw::model_migration::Kind::conversion, 9, expected);
+    fw::model_migration::encode(fw::model_migration::Kind::conversion, 10, expected);
     for (const bool clearing : {false, true}) {
         for (std::size_t prefix = 1; prefix < expected.size(); ++prefix) {
             Memory::reset();
@@ -406,9 +415,9 @@ void marker_repair_refusals() {
     for (unsigned which = 0; which < 5; ++which) {
         seed();
         fw::model_migration::Record marker{};
-        fw::model_migration::encode(fw::model_migration::Kind::conversion, 9, marker);
+        fw::model_migration::encode(fw::model_migration::Kind::conversion, 10, marker);
         if (which == 0) {
-            fw::model_migration::encode(fw::model_migration::Kind::conversion, 10, marker);
+            fw::model_migration::encode(fw::model_migration::Kind::conversion, 11, marker);
         } else if (which == 1) {
             marker[4] = 2; // An unknown future marker schema is never repairable.
             seal(marker);
@@ -444,6 +453,23 @@ void fixture_contract() {
         CHECK(md::decode(record, 0, tx, data, info) == 1);
         CHECK(record[4] == version && info.generation == 10);
         fixture_lines(data, version);
+        CHECK(!data.model.tank.third_motor && data.model.tank.third_curve == 0);
+        CHECK(data.model.tank.reverse_steering == (version < 9));
+        Memory::reset();
+        put(record, 0);
+        directory(0, 0, 1);
+        Converter converter;
+        converter.initialize(tx);
+        CHECK(settle(converter) == State::preview);
+        CHECK(converter.confirm() && settle(converter) == State::complete);
+        md::Record converted_record{};
+        std::copy_n(Memory::bytes.begin() + md::base + md::record_size, converted_record.size(),
+                    converted_record.begin());
+        CHECK(converted_record[4] == 10);
+        CHECK(md::decode(converted_record, 0, tx, data, info) == 1 && info.generation == 11);
+        fixture_lines(data, version);
+        CHECK(!data.model.tank.third_motor && data.model.tank.third_curve == 0);
+        CHECK(data.model.tank.reverse_steering == (version < 9));
     }
 }
 } // namespace

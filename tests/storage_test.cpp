@@ -64,7 +64,7 @@ constexpr bool roundtrip() {
     store::Record record{};
     if (!store::encode(original, 0x12345678, record) || (record[0] != 'R') || (record[1] != 'C') ||
         (record[2] != 'C') || (record[3] != 'S') || (record[4] != store::format_version) ||
-        (record[5] != 0) || (record[6] != 86) || (record[7] != 3) || (record[8] != 0x78) ||
+        (record[5] != 0) || (record[6] != 87) || (record[7] != 3) || (record[8] != 0x78) ||
         (record[9] != 0x56) || (record[10] != 0x34) || (record[11] != 0x12) || (record[20] != 1) ||
         (record[22] != 0xFF) || (record[23] != 0xFF) || (record[66] != 7) || (record[67] != 1)) {
         return false;
@@ -366,7 +366,7 @@ constexpr bool curve_storage() {
         store::detail::Writer payload{std::span{record}.subspan(store::header_size)};
         const store::detail::StateView<const coretx::Model, const coretx::ControlSetup> old{
             original.model, original.setup};
-        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, false))
+        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, version >= 9, false))
             return false;
         store::detail::Writer header{std::span{record}.first(store::header_size)};
         header.word(store::detail::magic);
@@ -397,19 +397,25 @@ static_assert(curve_storage());
 #if CORETX_MODUL_TANKMIX
 constexpr bool tank_storage() {
     auto state = fixture();
-    state.model.mixes.resize<18>();
+    state.model.mixes.resize<17>();
     for (auto &line : state.model.mixes) {
         line = {};
         line.destination = 15;
     }
-    const coretx::TankMixer tank{true, 6, 7, 10, 11, 73, 20};
+    coretx::TankMixer tank{true, 6, 7, 10, 11, 73, 20};
+    tank.third_motor = true;
+    tank.third_channel = 14;
     if (!coretx::configure_tank(state.model, tank) ||
         (state.model.mixes.size() != coretx::max_mix_lines))
         return false;
+    tank = state.model.tank;
+    state.model.curves[tank.third_curve - 1].x[2] = 30;
+    state.model.curves[tank.third_curve - 1].y.back() = 80;
     store::Record record{}, again{};
     store::State restored{};
     if (!store::encode(state, 42, record) || !store::decode(record, restored) ||
-        (restored.model.tank != tank) || !store::encode(restored, 42, again) || (record != again))
+        (restored.model.tank != tank) || (restored.model.curves != state.model.curves) ||
+        !store::encode(restored, 42, again) || (record != again))
         return false;
     for (std::size_t i = 0; i < state.model.mixes.size(); ++i)
         if (restored.model.mixes[i].role != state.model.mixes[i].role)
@@ -424,14 +430,14 @@ constexpr bool tank_storage() {
         !coretx::configure_tank(state.model, tank))
         return false;
     const auto length = static_cast<std::size_t>(record[6] | (std::uint16_t{record[7]} << 8));
-    const auto extension = store::header_size + length - 10;
+    const auto extension = store::header_size + length - 11;
     // Reject reserved config bits, altered ownership and truncated extension.
     for (const unsigned mutation : {0U, 1U, 2U}) {
         auto damaged = record;
         if (mutation == 0)
-            damaged[extension + 3] |= 0x80;
+            damaged[extension + 4] |= 0x80;
         else if (mutation == 1)
-            damaged[extension + 4] &= 0xFC;
+            damaged[extension + 5] &= 0xFC;
         else {
             damaged[store::header_size + length - 1] = 0xFF;
             store::detail::Writer header{std::span{damaged}.subspan(6, 2)};
@@ -478,6 +484,7 @@ constexpr bool tank_storage() {
     if (!coretx::configure_tank(state.model, disabled))
         return false;
     state.model.mixes.resize<19>();
+    state.model.mixes[17].destination = 15;
     state.model.mixes[18].destination = 15;
     if (!store::encode(state, 42, record) ||
         (coretx::configure_tank(state.model, tank).code != coretx::ErrorCode::capacity) ||
@@ -486,6 +493,7 @@ constexpr bool tank_storage() {
     // A final partially populated roles byte must have zero padding.
     state.model.mixes.clear();
     if (!state.model.mixes.try_push_back(coretx::MixLine{.destination = 15}) ||
+        !state.model.mixes.try_push_back(coretx::MixLine{.destination = 15}) ||
         !coretx::configure_tank(state.model, tank) || !store::encode(state, 42, record))
         return false;
     const auto short_length = static_cast<std::size_t>(record[6] | (std::uint16_t{record[7]} << 8));
@@ -505,7 +513,7 @@ constexpr bool tank_unavailable_storage() {
         (restored.model.tank != state.model.tank))
         return false;
     const auto length = static_cast<std::size_t>(record[6] | (std::uint16_t{record[7]} << 8));
-    const auto extension = store::header_size + length - 4 - (state.model.mixes.size() + 3) / 4;
+    const auto extension = store::header_size + length - 5 - (state.model.mixes.size() + 3) / 4;
     record[extension] |= 1;
     reseal(record);
     const auto unsupported = store::decode(record, restored);

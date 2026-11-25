@@ -67,10 +67,12 @@ Do not substitute these images for normal operation.
 == Model storage recovery and converter
 
 Before enabling RF, the main firmware checks the model directory and both banks
-of all eight model slots. Native model formats 6 through 9 remain readable.
-An unsupported format, unrecoverable model data, a missing required module or an
+of all eight model slots. The main firmware requires exactly the current format 10
+in every valid model record, including inactive slots and older journal banks.
+The shared converter can still read native model formats 6 through 10.
+Any different format version, unrecoverable model data, a missing required module or an
 unfinished conversion/reset blocks normal operation and all model writes.
-The LCD shows the reason and, when available, the stored/supported versions:
+The LCD shows the reason and, when available, the stored/required versions:
 
 1. *Off / external conversion* is the default. No model data is changed.
    The i6S releases its power latch; the i6X asks you to use its mechanical switch.
@@ -78,8 +80,20 @@ The LCD shows the reason and, when available, the stored/supported versions:
    This clears all model slots and the directory, then creates a four-channel
    model with no receiver binding and RF OFF. Calibration and transmitter/input
    settings are preserved.
+3. Only with `CORETX_STORAGE_CONVERTER=ON`, *Convert now* is additionally offered
+   when all required records can be read and
+   losslessly encoded in the current format. Only after selection does the same
+   converter used by the maintenance image upgrade and verify models and journal
+   banks. RF stays OFF until conversion and the repeated startup check finish;
+   normal operation then resumes. Model names, settings and active-model selection
+   are preserved.
+
+`CORETX_STORAGE_CONVERTER` defaults to `OFF`: normal firmware contains no integrated
+converter and offers only the first two choices. The separate maintenance image
+is still built independently.
 
 An interrupted reset remains blocked until initialization is explicitly repeated.
+An interrupted conversion can be resumed with the external converter.
 Never use an older firmware that ignores the migration marker while recovery is pending.
 
 Each default board build also generates an *English, RF-OFF maintenance image*:
@@ -89,12 +103,12 @@ with matching HEX/ELF/resource-report files. These are not operating firmware.
 * Back up the *external EEPROM*, not only internal flash.
 * Flash the converter matching the transmitter through <<dfu-update,ROM DFU>>.
 * Start normally (hold both front power buttons for 3 s on i6S). Inspect source
-  versions, target format 9 and model count. Release the controls, then confirm
+  versions, target format 10 and model count. Release the controls, then confirm
   with OK (i6X) or the left rear button (i6S); Cancel/right rear cancels.
 * Keep power stable until conversion and read-back verification finish.
 * Switch off, enter ROM DFU again and flash the matching normal firmware.
 
-The converter upgrades native CoreTX model formats 6/7/8 to 9, preserves model
+The converter upgrades native CoreTX model formats 6/7/8/9 to 10, preserves model
 names, receiver settings and active-model selection, and resumes interrupted
 conversion using the journal and migration marker. It does not import Flysky
 factory/EdgeTX EEPROMs, repair arbitrary corrupt data or downgrade future formats.
@@ -139,7 +153,10 @@ The browser simulator runs the real sender application, menus, calibration and
 mixing on virtual i6X/i6S hardware. It combines physical controls, the actual
 128x64 LCD framebuffer and 16 output bars. New sessions have a four-channel model
 and calibrated virtual controls. The i6S supports LCD touch/mouse gestures and
-the real rear-button/pot setup navigation. All RF hardware is simulated.
+the real rear-button/pot setup navigation. The i6X offers only its four real
+Up, Down, OK and Back buttons; hold a button for a long press. The i6S helper
+buttons touch only the LCD header and OK/Back footer areas. Keyboard shortcuts
+follow the same profile-specific controls. All RF hardware is simulated.
 Stick centering preferences are saved separately per profile; control positions
 intentionally start neutral.
 
@@ -232,6 +249,11 @@ The following are project options and their defaults when not overridden by a pr
  With `OFF`, models using the module are rejected and writes are blocked rather
  than falling back to different channel behavior. Inactive module settings
  remain in the storage format for lossless roundtrips.
+|`CORETX_STORAGE_CONVERTER` |`OFF`
+|Compile lossless model conversion as an additional startup choice.
+ With `OFF`, its code and working memory are omitted; the format warning,
+ power-off/external conversion and reset choices remain.
+ The separate RF-OFF converter image is independent of this option.
 |`CORETX_EXTENDED_INPUTS` |`ON`
 |Compile additional analog/digital input support.
  Individual expansion inputs still default to Off in radio setup.

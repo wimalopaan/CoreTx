@@ -147,7 +147,7 @@ inline constexpr std::size_t maximum_payload =
     max_mix_lines * packed_model::mix_bytes + channel_count * packed_model::output_bytes + 64 +
     multiswitch_page_count * 51 + 1 +
     multiswitch_page_count * multiswitch_function_count * sizeof(MultiSwitchControl) + trim_count +
-    1 + curve_count * 8 + max_input_lines + max_mix_lines + 4 + (max_mix_lines + 3) / 4;
+    1 + curve_count * 8 + max_input_lines + max_mix_lines + 5 + (max_mix_lines + 3) / 4;
 static_assert((header_size + maximum_payload) <= slot_size);
 
 template <typename Archive> class PackedFields {
@@ -409,8 +409,8 @@ constexpr bool transfer_curves(Archive &archive, Snapshot &model, const bool cur
 }
 
 template <typename Archive, typename Snapshot>
-constexpr bool transfer_tank(Archive &archive, Snapshot &model,
-                             const bool enabled = true) noexcept {
+constexpr bool transfer_tank(Archive &archive, Snapshot &model, const bool enabled = true,
+                             const bool third_motor = true) noexcept {
     if (!enabled) {
         if constexpr (!std::is_const_v<Snapshot>) {
             model.tank = {};
@@ -430,14 +430,39 @@ constexpr bool transfer_tank(Archive &archive, Snapshot &model,
     // A clear bit preserves reversal for existing format-9 records.
     bool reversal_disabled = !model.tank.reverse_steering;
     fields.field(1, reversal_disabled);
+    if (third_motor) {
+        fields.field(1, model.tank.third_motor);
+        fields.field(3, model.tank.third_curve);
+    }
     if (!fields.finish())
         return false;
     if constexpr (!std::is_const_v<Snapshot>)
         model.tank.reverse_steering = !reversal_disabled;
+    if (third_motor) {
+        PackedFields motor{archive, 1};
+        motor.field(4, model.tank.third_channel);
+        if (!motor.finish())
+            return false;
+    } else if constexpr (!std::is_const_v<Snapshot>) {
+        model.tank.third_motor = false;
+        model.tank.third_channel = TankMixer{}.third_channel;
+        model.tank.third_curve = 0;
+    }
     for (std::size_t group = 0; group < model.mixes.size(); group += 4) {
         PackedFields roles{archive, 1};
-        for (auto i = group; (i < group + 4) && (i < model.mixes.size()); ++i)
-            roles.field(2, model.mixes[i].role);
+        for (auto i = group; (i < group + 4) && (i < model.mixes.size()); ++i) {
+            // The reserved third channel identifies its drive role without another role bit.
+            auto role = model.mixes[i].role == MixRole::tank_third ? MixRole::tank_drive
+                                                                   : model.mixes[i].role;
+            roles.field(2, role);
+            if constexpr (!std::is_const_v<Snapshot>)
+                model.mixes[i].role =
+                    third_motor && model.tank.third_motor &&
+                            (model.mixes[i].destination == model.tank.third_channel) &&
+                            (role == MixRole::tank_drive)
+                        ? MixRole::tank_third
+                        : role;
+        }
         if (!roles.finish())
             return false;
     }
@@ -446,7 +471,8 @@ constexpr bool transfer_tank(Archive &archive, Snapshot &model,
 
 template <typename Archive, typename Snapshot>
 constexpr bool transfer(Archive &archive, Snapshot &state, const bool sound_options = true,
-                        const bool curve_options = true, const bool tank_options = true) noexcept {
+                        const bool curve_options = true, const bool tank_options = true,
+                        const bool third_motor = true) noexcept {
     if (!transfer_model_counts(archive, state.model))
         return false;
     for (auto &calibration : state.setup.calibration) {
@@ -464,7 +490,7 @@ constexpr bool transfer(Archive &archive, Snapshot &state, const bool sound_opti
            transfer_dashboard_options(archive, state.model, sound_options) &&
            transfer_multiswitch_controls(archive, state.model) &&
            transfer_curves(archive, state.model, curve_options) &&
-           transfer_tank(archive, state.model, tank_options);
+           transfer_tank(archive, state.model, tank_options, third_motor);
 }
 
 [[nodiscard]] constexpr std::uint32_t crc_byte(std::uint32_t crc,
@@ -527,7 +553,7 @@ template <typename Snapshot>
         return {{Error::length, 6}, 0};
     }
     Reader payload{record.subspan(header_size, length)};
-    if (!transfer(payload, state, version >= 7, version >= 8, version >= 9)) {
+    if (!transfer(payload, state, version >= 7, version >= 8, version >= 9, version >= 10)) {
         return {{Error::field, header_size + payload.error_offset}, 0};
     }
     if (payload.position != length) {

@@ -996,6 +996,36 @@ void tank_mixer() {
     check(!model.tank.enabled && (model.mixes.size() == 8) && (model.tank.left_channel == 8) &&
               (model.tank.steering_percent == 60),
           "disabling removes owned lines and retains module configuration");
+    // First choose a free third output, then activate the extra motor and module.
+    press(ui, model, controls, Key::down, 9);
+    edit(ui, model, controls, Key::right, 8);
+    press(ui, model, controls, Key::up);
+    edit(ui, model, controls, Key::right);
+    const auto curve = model.tank.third_curve;
+    check(model.tank.third_motor && (curve != 0) && (model.tank.third_channel == 10),
+          "third motor allocates its curve and remembers selected output while tank is disabled");
+    press(ui, model, controls, Key::up, 8);
+    edit(ui, model, controls, Key::right);
+    check(model.tank.enabled && (model.mixes.size() == 15) &&
+              (model.mixes[14].role == coretx::MixRole::tank_third) &&
+              (model.mixes[14].curve == curve),
+          "third motor adds a managed throttle-to-curve mixer");
+    press(ui, model, controls, Key::down, 10);
+    press(ui, model, controls, Key::enter);
+    check((ui.page() == Page::curves) && (ui.selected_curve() == curve - 1),
+          "third motor curve row opens its assigned curve editor");
+    press(ui, model, controls, Key::down, 4);
+    edit(ui, model, controls, Key::left, 2, true);
+    check(model.curves[curve - 1].y.back() == 80, "third motor curve remains normally editable");
+    ui.open(Page::tank);
+    press(ui, model, controls, Key::down, 8);
+    edit(ui, model, controls, Key::left);
+    check(!model.tank.third_motor && (model.mixes.size() == 14),
+          "turning off third motor removes only its mixer");
+    edit(ui, model, controls, Key::right);
+    check(model.tank.third_motor && (model.tank.third_curve == curve) &&
+              (model.curves[curve - 1].y.back() == 80) && coretx::validate(model),
+          "reactivating third motor preserves its customized curve");
 }
 
 #endif

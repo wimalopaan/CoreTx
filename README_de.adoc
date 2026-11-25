@@ -62,12 +62,18 @@ Die Berechnung erfolgt lokal im Browser; Modelldaten werden nicht hochgeladen.
 
 * *Kurven:* vier stückweise lineare 5-Punkt-Kurven für Inputs und Mixer,
   mit bearbeitbaren inneren X-/allen Y-Werten, Punkteditor und grafischer Vorschau.
-  Vor dem Update das EEPROM sichern: Im Format 9 gespeicherte Modelle sind mit
+  Vor dem Update das EEPROM sichern: Im Format 10 gespeicherte Modelle sind mit
   älterer Firmware nicht lesbar.
 * *Kettenmischer:* wählbare Fahrt-/Lenk-Inputs und linke/rechte Ausgänge,
   Lenkanteil (0..100 %) und optionale Lenkumkehr mit Hysterese.
   Sechs sichtbare Read-only-Mixerzeilen werden ohne logische Schalter verwaltet;
   Inputs, Kurven und Outputs bleiben normal bearbeitbar.
+  Optional führt *3ter Motor* den Fahrt-Input über eine siebte Mischerzeile auf
+  einen wählbaren weiteren Ausgang. Eine freie, unveränderte Modellkurve wird mit
+  `(-100,0), (-50,0), (0,0), (25,0), (100,100)` vorbelegt; sind alle vier Kurven
+  belegt oder verändert, wird die Aktivierung ohne Änderungen abgewiesen.
+  *Kurve 3. Motor* öffnet den Kurveneditor. Eigene Anpassungen bleiben auch beim
+  Aus-/Einschalten des dritten Motors oder Kettenmischers erhalten.
 * *Externes CRSF:* bidirektionale UART für Kanalausgabe, Telemetrie und
   Modulkonfiguration. Es ist immer nur ein HF-Pfad aktiv.
 * *MultiSwitch:* CRSF-Dashboards und SET4-Befehle für kompatible Empfänger/Module.

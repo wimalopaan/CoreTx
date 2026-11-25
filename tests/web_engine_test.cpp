@@ -57,6 +57,44 @@ int main() {
             "Restart preserves exact native EEPROM image");
     require(sim_revision() == revision, "Restart does not rewrite current records");
 
+    std::array<std::uint8_t, 8192> navigation_before{};
+    std::copy_n(sim_lcd(), navigation_before.size(), navigation_before.begin());
+    if constexpr (!fw::features::i6s) {
+        sim_key(7, 1);
+        sim_key(7, 0);
+        sim_step(100);
+        require(std::equal(navigation_before.begin(), navigation_before.end(), sim_lcd()),
+                "i6X has no synthetic long-press button");
+        sim_key(5, 1);
+        sim_step(100);
+        require(std::equal(navigation_before.begin(), navigation_before.end(), sim_lcd()),
+                "i6X OK waits for release or a real long press");
+        for (int i = 0; i < 7; ++i)
+            sim_step(100);
+        sim_step(100);
+        require(!std::equal(navigation_before.begin(), navigation_before.end(), sim_lcd()),
+                "Holding real i6X OK opens the menu after 800 ms");
+        std::copy_n(sim_lcd(), navigation_before.size(), navigation_before.begin());
+        sim_key(5, 0);
+        sim_step(100);
+        require(std::equal(navigation_before.begin(), navigation_before.end(), sim_lcd()),
+                "Releasing long OK does not also select the first menu item");
+        sim_key(6, 1);
+        sim_step(100);
+        require(std::equal(navigation_before.begin(), navigation_before.end(), sim_lcd()),
+                "i6X Back waits for release");
+        sim_key(6, 0);
+        sim_step(100);
+        require(!std::equal(navigation_before.begin(), navigation_before.end(), sim_lcd()),
+                "Releasing real i6X Back closes the menu");
+    } else {
+        sim_key(7, 1);
+        sim_key(7, 0);
+        sim_step(100);
+        require(std::equal(navigation_before.begin(), navigation_before.end(), sim_lcd()),
+                "i6S cannot bypass LCD touch through synthetic sender keys");
+    }
+
     fw::models::Record record{};
     fw::models::Data data{};
     fw::models::Info info{};
@@ -101,8 +139,9 @@ int main() {
         sim_step(100);
         require(!std::equal(before.begin(), before.end(), sim_lcd()),
                 "Touch polling preserves long press to open real sender menu");
-        sim_key(8, 1);
-        sim_key(8, 0);
+        sim_touch(96, 55, 1);
+        sim_step(100);
+        sim_touch(96, 55, 0);
         sim_step(100);
     }
 
@@ -126,13 +165,13 @@ int main() {
     require(std::equal(memory.begin(), memory.end(), snapshot.begin()),
             "Unsupported import is never silently overwritten");
     if constexpr (fw::features::i6s) {
-        sim_touch(40, 35, 1);
+        sim_touch(32, 55, 1);
         sim_step(100);
-        sim_touch(40, 35, -1);
+        sim_touch(32, 55, -1);
         sim_step(100);
         require((sim_status() & 32) == 0, "Cancelled touch cannot activate a recovery action");
-        sim_touch(40, 35, 1);
-        sim_touch(40, 35, 0);
+        sim_touch(32, 55, 1);
+        sim_touch(32, 55, 0);
         sim_step(100);
         require((sim_status() & 32) != 0, "A subsequent intentional recovery tap still works");
     }

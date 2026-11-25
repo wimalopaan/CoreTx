@@ -62,12 +62,17 @@ Simulation runs locally in the browser; model data is not uploaded.
 
 * *Curves:* four piecewise linear five-point curves for inputs and mixers,
   with editable inner X/all Y coordinates, a point editor and graphical preview.
-  Back up the EEPROM before updating: models saved in format 9 cannot be read
+  Back up the EEPROM before updating: models saved in format 10 cannot be read
   by older firmware.
 * *Tank mixer:* configurable drive/steering inputs and left/right outputs,
   steering contribution (0..100%) and optional steering reversal with hysteresis.
   Six visible read-only mixer lines are module-managed without logical switches;
   inputs, curves and outputs remain independently editable.
+  Optional *3rd motor* routes the drive input through a seventh mixer line to
+  another selectable output. An unused, unmodified model curve is initialized to
+  `(-100,0), (-50,0), (0,0), (25,0), (100,100)`; activation is rejected without
+  changes if all four curves are used or modified. *3rd motor curve* opens its
+  editor. Customizations survive disabling/re-enabling the third motor or module.
 * *External CRSF:* bidirectional UART for channel output, telemetry and module
   configuration. Only one RF path is active at a time.
 * *MultiSwitch:* CRSF dashboards and SET4 commands for compatible receivers/modules.

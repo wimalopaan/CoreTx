@@ -40,6 +40,76 @@ try {
   await page.goto(url);
   await page.waitForFunction(() => document.querySelector("#output-state").textContent.startsWith("Gueltige"));
   assert.equal(await page.locator(".channel").count(), 16);
+  const profileLabelBesideSelector = () => page.evaluate(() => {
+    const label = document.querySelector(".profile-label span").getBoundingClientRect();
+    const select = document.querySelector("#profile").getBoundingClientRect();
+    return label.right <= select.left && label.top < select.bottom && label.bottom > select.top;
+  });
+  assert.ok(await profileLabelBesideSelector(), "Profile label sits beside the dropdown on desktop");
+  assert.ok(await page.evaluate(() => {
+    const select = document.querySelector("#profile").getBoundingClientRect();
+    const expert = document.querySelector("#expert-mode").getBoundingClientRect();
+    return select.right <= expert.left && expert.top < select.bottom && expert.bottom > select.top;
+  }), "Expert checkbox sits beside the profile dropdown");
+  const sticksAboveLCD = () => page.evaluate(() => {
+    const sticks = document.querySelector("#sticks").getBoundingClientRect();
+    const lcd = document.querySelector("#lcd").getBoundingClientRect();
+    return sticks.bottom <= lcd.top;
+  });
+  assert.ok(await sticksAboveLCD(), "Sticks are above the LCD on desktop");
+  const centeringBetweenSticks = () => page.evaluate(() => {
+    const [left, right] = [...document.querySelectorAll(".stick-pad")].map(pad => pad.getBoundingClientRect());
+    const center = document.querySelector("#stick-centering").getBoundingClientRect();
+    return left.right <= center.left && center.right <= right.left &&
+      center.top < left.bottom && center.bottom > left.top &&
+      center.top < right.bottom && center.bottom > right.top;
+  });
+  assert.ok(await centeringBetweenSticks(), "Centering checkboxes sit between the sticks");
+  assert.equal(await page.locator("#stick-centering input").count(), 4);
+  const expert = page.getByRole("checkbox", { name: "Expertenmodus", exact: true });
+  assert.equal(await expert.isChecked(), false);
+  assert.equal(await page.locator("#analog-panel").isVisible(), false);
+  assert.equal(await page.locator("#storage-panel").isVisible(), false);
+  await expert.check();
+  assert.equal(await page.locator("#analog-panel").isVisible(), true);
+  assert.equal(await page.locator("#storage-panel").isVisible(), true);
+  await expert.uncheck();
+  assert.equal(await page.locator("#analog-panel").isVisible(), false);
+  assert.equal(await page.locator("#storage-panel").isVisible(), false);
+  await expert.check();
+  const checkSwitch = async (name, states) => {
+    const button = page.getByRole("button", { name: `Schalter ${name}`, exact: true });
+    const position = page.locator(`#${await button.getAttribute("aria-describedby")}`);
+    const offset = () => button.evaluate(control =>
+      control.querySelector(".switch-lever").getBoundingClientRect().top - control.getBoundingClientRect().top);
+    const up = await offset();
+    const offsets = {};
+    for (const state of states) {
+      await button.click();
+      assert.equal(await position.textContent(), state);
+      offsets[state] = await offset();
+      assert.ok(state === "Oben" ? offsets[state] === up : offsets[state] > up);
+    }
+    if (states.includes("Mitte")) assert.ok(offsets.Mitte < offsets.Unten);
+  };
+  await checkSwitch("SA", ["Unten", "Oben"]);
+  await checkSwitch("SB", ["Unten", "Oben"]);
+  await checkSwitch("SC", ["Mitte", "Unten", "Oben"]);
+  await checkSwitch("SD", ["Unten", "Oben"]);
+  const trimsBesideLCD = () => page.evaluate(() => {
+    const lcd = document.querySelector("#lcd").getBoundingClientRect();
+    const left = document.querySelector("#trims-left").getBoundingClientRect();
+    const right = document.querySelector("#trims-right").getBoundingClientRect();
+    const overlaps = side => side.top < lcd.bottom && side.bottom > lcd.top;
+    return left.right <= lcd.left && right.left >= lcd.right && overlaps(left) && overlaps(right);
+  });
+  assert.ok(await trimsBesideLCD(), "Trims flank the LCD on desktop");
+  assert.deepEqual(await page.locator("#trims-left .trim-pair span").allTextContents(), ["LV", "LH"]);
+  assert.deepEqual(await page.locator("#trims-right .trim-pair span").allTextContents(), ["RH", "RV"]);
+  assert.deepEqual(await page.locator(".navigation [data-key]")
+                       .evaluateAll(buttons => buttons.map(button => Number(button.dataset.key))),
+                   [ 1, 2, 5, 6 ]);
+  assert.equal(await page.locator(".navigation [data-touch]").count(), 0);
   await page.locator("#axis-0").fill("0");
   await page.waitForFunction(() => document.querySelector(".channel-value").textContent === "+100.0%");
   await page.locator("#axis-0").fill("2048");
@@ -66,6 +136,9 @@ try {
   const saved = await page.evaluate(storageKey => localStorage.getItem(storageKey), key + "i6x");
   await page.reload();
   await page.waitForFunction(() => document.querySelector("#output-state").textContent.startsWith("Gueltige"));
+  assert.equal(await page.locator("#analog-panel").isVisible(), false);
+  assert.equal(await page.locator("#storage-panel").isVisible(), false);
+  await expert.check();
   assert.equal(await page.locator(".channel-value").first().textContent(), edited);
   assert.equal(await page.getByRole("checkbox", { name: "RH automatisch zentrieren", exact: true }).isChecked(), false);
   await page.locator("#import-file").setInputFiles({
@@ -108,16 +181,63 @@ try {
   assert.equal(await page.evaluate(storageKey => localStorage.getItem(storageKey), key + "i6x"), saved);
   await page.locator("#restore").click();
   await page.waitForFunction(() => document.querySelector("#output-state").textContent.startsWith("Gueltige"));
+  await page.waitForTimeout(200);
 
   const beforeMenu = await page.locator("#lcd").evaluate(canvas => canvas.toDataURL());
-  await page.locator('[data-key="7"]').click();
+  await page.locator('[data-key="5"]').hover();
+  await page.mouse.down();
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator("#lcd").evaluate(canvas => canvas.toDataURL()), beforeMenu);
+  await page.waitForTimeout(800);
   await page.waitForFunction(before => document.querySelector("#lcd").toDataURL() !== before, beforeMenu);
-  await page.locator('[data-key="8"]').click();
+  const menu = await page.locator("#lcd").evaluate(canvas => canvas.toDataURL());
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator("#lcd").evaluate(canvas => canvas.toDataURL()), menu);
+  await page.locator("#lcd").focus();
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator("#lcd").evaluate(canvas => canvas.toDataURL()), menu);
+  await page.locator('[data-key="6"]').hover();
+  await page.mouse.down();
+  await page.waitForTimeout(900);
+  await page.mouse.up();
+  await page.waitForFunction(before => document.querySelector("#lcd").toDataURL() !== before, menu);
   await page.locator("#profile").selectOption("i6s");
-  await page.waitForFunction(() => document.querySelector("#profile-badge").textContent === "FS-i6S" &&
+  await page.waitForFunction(() => document.querySelector("#profile").value === "i6s" &&
     document.querySelector("#output-state").textContent.startsWith("Gueltige"));
   assert.equal(await page.locator(".rear-controls button").count(), 2);
+  await checkSwitch("SB", ["Mitte", "Unten", "Oben"]);
+  assert.equal(await page.locator("#trims-left").isVisible(), false);
+  assert.equal(await page.locator("#trims-right").isVisible(), false);
+  assert.equal(await page.locator(".navigation [data-key]").count(), 0);
+  assert.equal(await page.locator(".navigation [data-touch]").count(), 3);
   assert.equal(await page.getByRole("checkbox", { name: "RH automatisch zentrieren", exact: true }).isChecked(), true);
+  const beforeTouchMenu = await page.locator("#lcd").evaluate(canvas => canvas.toDataURL());
+  await page.locator('[data-touch="32,55"]').hover();
+  await page.mouse.down();
+  await page.waitForTimeout(900);
+  await page.mouse.up();
+  await page.waitForFunction(before => document.querySelector("#lcd").toDataURL() !== before,
+                             beforeTouchMenu);
+  const touchMenu = await page.locator("#lcd").evaluate(canvas => canvas.toDataURL());
+  await page.locator("#lcd").focus();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator("#lcd").evaluate(canvas => canvas.toDataURL()), touchMenu);
+  await page.locator('[data-touch="32,55"]').hover();
+  await page.mouse.down();
+  await page.waitForTimeout(100);
+  await page.locator('[data-touch="32,55"]').dispatchEvent("pointercancel", {pointerId : 1});
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator("#lcd").evaluate(canvas => canvas.toDataURL()), touchMenu);
+  await page.locator('[data-touch="96,55"]').click();
+  await page.waitForFunction(before => document.querySelector("#lcd").toDataURL() !== before,
+                             touchMenu);
   await page.locator("#lcd").scrollIntoViewIfNeeded();
   const lcd = await page.locator("#lcd").boundingBox();
   const beforeTouch = await page.locator("#lcd").evaluate(canvas => canvas.toDataURL());
@@ -127,16 +247,27 @@ try {
   await page.mouse.move(lcd.x + lcd.width * .9, lcd.y + lcd.height * .6, { steps: 4 });
   await page.mouse.up();
   await page.waitForFunction(before => document.querySelector("#lcd").toDataURL() !== before, beforeTouch);
-  await page.locator('[data-key="8"]').click();
+  await page.locator('[data-touch="96,55"]').click();
   await page.locator("#profile").selectOption("i6x");
-  await page.waitForFunction(() => document.querySelector("#profile-badge").textContent === "FS-i6X" &&
+  await page.waitForFunction(() => document.querySelector("#profile").value === "i6x" &&
     document.querySelector("#output-state").textContent.startsWith("Gueltige"));
   assert.equal(await page.locator(".channel-value").first().textContent(), edited);
   assert.equal(await page.getByRole("checkbox", { name: "RH automatisch zentrieren", exact: true }).isChecked(), false);
 
-  await page.setViewportSize({ width: 390, height: 844 });
-  assert.ok(await page.locator("#lcd").isVisible());
-  await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth);
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    assert.ok(await profileLabelBesideSelector(), "Profile label sits beside the dropdown on mobile");
+    assert.ok(await page.locator("#lcd").isVisible());
+    assert.ok(await sticksAboveLCD(), "Sticks are above the LCD on mobile");
+    assert.ok(await centeringBetweenSticks(), "Centering checkboxes stay between the sticks on mobile");
+    assert.ok(await trimsBesideLCD(), "Trims flank the LCD on mobile");
+    await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth);
+    await expert.uncheck();
+    assert.equal(await page.locator("#analog-panel").isVisible(), false);
+    assert.equal(await page.locator("#storage-panel").isVisible(), false);
+    await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth);
+    await expert.check();
+  }
   const other = await page.context().newPage();
   await other.goto(url);
   await other.waitForFunction(() => document.querySelector("#output-state").textContent.startsWith("Gueltige"));

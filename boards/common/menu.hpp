@@ -72,13 +72,15 @@ inline constexpr std::array output_fields{tr::menu_minimum, tr::menu_maximum, tr
 inline constexpr std::array actions{tr::menu_new, tr::menu_copy, tr::menu_delete, tr::menu_move_up,
                                     tr::menu_move_down};
 #if CORETX_MODUL_TANKMIX
-inline constexpr std::array tank_fields{tr::tank_enabled,    tr::tank_drive,   tr::tank_steering,
-                                        tr::tank_left,       tr::tank_right,   tr::tank_gain,
-                                        tr::tank_hysteresis, tr::tank_reversal};
+inline constexpr std::array tank_fields{
+    tr::tank_enabled,     tr::tank_drive,         tr::tank_steering,   tr::tank_left,
+    tr::tank_right,       tr::tank_gain,          tr::tank_hysteresis, tr::tank_reversal,
+    tr::tank_third_motor, tr::tank_third_channel, tr::tank_third_curve};
 
 constexpr const char *tank_label(const MixRole role) noexcept {
     return role == MixRole::tank_drive     ? tr::tank_drive_line
            : role == MixRole::tank_forward ? tr::tank_forward
+           : role == MixRole::tank_third   ? tr::tank_third_line
                                            : tr::tank_reverse;
 }
 #endif
@@ -1317,12 +1319,18 @@ class Menu {
                 row(display, i, selected, first, menu_detail::tank_fields[i]);
                 const int value = i == selected ? editor_.field_value(model)
                                                 : coretx::ui::detail::tank_value(model.tank, i);
-                if ((i == 0) || (i == 7))
+                if ((i == 0) || (i == 7) || (i == 8))
                     display.text(104, y, value ? tr::menu_yes : tr::menu_no, ink);
-                else if (i <= 4)
+                else if ((i <= 4) || (i == 9))
                     coretx::ui::detail::indexed_label(display, 104, y, i <= 2 ? "I" : "CH",
                                                       static_cast<std::size_t>(value), ink);
-                else
+                else if (i == 10) {
+                    if (value != 0)
+                        coretx::ui::detail::indexed_label(display, 104, y, "C",
+                                                          static_cast<std::size_t>(value - 1), ink);
+                    else
+                        display.text(104, y, "---", ink);
+                } else
                     display.number(127, y, value, ink);
                 if (editor_.editing() && (i == selected))
                     display.small_text(96, y + 2, "*", ink);

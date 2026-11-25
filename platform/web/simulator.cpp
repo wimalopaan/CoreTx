@@ -25,7 +25,9 @@ struct Peripherals {
     std::uint32_t now{}, revision{}, touch_polled{};
     std::uint32_t repeat_started{}, repeated_at{};
     int repeat_key{};
-    std::array<bool, 9> keys{};
+    std::array<bool, 7> keys{};
+    std::array<std::uint32_t, 2> long_started{};
+    std::array<bool, 2> long_sent{};
     std::array<fw::Key, 32> events{};
     std::size_t event_read{}, event_write{};
     std::size_t touch_read{}, touch_write{};
@@ -53,10 +55,18 @@ struct Keys {
             io.event_read = (io.event_read + 1) % io.events.size();
             return key;
         }
+        for (std::size_t key = 5; key <= 6; ++key) {
+            const auto index = key - 5;
+            if (io.keys[key] && !io.long_sent[index] &&
+                (io.now - io.long_started[index] >= 800'000)) {
+                io.long_sent[index] = true;
+                return key == 5 ? fw::Key::ok_long : fw::Key::cancel_long;
+            }
+        }
         if ((io.repeat_key != 0) && io.keys[static_cast<std::size_t>(io.repeat_key)] &&
             (io.now - io.repeat_started >= 400'000) && (io.now - io.repeated_at >= 100'000)) {
             io.repeated_at = io.now;
-            return (io.repeat_key == 1) || (io.repeat_key == 3) ? fw::Key::up : fw::Key::down;
+            return io.repeat_key == 1 ? fw::Key::up : fw::Key::down;
         }
         return fw::Key::none;
     }
@@ -319,6 +329,8 @@ void sim_init() {
     io.repeat_key = 0;
     io.repeat_started = io.repeated_at = 0;
     io.keys.fill(false);
+    io.long_started.fill(0);
+    io.long_sent.fill(false);
     io.trims = io.digital = io.rear = 0;
     io.event_read = io.event_write = 0;
     io.touch_read = io.touch_write = 0;
@@ -374,19 +386,28 @@ void sim_set_switch(int index, int position) {
     }
 }
 void sim_key(int key, int down) {
-    if ((key <= 0) || (key >= static_cast<int>(io.keys.size())))
+    if constexpr (fw::features::i6s)
         return;
-    constexpr std::array map{fw::Key::none,   fw::Key::up,      fw::Key::down,
-                             fw::Key::up,     fw::Key::down,    fw::Key::ok,
-                             fw::Key::cancel, fw::Key::ok_long, fw::Key::cancel_long};
-    if (down && !io.keys[static_cast<std::size_t>(key)]) {
-        queue(map[static_cast<std::size_t>(key)]);
-        if (key <= 4) {
+    if ((key != 1) && (key != 2) && (key != 5) && (key != 6))
+        return;
+    const auto index = static_cast<std::size_t>(key);
+    if ((down != 0) == io.keys[index])
+        return;
+    if (key <= 2) {
+        if (down) {
+            queue(key == 1 ? fw::Key::up : fw::Key::down);
             io.repeat_key = key;
             io.repeat_started = io.repeated_at = io.now;
         }
+    } else {
+        const auto long_index = index - 5;
+        if (down) {
+            io.long_started[long_index] = io.now;
+            io.long_sent[long_index] = false;
+        } else if (!io.long_sent[long_index])
+            queue(key == 5 ? fw::Key::ok : fw::Key::cancel);
     }
-    io.keys[static_cast<std::size_t>(key)] = down != 0;
+    io.keys[index] = down != 0;
 }
 void sim_trim(int button, int down) {
     if ((button < 0) || (button >= 8))

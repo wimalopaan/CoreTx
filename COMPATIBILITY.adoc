@@ -102,6 +102,12 @@ input/mixer/output arithmetic rather than these board-specific decoders.
   input with strict symmetric thresholds and retains direction within the band;
   startup defaults to forward. This module is a CoreTX extension, not part of
   the captured EdgeTX reference.
+  An optional third motor reserves another channel and adds one always-active
+  drive-input mixer with its own editable shared model curve. First use allocates
+  an unreferenced default curve and initializes the points to
+  `(-100,0), (-50,0), (0,0), (25,0), (100,100)`; no existing curve is overwritten.
+  Disabling the motor/module removes its mixer but preserves the curve and its
+  assignment for later reactivation.
 * Heli and Lua are permanently out of scope.
 
 These differences must stay visible when adding a model importer or comparing

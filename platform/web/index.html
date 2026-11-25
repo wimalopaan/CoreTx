@@ -10,11 +10,13 @@
 </head>
 <body>
   <header class="page-header">
-    <div><p class="eyebrow">Sender-Simulator / WebAssembly</p><h1>CoreTx</h1>
-      <p class="subtitle">Echte Firmware, echtes LCD. Alle Ausgaenge sind simuliert &ndash; kein Funk.</p></div>
-    <label class="profile-label" for="profile">Senderprofil
-      <select id="profile"><option value="i6x">FlySky FS-i6X</option><option value="i6s">FlySky FS-i6S</option></select>
-    </label>
+    <div><h1>CoreTx</h1></div>
+    <div class="profile-settings">
+      <label class="profile-label" for="profile"><span>Senderprofil</span>
+        <select id="profile"><option value="i6x">FlySky FS-i6X</option><option value="i6s">FlySky FS-i6S</option></select>
+      </label>
+      <label class="expert-toggle"><input id="expert-mode" type="checkbox" aria-controls="analog-panel storage-panel">Expertenmodus</label>
+    </div>
   </header>
 
   <div class="status-strip" role="status" aria-live="polite">
@@ -27,44 +29,28 @@
   <div id="fatal" class="notice error" role="alert" hidden></div>
 
   <main>
-    <section class="panel transmitter" aria-labelledby="sender-heading">
-      <div class="section-heading"><h2 id="sender-heading">Sender</h2><span id="profile-badge" class="badge">FS-i6X</span></div>
+    <section class="panel transmitter" aria-label="Senderbedienung">
       <fieldset id="native-controls" disabled>
         <legend class="sr-only">Physische Senderbedienung</legend>
         <div id="switches" class="switches"></div>
+        <div id="sticks" class="sticks">
+          <div id="stick-centering" class="spring-options" role="group" aria-label="Automatische Knueppelzentrierung"><span>Zentrieren</span></div>
+        </div>
         <div class="lcd-section">
-          <div id="lcd-frame" class="lcd-frame">
-            <canvas id="lcd" width="128" height="64" tabindex="0" aria-label="Sender-LCD, 128 mal 64 Pixel. Tastatur: Pfeile, Enter fuer OK, Escape fuer Zurueck.">Das LCD benoetigt Canvas-Unterstuetzung.</canvas>
+          <div id="lcd-controls" class="lcd-controls">
+            <div id="trims-left" class="trims" role="group" aria-label="Trimmung linker Knueppel" hidden></div>
+            <div class="lcd-display">
+              <div id="lcd-frame" class="lcd-frame">
+                <canvas id="lcd" width="128" height="64" tabindex="0" aria-label="Sender-LCD, 128 mal 64 Pixel.">Das LCD benoetigt Canvas-Unterstuetzung.</canvas>
+              </div>
+            </div>
+            <div id="trims-right" class="trims" role="group" aria-label="Trimmung rechter Knueppel" hidden></div>
           </div>
           <p id="lcd-hint" class="hint">LCD der nativen Firmware &middot; Bedienung mit den Tasten unten</p>
         </div>
-        <div id="sticks" class="sticks"></div>
-        <div id="trims" class="trims"></div>
-        <div class="navigation" aria-label="Sendertasten">
-          <button type="button" data-key="1" aria-label="Nach oben">Hoch</button>
-          <button type="button" data-key="2" aria-label="Nach unten">Runter</button>
-          <button type="button" data-key="3">Links / +</button>
-          <button type="button" data-key="4">Rechts / -</button>
-          <button type="button" data-key="5" class="primary">OK</button>
-          <button type="button" data-key="6">Zurueck</button>
-          <button type="button" data-key="7">OK lang</button>
-          <button type="button" data-key="8">Zurueck lang</button>
-        </div>
+        <div id="navigation" class="navigation" aria-label="Sendertasten"></div>
       </fieldset>
-      <p class="hint">OK lang oeffnet das Sendermenue. Pfeiltasten / Enter / Escape;
-        Shift + Enter oder Escape = Langdruck.
-        Eingabefelder bleiben normale Eingabefelder.</p>
-      <details class="instructions">
-        <summary>Erste Schritte &amp; Kalibrierung</summary>
-        <p>Die Firmware steuert Menues, Kalibrierung und Mischer. Es gibt keine Browser-Mischer.
-          Neue Simulator-Sitzungen starten mit einem Vierkanalmodell und kalibrierten virtuellen Gebern.</p>
-        <p>Zur Kalibrierung zuerst alle sechs serienmaessigen Analogachsen mittig stellen und mit OK
-          bestaetigen. Dann beide Knueppel sowie VRA und VRB voll in alle Endlagen bewegen.
-          Erneut mit OK bestaetigen. Eine unvollstaendige Kalibrierung wird nicht umgangen.</p>
-        <p>Die Knueppelachsen sind physisch benannt, nicht fest als Gas oder Hoehe zugeordnet.
-          Die Zuordnung bestimmt der Stick-Modus der Firmware. Rueckstellung je Achse abschaltbar.
-          Beim Verlassen des Fensters werden gehaltene Tasten und Touch geloest.</p>
-      </details>
+      <p id="control-hint" class="hint"></p>
     </section>
 
     <section class="panel channels-panel" aria-labelledby="channels-heading">
@@ -76,13 +62,13 @@
         Ungueltige Ausgaenge werden nicht als letzter gueltiger Wert angezeigt.</p>
     </section>
 
-    <section class="panel analog-panel" aria-labelledby="analog-heading">
+    <section id="analog-panel" class="panel analog-panel" aria-labelledby="analog-heading" hidden>
       <div class="section-heading"><h2 id="analog-heading">Analoge Eingaenge</h2><span class="badge">ADC 0&ndash;4095</span></div>
       <fieldset id="analog-controls" disabled><legend class="sr-only">Analoge Rohwerte</legend><div id="axes" class="axes"></div></fieldset>
       <p class="hint">EXT 1/2 sind optionale Erweiterungen und in der Firmware standardmaessig deaktiviert.</p>
     </section>
 
-    <section class="panel storage-panel" aria-labelledby="storage-heading">
+    <section id="storage-panel" class="panel storage-panel" aria-labelledby="storage-heading" hidden>
       <div class="section-heading"><h2 id="storage-heading">Modelle &amp; EEPROM</h2><span class="badge">16 KiB / Profil</span></div>
       <p>Automatisch lokal in diesem Browser gespeichert, sobald die Firmware sicher schreiben kann.
         i6X und i6S bleiben getrennt. Es werden keine Modelldaten hochgeladen.</p>
