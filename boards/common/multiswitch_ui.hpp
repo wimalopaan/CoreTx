@@ -48,28 +48,7 @@ struct SenderInputContext {
 
 [[nodiscard]] constexpr std::string_view
 switch_condition_label(const Condition &condition, std::array<char, 6> &buffer) noexcept {
-    if (!condition.enabled)
-        return {};
-    std::size_t size{};
-    if (condition.inverted)
-        buffer[size++] = '!';
-    if ((condition.index >= switch_count) &&
-        (condition.index < (switch_count + logical_switch_count))) {
-        buffer[size++] = 'L';
-        buffer[size++] = static_cast<char>('1' + (condition.index - switch_count));
-        buffer[size++] = condition.position == SwitchPosition::down ? '1' : '0';
-    } else if ((condition.index < switch_count) && valid_switch_position(condition.position)) {
-        const auto name = switch_names[condition.index];
-        for (const auto character : name)
-            buffer[size++] = character;
-        buffer[size++] = condition.position == SwitchPosition::up     ? '^'
-                         : condition.position == SwitchPosition::down ? 'v'
-                         : condition.position == SwitchPosition::middle
-                             ? '-'
-                             : static_cast<char>('1' + static_cast<int>(condition.position) - 2);
-    } else
-        buffer[size++] = '?';
-    return {buffer.data(), size};
+    return coretx::ui::detail::condition_label(condition, buffer, switch_names);
 }
 
 constexpr void render_multiswitch(const MultiSwitchPage &page, const std::size_t slot,

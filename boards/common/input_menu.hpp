@@ -2,7 +2,7 @@
 #pragma once
 
 #include "boards/common/controls.hpp"
-#include "boards/common/radio_storage.hpp"
+#include "boards/common/radio_settings.hpp"
 #include "boards/common/switch_names.hpp"
 #include "coretx/ui/translation.hpp"
 #include "coretx/ui/ui.hpp"

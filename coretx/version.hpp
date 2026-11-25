@@ -4,5 +4,5 @@
 #include <cstdint>
 
 namespace coretx {
-inline constexpr std::uint16_t firmware_version = 7;
+inline constexpr std::uint16_t firmware_version = 8;
 } // namespace coretx

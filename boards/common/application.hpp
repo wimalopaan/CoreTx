@@ -179,7 +179,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             drawn_at_ = now - redraw_interval;
         }
     }
-    // Loads stored records in order (calibration, inputs, radio, models) and applies them.
+    // Loads stored records in order (calibration, inputs, models) and applies them.
     constexpr void service_storage(const TimestampUs now) noexcept {
         storage_.service_inputs(now, diagnostics_);
         if (!input_applied_ && storage_.input.loaded() &&
@@ -187,17 +187,15 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             overview_phase_ = 0;
             if (!diagnostics_.set_input_setup(
                     storage_.input.setup(),
-                    (storage_.input.status() == RadioStorageStatus::ready) ||
-                        (storage_.input.status() == RadioStorageStatus::saved))) {
+                    (storage_.input.status() == SettingsStatus::ready) ||
+                        (storage_.input.status() == SettingsStatus::saved))) {
                 radio_message_ = coretx::ui::tr::inputs_invalid;
             } else
                 apply_inputs();
             input_applied_ = true;
         }
-        if (input_applied_)
-            storage_.service_radio(now);
-        if (!settings_applied_ && storage_.radio.loaded()) {
-            settings_ = storage_.radio.settings();
+        if (!settings_applied_ && input_applied_) {
+            settings_ = {Board::transmitter_id()};
             settings_applied_ = true;
             if constexpr (has_internal_rf) {
                 internal_.initialize(settings_.transmitter, settings_.receiver, now);
@@ -306,11 +304,12 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         const auto tapped = Input::touch ? input_.tapped_switch() : crsf_.multiswitch.tapped;
         const auto *const controls =
             multiswitch_signal_operable() ? &diagnostics_.prepared().controls : nullptr;
-        if (crsf_.multiswitch.pages.update(slot, held, tapped, controls,
-                                           diagnostics_.evaluation().frame.logical) &&
+        auto &pages = crsf_.multiswitch.pages;
+        if (pages.update(slot, held, tapped, controls, diagnostics_.evaluation().frame.logical) &&
             diagnostics_.model().multiswitch_beep && !shutting_down())
             Inputs::service(now, true, ClickTone::multiswitch);
         crsf_.multiswitch.tapped.reset();
+        diagnostics_.observe_multiswitch(pages.states(), pages.available());
     }
     constexpr void service_rf() noexcept {
         if constexpr (has_internal_rf) {
@@ -446,11 +445,11 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             return multiswitch_signal_operable() && storage_.models.editable();
         return false;
     }
+    // States also drive M11..M48 in the core, so they work with every radio output.
     [[nodiscard]] constexpr bool multiswitch_signal_operable() const noexcept {
         if constexpr (has_multiswitch)
-            return (output_ == RadioOutput::external) && (state_ == ApplicationState::running) &&
-                   diagnostics_.output_valid() && storage_.models.loaded() &&
-                   (input_.message() == nullptr) && (ExternalRFModule::error() == CrsfError::none);
+            return (state_ == ApplicationState::running) && diagnostics_.output_valid() &&
+                   storage_.models.loaded() && (input_.message() == nullptr);
         return false;
     }
     constexpr void apply_inputs() noexcept {
@@ -487,10 +486,10 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             return;
         }
         if ((output != RadioOutput::off) &&
-            (!input_applied_ || ((storage_.input.status() != RadioStorageStatus::ready) &&
-                                 (storage_.input.status() != RadioStorageStatus::empty) &&
-                                 (storage_.input.status() != RadioStorageStatus::saved) &&
-                                 (storage_.input.status() != RadioStorageStatus::missing)))) {
+            (!input_applied_ || ((storage_.input.status() != SettingsStatus::ready) &&
+                                 (storage_.input.status() != SettingsStatus::empty) &&
+                                 (storage_.input.status() != SettingsStatus::saved) &&
+                                 (storage_.input.status() != SettingsStatus::missing)))) {
             radio_message_ = storage_.input.message();
             return;
         }
@@ -730,7 +729,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
                 return;
             }
         }
-        if ((key == Key::ok) && (storage_.radio.owns_memory() || storage_.input.owns_memory()))
+        if ((key == Key::ok) && storage_.input.owns_memory())
             return;
         const auto phase = diagnostics_.phase();
         if ((phase == CalibrationPhase::range) && (key == Key::ok))
@@ -1003,9 +1002,8 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         render_dashboard(
             diagnostics_, error_message(Adc::error()), framebuffer_,
             {Probe::state(), Probe::error(), Probe::acknowledged(),
-             storage_.radio.owns_memory() || model.saving
-                 ? coretx::ui::tr::saving
-                 : storage_.calibration.label(diagnostics_.calibrated()),
+             model.saving ? coretx::ui::tr::saving
+                          : storage_.calibration.label(diagnostics_.calibrated()),
              Watchdog::resets(), storage_.input.message(), Board::name, Watchdog::last_fault()},
             telemetry_, output_, input_.message(), Board::now_us(), model.name, model.error);
         if ((diagnostics_.page() != Diagnostics::system_page) &&

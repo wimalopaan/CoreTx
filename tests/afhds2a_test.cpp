@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-#include "boards/common/radio_storage.hpp"
+#include "boards/common/radio_settings.hpp"
 #include "platform/stm32f072/afhds2a.hpp"
 
 #include "static_fixture.hpp"
@@ -388,33 +388,6 @@ bool receiver_voltage_crc_gate() {
     return true;
 }
 
-constexpr bool records() {
-    const fw::RadioSettings settings{{0x12345678}, {0xCAFEBABE}, fw::RadioOutput::internal};
-    auto bytes = fw::radio_storage::encode(settings, 42);
-    const auto decoded = fw::radio_storage::decode(bytes);
-    if (!decoded.valid() || (decoded.settings != settings) || (decoded.generation != 42))
-        return false;
-    auto extended = settings;
-    extended.channel_mode = protocol::ChannelMode::extended16;
-    if (fw::radio_storage::decode(fw::radio_storage::encode(extended, 43)).settings != extended)
-        return false;
-    auto legacy = bytes;
-    legacy[4] = 1;
-    coretx::storage::detail::Writer legacy_crc{std::span{legacy}.last(4)};
-    legacy_crc.word(coretx::storage::crc32(std::span{legacy}.first(60)));
-    const auto migrated = fw::radio_storage::decode(legacy);
-    if (!migrated.valid() || (migrated.settings != extended) || (migrated.generation != 42))
-        return false;
-    auto invalid_mode = bytes;
-    invalid_mode[6] = 2;
-    coretx::storage::detail::Writer invalid_crc{std::span{invalid_mode}.last(4)};
-    invalid_crc.word(coretx::storage::crc32(std::span{invalid_mode}.first(60)));
-    if (fw::radio_storage::decode(invalid_mode).status != fw::RadioStorageStatus::invalid)
-        return false;
-    bytes[15] ^= 1;
-    return !fw::radio_storage::decode(bytes).valid();
-}
-
 bool radio_shutdown_and_deadlines() {
     for (const std::uint32_t base : {0U, 0xFFFFF000U}) {
         struct TestScenario {};
@@ -571,191 +544,17 @@ bool stale_idle_frame_resumes() {
     return (radio.error() == fw::Afhds2aError::none) && (hardware.tx_count >= 3);
 }
 
-struct Eeprom {
-    std::array<std::uint8_t, 2176> bytes{};
-    std::span<std::uint8_t> input{};
-    std::span<const std::uint8_t> output{};
-    std::uint16_t address{};
-    unsigned writes{};
-    bool pending{};
-    bool fail{};
-    fw::I2cError error{};
-    constexpr Eeprom() { bytes.fill(0xFF); }
-};
-template <typename Test> struct Memory {
-    inline static constexpr std::size_t page_size = 64;
-    static void reset() noexcept {}
-    static void select(std::uint8_t) {
-        auto &e = Test::context;
-        if (e.pending)
-            std::abort();
-    }
-    static bool busy() {
-        auto &e = Test::context;
-        return e.pending;
-    }
-    static auto error() {
-        auto &e = Test::context;
-        return e.error;
-    }
-    static bool read(std::uint16_t address, std::span<std::uint8_t> bytes) {
-        auto &e = Test::context;
-        if (e.pending || ((address + bytes.size()) > e.bytes.size()))
-            std::abort();
-        e.input = bytes;
-        e.output = {};
-        e.address = address;
-        return e.pending = true;
-    }
-    static bool write(std::uint16_t address, std::span<const std::uint8_t> bytes) {
-        auto &e = Test::context;
-        if (e.pending || bytes.empty() || ((address / 64) != ((address + bytes.size() - 1) / 64)) ||
-            ((address + bytes.size()) > e.bytes.size()))
-            std::abort();
-        e.output = bytes;
-        e.input = {};
-        e.address = address;
-        ++e.writes;
-        return e.pending = true;
-    }
-    static void service(coretx::TimestampUs) {
-        auto &e = Test::context;
-        if (e.fail) {
-            e.error = fw::I2cError::bus;
-        } else if (!e.input.empty()) {
-            std::copy_n(e.bytes.begin() + e.address, e.input.size(), e.input.begin());
-        } else {
-            std::copy(e.output.begin(), e.output.end(), e.bytes.begin() + e.address);
-        }
-        e.pending = false;
-    }
-};
-template <typename Journal> void journal_step(Journal &journal) {
-    journal.service(coretx::TimestampUs{}, {fw::StorageProbeState::found, {}, 1});
-}
-template <typename Journal> void journal_run(Journal &journal) {
-    for (unsigned i = 0; i < 12; ++i)
-        journal_step(journal);
-}
-bool legacy_settings_migration() {
-    constexpr fw::RadioSettings expected{
-        {0x12345678}, {0xCAFEBABE}, fw::RadioOutput::internal, protocol::ChannelMode::extended16};
-    auto legacy = fw::radio_storage::encode(expected, 7);
-    legacy[4] = 1;
-    legacy[6] = 0;
-    coretx::storage::detail::Writer checksum{std::span{legacy}.last(4)};
-    checksum.word(coretx::storage::crc32(std::span{legacy}.first(60)));
-    struct Scenario {};
-    using Test = coretx::test::FakeApplication<Scenario, Eeprom, Memory>;
-    using Journal = fw::RadioStorage<Test::Board>;
-    Test::reset();
-    auto &eeprom = Test::context;
-    std::copy(legacy.begin(), legacy.end(), eeprom.bytes.begin() + 2048);
-    Journal journal{};
-    journal.initialize(expected.transmitter);
-    journal_run(journal);
-    if ((journal.settings() != expected) || (journal.status() != fw::RadioStorageStatus::ready) ||
-        (eeprom.writes != 0))
-        return false;
-    auto changed = expected;
-    changed.channel_mode = protocol::ChannelMode::standard14;
-    journal.save(changed);
-    journal_run(journal);
-    struct RebootScenario {};
-    using RebootTest = coretx::test::FakeApplication<RebootScenario, Eeprom, Memory>;
-    RebootTest::reset();
-    RebootTest::context.bytes = eeprom.bytes;
-    fw::RadioStorage<RebootTest::Board> reboot{};
-    reboot.initialize(expected.transmitter);
-    journal_run(reboot);
-    return (reboot.status() == fw::RadioStorageStatus::ready) && (reboot.settings() == changed) &&
-           (eeprom.bytes[2116] == 2) &&
-           std::equal(legacy.begin(), legacy.end(), eeprom.bytes.begin() + 2048);
-}
-bool persistence() {
-    constexpr fw::RadioSettings original{{0x12345678}, {0xCAFEBABE}, fw::RadioOutput::internal};
-    struct Scenario {};
-    using Test = coretx::test::FakeApplication<Scenario, Eeprom, Memory>;
-    using Journal = fw::RadioStorage<Test::Board>;
-    Test::reset();
-    auto &saved = Test::context;
-    Journal first{};
-    first.initialize(original.transmitter);
-    journal_run(first);
-    if (!first.loaded() || (first.status() != fw::RadioStorageStatus::empty) ||
-        (first.settings().output != fw::RadioOutput::off))
-        return false;
-    first.save(original);
-    journal_run(first);
-    if ((first.status() != fw::RadioStorageStatus::saved) || (saved.writes != 3))
-        return false;
-    for (unsigned interruption = 0; interruption < 6; ++interruption) {
-        struct WritingScenario {};
-        using WritingTest = coretx::test::FakeApplication<WritingScenario, Eeprom, Memory>;
-        WritingTest::reset();
-        auto &eeprom = WritingTest::context;
-        eeprom.bytes = saved.bytes;
-        fw::RadioStorage<WritingTest::Board> writer{};
-        writer.initialize(original.transmitter);
-        journal_run(writer);
-        if (writer.settings() != original)
-            return false;
-        auto changed = original;
-        changed.channel_mode = protocol::ChannelMode::extended16;
-        changed.output = fw::RadioOutput::external;
-        writer.save(changed);
-        for (unsigned i = 0; i < interruption; ++i)
-            journal_step(writer);
-        eeprom.pending = false;
-        struct RebootScenario {};
-        using RebootTest = coretx::test::FakeApplication<RebootScenario, Eeprom, Memory>;
-        RebootTest::reset();
-        RebootTest::context.bytes = eeprom.bytes;
-        fw::RadioStorage<RebootTest::Board> reboot{};
-        reboot.initialize(original.transmitter);
-        journal_run(reboot);
-        if (!reboot.loaded() || (reboot.status() != fw::RadioStorageStatus::ready) ||
-            ((reboot.settings() != original) && (reboot.settings() != changed)))
-            return false;
-    }
-    auto future = fw::radio_storage::encode(original, 100);
-    future[4] = fw::radio_storage::version + 1;
-    coretx::storage::detail::Writer checksum{std::span{future}.last(4)};
-    checksum.word(coretx::storage::crc32(std::span{future}.first(60)));
-    std::copy(future.begin(), future.end(), saved.bytes.begin() + 2112);
-    Journal newer{};
-    newer.initialize(original.transmitter);
-    journal_run(newer);
-    const auto writes = saved.writes;
-    newer.save(original);
-    journal_run(newer);
-    if ((newer.status() != fw::RadioStorageStatus::version) || (saved.writes != writes))
-        return false;
-    struct FailedScenario {};
-    using FailedTest = coretx::test::FakeApplication<FailedScenario, Eeprom, Memory>;
-    FailedTest::reset();
-    auto &failed = FailedTest::context;
-    failed.fail = true;
-    fw::RadioStorage<FailedTest::Board> unreadable{};
-    unreadable.initialize(original.transmitter);
-    journal_run(unreadable);
-    return (unreadable.status() == fw::RadioStorageStatus::io_error) &&
-           (unreadable.settings().output == fw::RadioOutput::off);
-}
-
 static_assert(packets_and_binding());
 static_assert(standard_channel_packets());
 static_assert(extended_channel_packets());
 static_assert(paired_receiver_lqi());
-static_assert(records());
 } // namespace
 
 int main() {
     if (!packets_and_binding() || !standard_channel_packets() || !extended_channel_packets() ||
         !paired_receiver_lqi() || !cooperative_radio() ||
         !cooperative_radio(fw::a7105::mode_fec_fail) || !crc_failed_bind_is_ignored() ||
-        !receiver_voltage_crc_gate() || !records() || !persistence() ||
-        !legacy_settings_migration() || !radio_shutdown_and_deadlines() ||
+        !receiver_voltage_crc_gate() || !radio_shutdown_and_deadlines() ||
         !expired_packet_is_not_transmitted() || !transmission_completion_window() ||
         !stale_idle_frame_resumes() || !gio2_completes_transmission(false) ||
         !gio2_completes_transmission(true)) {

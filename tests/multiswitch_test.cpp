@@ -31,7 +31,8 @@ constexpr bool pages_and_repeats() {
         ms::Pages pages{};
         pages.configure(model);
         if ((pages.due(TimestampUs{base}) != 1) || !pages.update(1, 1, 0) ||
-            (pages.switches(1) != 3))
+            (pages.switches(1) != 3) || (pages.states() != (3U << 8)) ||
+            (pages.available() != 0xFF00FF00U))
             return false;
         pages.sent(1, TimestampUs{base});
         if ((pages.due(TimestampUs{base + 1}) != 3) || (pages.frame(1) != ms::encode(0, 3)))
@@ -43,6 +44,8 @@ constexpr bool pages_and_repeats() {
             !pages.update(1, std::nullopt, 0) || (pages.switches(1) != 0))
             return false;
         pages.update(3, std::nullopt, 7);
+        if (pages.states() != (0x80U << 24))
+            return false;
         auto changed = model;
         changed.multiswitch[1].address = 42;
         pages.configure(changed);
@@ -387,7 +390,7 @@ constexpr bool bound_tile_rendering() {
         {true, coretx::switch_count + 1, SwitchPosition::up, true},
     }};
     constexpr std::array<std::string_view, 8> labels{
-        "SA^", "SBv", "SC-", "VRA4", {first_extra_label.data(), 3}, "!VRA4", "L11", "!L20"};
+        "SA^", "SBv", "SC-", "VRA4", {first_extra_label.data(), 3}, "!VRA4", "L1", "L2"};
     for (std::size_t i = 0; i < conditions.size(); ++i)
         if (!page.controls[i].set_condition(conditions[i]))
             return false;

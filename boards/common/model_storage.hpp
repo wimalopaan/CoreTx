@@ -6,7 +6,7 @@
 #include "boards/common/model_converter.hpp"
 #endif
 #include "boards/common/model_migration.hpp"
-#include "boards/common/radio_storage.hpp"
+#include "boards/common/radio_settings.hpp"
 #include "boards/common/slot_transfer.hpp"
 #include "coretx/ui/translation.hpp"
 #include "platform/stm32f072/crsf.hpp"
@@ -47,8 +47,6 @@ template <typename Memory> class ModelStorage {
         data_.radio.transmitter = transmitter;
     }
     [[nodiscard]] constexpr models::Data &data() noexcept { return data_; }
-    // Scratch is unused before the first service and serves as calibration decode area.
-    [[nodiscard]] constexpr Model &legacy_workspace() noexcept { return scratch_.model; }
     [[nodiscard]] constexpr const models::Data &data() const noexcept { return data_; }
     [[nodiscard]] constexpr const auto &entries() const noexcept { return entries_; }
     [[nodiscard]] constexpr std::size_t active() const noexcept { return active_; }
@@ -224,7 +222,7 @@ template <typename Memory> class ModelStorage {
         return begin_save(index, false, false);
     }
     constexpr void service(const TimestampUs now, const StorageProbeResult probe,
-                           const Model &legacy, const RadioSettings radio) noexcept {
+                           const Model &initial, const RadioSettings radio) noexcept {
 #if CORETX_STORAGE_CONVERTER
         if ((stage_ == Stage::conversion_check) || (stage_ == Stage::converting)) {
             conversion_.service(now);
@@ -249,12 +247,12 @@ template <typename Memory> class ModelStorage {
                 finish(coretx::ui::tr::models_unique_eeprom, false);
                 return;
             }
-            if (!coretx::validate(legacy)) {
+            if (!coretx::validate(initial)) {
                 finish(coretx::ui::tr::models_legacy_invalid, false);
                 return;
             }
-            if (&legacy != &data_.model)
-                data_.model = legacy;
+            if (&initial != &data_.model)
+                data_.model = initial;
             data_.radio = radio;
             record_.fill(0xFF);
             stage_ = Stage::migration_load;

@@ -272,24 +272,7 @@ struct Board {
     static bool stack_intact() { return true; }
     static void power_off() {}
     static void reset() {}
-    static coretx::afhds2a::TxId transmitter_id() {
-        std::array<fw::radio_storage::Decoded, 2> banks{};
-        for (std::size_t i = 0; i < banks.size(); ++i) {
-            fw::radio_storage::Record record{};
-            std::copy_n(io.eeprom.begin() + fw::radio_storage::base_address +
-                            static_cast<std::ptrdiff_t>(i * record.size()),
-                        record.size(), record.begin());
-            banks[i] = fw::radio_storage::decode(record);
-        }
-        if (banks[0].valid() && banks[1].valid()) {
-            const auto delta = banks[1].generation - banks[0].generation;
-            return banks[delta != 0 && delta < 0x80000000U ? 1U : 0U].settings.transmitter;
-        }
-        for (const auto &bank : banks)
-            if (bank.valid())
-                return bank.settings.transmitter;
-        return {0x12345678};
-    }
+    static coretx::afhds2a::TxId transmitter_id() { return {0x12345678}; }
 };
 
 using Application = fw::Application<Board, Board::Input>;
@@ -300,17 +283,21 @@ bool defaults() {
     coretx::ControlSetup setup{};
     setup.calibration.fill({0, 2048, 4095});
     setup.mapping[0].reversed = setup.mapping[1].reversed = true;
-    const auto model = fw::models::four_channel_model();
-    coretx::storage::Record calibration{};
-    if (!coretx::storage::encode(model, setup, 0, calibration))
+    const auto calibration = fw::calibration_storage::encode(setup, 0);
+    std::copy(calibration.begin(), calibration.end(),
+              io.eeprom.begin() + fw::calibration_storage::base_address);
+    fw::models::Data data{};
+    fw::models::four_channel_model(data.model);
+    data.radio = {Board::transmitter_id(),
+                  {},
+                  fw::RadioOutput::off,
+                  coretx::afhds2a::ChannelMode::extended16};
+    data.baud_index = static_cast<std::uint8_t>(fw::crsf_default_baudrate_index);
+    fw::models::default_name(data.name, 0);
+    fw::models::Record model{};
+    if (!fw::models::encode(data, 0, true, 0, model))
         return false;
-    std::copy(calibration.begin(), calibration.end(), io.eeprom.begin());
-    const auto radio = fw::radio_storage::encode({Board::transmitter_id(),
-                                                  {},
-                                                  fw::RadioOutput::off,
-                                                  coretx::afhds2a::ChannelMode::extended16},
-                                                 0);
-    std::copy(radio.begin(), radio.end(), io.eeprom.begin() + fw::radio_storage::base_address);
+    std::copy(model.begin(), model.end(), io.eeprom.begin() + fw::models::base);
     const auto inputs = fw::input_storage::encode(coretx::InputSetup{Board::sb_three_position}, 0);
     std::copy(inputs.begin(), inputs.end(), io.eeprom.begin() + fw::input_storage::base_address);
     ++io.revision;
@@ -363,11 +350,15 @@ int sim_step(int elapsed_ms) {
     }
     return sim_status();
 }
+// Analog indices: sticks 0..3, VRA/VRB 4..5, then the additional inputs VRC.. of the board.
+int sim_analog_count() { return static_cast<int>(6 + fw::extra_adc_count); }
 void sim_set_analog(int index, int raw) {
-    if ((index < 0) || (index >= 8) || (raw < 0) || (raw > 4095))
+    if ((index < 0) || (index >= sim_analog_count()) || (raw < 0) || (raw > 4095))
         return;
-    constexpr std::array<std::size_t, 8> indices{0, 1, 2, 3, 6, 7, 11, 12};
-    io.adc[indices[static_cast<std::size_t>(index)]] = static_cast<std::uint16_t>(raw);
+    const auto analog = static_cast<std::size_t>(index);
+    io.adc[analog < 4   ? analog
+           : analog < 6 ? analog + 2
+                        : fw::battery_index + 1 + (analog - 6)] = static_cast<std::uint16_t>(raw);
 }
 void sim_set_switch(int index, int position) {
     if ((index < 0) || (index >= 16) || (position < 0) || (position > 2))
@@ -384,6 +375,14 @@ void sim_set_switch(int index, int position) {
         const auto bit = static_cast<std::uint8_t>(1U << (index - 14));
         io.rear = static_cast<std::uint8_t>((io.rear & ~bit) | (position == 2 ? bit : 0));
     }
+}
+int sim_digital_inputs() {
+    const auto &diagnostics = app.diagnostics();
+    int result{};
+    for (std::size_t i = 0; i < coretx::digital_input_count; ++i)
+        if (diagnostics.digital_enabled(i))
+            result |= static_cast<int>(diagnostics.input_setup().digital_mode(i)) << (2 * i);
+    return result;
 }
 void sim_key(int key, int down) {
     if constexpr (fw::features::i6s)

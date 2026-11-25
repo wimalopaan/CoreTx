@@ -2,232 +2,149 @@
 #pragma once
 
 #include "boards/common/controls.hpp"
-#include "boards/common/slot_transfer.hpp"
+#include "boards/common/settings_storage.hpp"
 #include "coretx/storage/storage.hpp"
 #include "coretx/ui/translation.hpp"
-#include "platform/stm32f072/eeprom.hpp"
 
 namespace coretx::firmware {
+namespace calibration_storage {
 
-enum class CalibrationStorageState : std::uint8_t {
-    waiting,
-    loading,
-    loaded,
-    empty,
-    saving,
-    saved,
-    not_found,
-    multiple,
-    io_error,
-    invalid,
-    verify_error
+// Two journaled 64-byte records directly below the model area.
+inline constexpr std::uint16_t base_address = 1920;
+inline constexpr std::size_t record_size = 64;
+inline constexpr std::uint32_t magic = 0x314C4143; // Little-endian "CAL1".
+inline constexpr std::uint32_t family_mask = 0x00FFFFFF;
+using Record = std::array<std::uint8_t, record_size>;
+static_assert((base_address + (2 * record_size)) <= 2048);
+
+struct Decoded {
+    ControlSetup setup{};
+    std::uint32_t generation{};
+    SettingsStatus status{SettingsStatus::invalid};
+    [[nodiscard]] constexpr bool valid() const noexcept { return status == SettingsStatus::ready; }
 };
+// Layout: magic, generation, 8 x {minimum, center, maximum}, 8 mapping nibbles
+// (bits 0-2 physical index, bit 3 reversed), CRC-32 over the preceding 60 bytes.
+[[nodiscard]] constexpr Record encode(const ControlSetup &setup,
+                                      const std::uint32_t generation) noexcept {
+    Record bytes{};
+    coretx::storage::detail::Writer writer{bytes};
+    writer.word(magic);
+    writer.word(generation);
+    for (const auto &axis : setup.calibration) {
+        writer.field(axis.minimum);
+        writer.field(axis.center);
+        writer.field(axis.maximum);
+    }
+    std::uint32_t mapping{};
+    for (std::size_t i = 0; i < calibration_count; ++i)
+        mapping |= static_cast<std::uint32_t>((setup.mapping[i].physical_index & 7U) |
+                                              (setup.mapping[i].reversed ? 8U : 0U))
+                   << (4U * i);
+    writer.word(mapping);
+    writer.word(coretx::storage::crc32(std::span{bytes}.first(record_size - 4)));
+    return bytes;
+}
+[[nodiscard]] constexpr Decoded decode(const Record &bytes) noexcept {
+    Decoded decoded{};
+    if (std::all_of(bytes.begin(), bytes.end(), [](const auto value) { return value == 0xFF; })) {
+        decoded.status = SettingsStatus::empty;
+        return decoded;
+    }
+    coretx::storage::detail::Reader reader{bytes};
+    std::uint32_t identifier{};
+    reader.word(identifier);
+    reader.word(decoded.generation);
+    for (auto &axis : decoded.setup.calibration) {
+        reader.field(axis.minimum);
+        reader.field(axis.center);
+        reader.field(axis.maximum);
+    }
+    std::uint32_t mapping{};
+    std::uint32_t stored{};
+    reader.word(mapping);
+    reader.word(stored);
+    if (stored != coretx::storage::crc32(std::span{bytes}.first(record_size - 4)))
+        return decoded;
+    if (identifier != magic) {
+        if ((identifier & family_mask) == (magic & family_mask))
+            decoded.status = SettingsStatus::version;
+        return decoded;
+    }
+    for (std::size_t i = 0; i < calibration_count; ++i) {
+        const auto nibble = (mapping >> (4U * i)) & 0xFU;
+        decoded.setup.mapping[i] = {static_cast<std::uint8_t>(nibble & 7U), (nibble & 8U) != 0};
+    }
+    if (coretx::validate(decoded.setup))
+        decoded.status = SettingsStatus::ready;
+    return decoded;
+}
+struct Codec {
+    using Value = ControlSetup;
+    using Record = calibration_storage::Record;
+    using Decoded = calibration_storage::Decoded;
+    static constexpr std::uint16_t base_address = calibration_storage::base_address;
+    // Damaged calibration is replaced by the next successful calibration run.
+    static constexpr bool overwrite_invalid = true;
+    static constexpr Record encode(const ControlSetup &setup,
+                                   const std::uint32_t generation) noexcept {
+        return calibration_storage::encode(setup, generation);
+    }
+    static constexpr Decoded decode(const Record &bytes) noexcept {
+        return calibration_storage::decode(bytes);
+    }
+    static constexpr const ControlSetup &value(const Decoded &decoded) noexcept {
+        return decoded.setup;
+    }
+    static constexpr bool valid(const ControlSetup &setup) noexcept {
+        return Diagnostics::valid_setup(setup);
+    }
+};
+} // namespace calibration_storage
 
-template <typename Memory> class CalibrationStorage {
+template <typename Memory>
+class CalibrationStorage : public SettingsStorage<Memory, calibration_storage::Codec> {
+    using Base = SettingsStorage<Memory, calibration_storage::Codec>;
+
   public:
-    [[nodiscard]] constexpr CalibrationStorageState state() const noexcept { return state_; }
-    [[nodiscard]] constexpr I2cError error() const noexcept { return error_; }
-    [[nodiscard]] constexpr coretx::storage::Error record_error() const noexcept {
-        return record_error_;
-    }
-    [[nodiscard]] constexpr std::uint32_t generation() const noexcept { return generation_; }
-    [[nodiscard]] constexpr bool busy() const noexcept { return stage_ != Stage::ready; }
-    // True after a successful load; the caller's workspace then holds the stored legacy model.
-    [[nodiscard]] constexpr bool legacy_loaded() const noexcept { return legacy_loaded_; }
     constexpr void save_setup(const Diagnostics &diagnostics) noexcept {
-        if (!busy())
-            save(diagnostics);
+        if (!Base::busy())
+            (void)Base::save(diagnostics.setup());
     }
-
     [[nodiscard]] constexpr const char *label(const bool calibrated) const noexcept {
-        if ((state_ == CalibrationStorageState::waiting) ||
-            (state_ == CalibrationStorageState::loading)) {
+        const auto status = Base::status();
+        if (status == SettingsStatus::loading)
             return coretx::ui::tr::load_cal;
-        }
-        if (state_ == CalibrationStorageState::saving) {
+        if (status == SettingsStatus::saving)
             return coretx::ui::tr::saving;
-        }
-        if (!calibrated) {
+        if (!calibrated)
             return coretx::ui::tr::need_cal;
-        }
-        return (state_ == CalibrationStorageState::saved) ||
-                       (state_ == CalibrationStorageState::loaded)
+        return (status == SettingsStatus::saved) || (status == SettingsStatus::ready)
                    ? coretx::ui::tr::ok_cal
                    : coretx::ui::tr::ram_cal;
     }
-
     constexpr void handle(const Key key, Diagnostics &diagnostics) noexcept {
-        if ((key == Key::ok) && busy()) {
+        if ((key == Key::ok) && Base::busy())
             return;
-        }
         const auto phase = diagnostics.phase();
         diagnostics.handle(key);
         if ((key == Key::ok) && (phase == CalibrationPhase::range) &&
-            (diagnostics.phase() == CalibrationPhase::idle) && diagnostics.calibrated()) {
-            save(diagnostics);
-        }
+            (diagnostics.phase() == CalibrationPhase::idle) && diagnostics.calibrated())
+            (void)Base::save(diagnostics.setup());
     }
-    // The legacy record format contains a full model. It is decoded into the caller-owned
-    // workspace (the model storage's not yet loaded model) instead of a private State copy.
     constexpr void service(const TimestampUs now, const StorageProbeResult probe,
-                           Diagnostics &diagnostics, Model &workspace) noexcept {
-        if (stage_ == Stage::wait_probe) {
-            const auto selection = select_memory<Memory>(probe);
-            if (selection == ProbeSelection::wait)
-                return;
-            if (selection != ProbeSelection::selected) {
-                finish(selection == ProbeSelection::missing ? CalibrationStorageState::not_found
-                                                            : CalibrationStorageState::multiple);
-                return;
-            }
-            state_ = CalibrationStorageState::loading;
-            stage_ = Stage::load;
-            read();
-        }
-        for (;;) {
-            switch (transfer_.service(now)) {
-            case Transfer::Result::busy:
-                return;
-            case Transfer::Result::failed:
-                error_ = Memory::error();
-                finish(CalibrationStorageState::io_error);
-                return;
-            case Transfer::Result::mismatch:
-                finish(CalibrationStorageState::verify_error);
-                return;
-            case Transfer::Result::done:
-                break;
-            }
-            if (stage_ == Stage::load) {
-                if (!load(diagnostics, workspace))
-                    return;
-                read();
-                continue;
-            }
-            if (stage_ == Stage::write) {
-                active_ = slot_;
-                has_active_ = true;
-                generation_ = pending_generation_;
-                record_error_ = coretx::storage::Error::none;
-                finish(CalibrationStorageState::saved);
-            }
+                           Diagnostics &diagnostics) noexcept {
+        Base::service(now, probe);
+        if (applied_ || !Base::loaded() || Base::owns_memory())
             return;
-        }
+        applied_ = true;
+        if ((Base::status() == SettingsStatus::ready) &&
+            !diagnostics.restore_calibration(Base::value()))
+            Base::reject();
     }
 
   private:
-    enum class Stage : std::uint8_t { wait_probe, load, ready, write };
-    using Transfer = SlotTransfer<Memory>;
-    [[nodiscard]] constexpr std::uint16_t address() const noexcept {
-        return static_cast<std::uint16_t>(slot_ * coretx::storage::slot_size);
-    }
-    constexpr void read() noexcept { transfer_.read(address(), record_); }
-
-    constexpr void finish(const CalibrationStorageState state) noexcept {
-        state_ = state;
-        stage_ = Stage::ready;
-    }
-
-    [[nodiscard]] constexpr std::uint32_t record_checksum() const noexcept {
-        return static_cast<std::uint32_t>(record_[12]) |
-               (static_cast<std::uint32_t>(record_[13]) << 8) |
-               (static_cast<std::uint32_t>(record_[14]) << 16) |
-               (static_cast<std::uint32_t>(record_[15]) << 24);
-    }
-
-    // Both slots share one buffer: slot 0 and slot 1 are inspected in turn, and slot 0 is read
-    // again if it wins. Returns true while further pages have to be read.
-    constexpr bool load(Diagnostics &diagnostics, Model &workspace) noexcept {
-        ControlSetup setup{};
-        const auto info = coretx::storage::decode_parts(record_, workspace, setup);
-        if (reload_) {
-            if (!info || (info.generation != generation_) ||
-                (record_checksum() != first_checksum_)) {
-                record_error_ = info ? coretx::storage::Error::generation : info.status.code;
-                finish(CalibrationStorageState::invalid);
-                return false;
-            }
-            return restore(diagnostics, setup, 0, generation_);
-        }
-        if (slot_ == 0) {
-            first_ = info;
-            first_checksum_ = record_checksum();
-            slot_ = 1;
-            return true;
-        }
-        const auto selection =
-            coretx::storage::select_slots(first_, info, first_checksum_ == record_checksum());
-        record_error_ = selection.status.code;
-        if (!selection) {
-            finish(record_error_ == coretx::storage::Error::empty
-                       ? CalibrationStorageState::empty
-                       : CalibrationStorageState::invalid);
-            return false;
-        }
-        if (selection.slot == 1)
-            return restore(diagnostics, setup, 1, selection.generation);
-        generation_ = selection.generation;
-        reload_ = true;
-        slot_ = 0;
-        return true;
-    }
-
-    constexpr bool restore(Diagnostics &diagnostics, const ControlSetup &setup,
-                           const std::size_t slot, const std::uint32_t generation) noexcept {
-        reload_ = false;
-        if (!diagnostics.restore_calibration(setup)) {
-            record_error_ = coretx::storage::Error::setup;
-            finish(CalibrationStorageState::invalid);
-            return false;
-        }
-        active_ = slot;
-        generation_ = generation;
-        has_active_ = true;
-        legacy_loaded_ = true;
-        finish(CalibrationStorageState::loaded);
-        return false;
-    }
-
-    // Format 7 still carries a model for older firmware; the active model is stored there.
-    constexpr void save(const Diagnostics &diagnostics) noexcept {
-        if ((state_ == CalibrationStorageState::not_found) ||
-            (state_ == CalibrationStorageState::multiple) ||
-            (state_ == CalibrationStorageState::io_error) ||
-            (state_ == CalibrationStorageState::verify_error) ||
-            (record_error_ == coretx::storage::Error::version) ||
-            (record_error_ == coretx::storage::Error::generation)) {
-            return; // Keep the explicit failure visible; never overwrite a newer/ambiguous format.
-        }
-        slot_ = has_active_ ? 1U - active_ : 0U;
-        pending_generation_ = has_active_ ? generation_ + 1U : 0U;
-        const auto encoded = coretx::storage::encode(diagnostics.model(), diagnostics.setup(),
-                                                     pending_generation_, record_);
-        if (!encoded) {
-            record_error_ = encoded.code;
-            finish(CalibrationStorageState::invalid);
-            return;
-        }
-        state_ = CalibrationStorageState::saving;
-        stage_ = Stage::write;
-        // The first page holds the header; writing it last commits the record.
-        transfer_.write(address(), record_, Memory::page_size);
-    }
-
-    coretx::storage::Record record_{};
-    coretx::storage::SlotInfo first_{};
-    std::uint32_t first_checksum_{};
-    Transfer transfer_{};
-    std::size_t slot_{};
-    std::size_t active_{};
-    std::uint32_t generation_{};
-    std::uint32_t pending_generation_{};
-    Stage stage_{Stage::wait_probe};
-    CalibrationStorageState state_{};
-    coretx::storage::Error record_error_{};
-    I2cError error_{};
-    bool has_active_{};
-    bool reload_{};
-    bool legacy_loaded_{};
+    bool applied_{};
 };
 
 } // namespace coretx::firmware

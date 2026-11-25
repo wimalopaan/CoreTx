@@ -319,7 +319,7 @@ constexpr bool logical_validation_and_latches() {
     model.logical_switches[1].a = switch_count;
     if (validate(model).code != ErrorCode::logical_cycle)
         return false;
-    model.logical_switches[0].a = switch_count + logical_switch_count;
+    model.logical_switches[0].a = condition_count;
     if (validate(model).code != ErrorCode::logical_settings)
         return false;
     model.logical_switches = {};
@@ -342,6 +342,63 @@ constexpr bool logical_validation_and_latches() {
 
 static_assert(logical_predicates());
 static_assert(logical_validation_and_latches());
+
+constexpr bool multiswitch_switches() {
+    using namespace coretx;
+    constexpr auto m22 = static_cast<std::uint8_t>(multiswitch_switch_base + 9);
+    auto model = direct_model();
+    model.mixes[0].source = {SourceKind::switch_position, m22, false};
+    Controls controls{};
+    if (!validate(model) || (evaluate(model, controls).frame.channels[0] != 0))
+        return false; // Unavailable M switches are neutral.
+    controls.multiswitch_available = 0xFF00;
+    if (evaluate(model, controls).frame.channels[0] != -resolution)
+        return false;
+    controls.multiswitch = 1U << 9;
+    if (evaluate(model, controls).frame.channels[0] != resolution)
+        return false;
+    model.mixes[0].source = {SourceKind::maximum, 0, false};
+    model.mixes[0].condition = {true, m22, SwitchPosition::down, false};
+    if (evaluate(model, controls).frame.channels[0] != resolution)
+        return false;
+    model.mixes[0].condition.position = SwitchPosition::middle;
+    if (validate(model).code != ErrorCode::condition)
+        return false;
+    model.mixes[0].condition = {true, m22, SwitchPosition::up, false};
+    if (evaluate(model, controls).frame.channels[0] != 0)
+        return false;
+    controls.multiswitch_available = 0;
+    if (evaluate(model, controls).frame.channels[0] != 0)
+        return false; // An unavailable M switch never matches.
+    model.mixes[0].condition = {true, switch_count, SwitchPosition::down, false};
+    auto &line = model.logical_switches[0];
+    line.function = LogicalFunction::and_;
+    line.a = m22;
+    line.b = 0;
+    line.position_a = SwitchPosition::down;
+    line.position_b = SwitchPosition::up;
+    controls.multiswitch_available = 0xFF00;
+    controls.switches[0] = SwitchPosition::up;
+    controls.active_switches = 1;
+    if (!validate(model) || (evaluate(model, controls).frame.channels[0] != resolution))
+        return false;
+    controls.multiswitch = 0;
+    if (evaluate(model, controls).frame.channels[0] != 0)
+        return false;
+    // MultiSwitch buttons must not depend on M states, even through logical switches.
+    model.multiswitch[1].address = 1;
+    if (!model.multiswitch[1].controls[2].set_condition(
+            {true, switch_count, SwitchPosition::down, false}) ||
+        (validate(model).code != ErrorCode::logical_cycle))
+        return false;
+    line.a = 1;
+    if (!validate(model) ||
+        model.multiswitch[1].controls[2].set_condition({true, m22, SwitchPosition::down, false}))
+        return false;
+    model.mixes[0].source = {SourceKind::switch_position, switch_count, false};
+    return validate(model).code != ErrorCode::none;
+}
+static_assert(multiswitch_switches());
 
 constexpr bool bitmap_input_selection() {
     coretx::Model model{};

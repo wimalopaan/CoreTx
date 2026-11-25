@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <limits>
+#include <string>
 
 namespace {
 
@@ -121,6 +122,35 @@ void framebuffer() {
     display.unsigned_number(126, 8, std::numeric_limits<std::uint32_t>::max());
     expected.text(66, 8, "4294967295");
     check(display.bytes() == expected.bytes(), "maximum unsigned watchdog counter formatting");
+}
+
+// Combined switch choices skip unavailable levels: SA two-position, SB six-position, L1 only.
+// Negated choices lie below "off".
+constexpr bool combined_condition_steps() {
+    namespace d = coretx::ui::detail;
+    constexpr d::SwitchChoices choices{0b11U, 0b10U, 0, 0, 0b1U};
+    const auto step = [&choices](const int choice, const int direction) {
+        return d::step_condition(choice, direction, choices, coretx::condition_count);
+    };
+    const auto sa_up = step(0, 1);
+    const auto sa_down = step(sa_up, 1);
+    const auto sb_1 = step(sa_down, 1);
+    const auto sb_6 = step(step(step(step(step(sb_1, 1), 1), 1), 1), 1);
+    const auto l1 = step(sb_6, 1);
+    const auto not_sa_up = step(0, -1);
+    const auto label = [](const int choice) {
+        std::array<char, 6> buffer{};
+        constexpr coretx::ui::SwitchNames names{"SA", "SB"};
+        return std::string(d::condition_label(d::select_condition(choice), buffer, names));
+    };
+    return (step(sa_up, -1) == 0) && (step(l1, 1) == l1) && (not_sa_up == -sa_up) &&
+           (step(-l1, -1) == -l1) && (label(sa_up) == "SA^") && (label(sa_down) == "SAv") &&
+           (label(sb_1) == "SB1") && (label(sb_6) == "SB6") && (label(l1) == "L1") &&
+           (label(not_sa_up) == "!SA^") && (label(-l1) == "!L1") &&
+           (d::condition_choice({true, coretx::switch_count, coretx::SwitchPosition::up, false}) ==
+            -l1) &&
+           (label(d::condition_choice(
+                {true, coretx::switch_count, coretx::SwitchPosition::up, true})) == "L1");
 }
 
 bool text_matches_pixel_rendering() {
@@ -725,16 +755,18 @@ void targets_and_conditions() {
         state.switches[0] = coretx::SwitchPosition::down;
         check(coretx::evaluate(model, state).frame.channels[0] == 0,
               "switch condition suppresses nonmatching line");
-        press(ui, model, state, Key::right);
         edit(ui, model, state, Key::right);
         state.switches[0] = coretx::SwitchPosition::middle;
         check(coretx::evaluate(model, state).frame.channels[0] == 1024,
-              "switch position editor selects middle");
-        press(ui, model, state, Key::right);
-        edit(ui, model, state, Key::right);
+              "combined switch editor selects middle");
+        edit(ui, model, state, Key::left, 3);
+        check(condition.enabled && condition.inverted && (condition.index == 0) &&
+                  (condition.position == coretx::SwitchPosition::up) &&
+                  (coretx::evaluate(model, state).frame.channels[0] == 1024),
+              "negated choice !SA^ lies below OFF");
+        state.switches[0] = coretx::SwitchPosition::up;
         check(coretx::evaluate(model, state).frame.channels[0] == 0, "condition inversion editor");
-        press(ui, model, state, Key::left, 2);
-        edit(ui, model, state, Key::left);
+        edit(ui, model, state, Key::right);
         check(!condition.enabled && (coretx::evaluate(model, state).frame.channels[0] == 1024),
               "OFF condition is unconditional");
         press(ui, model, state, Key::left);
@@ -879,13 +911,13 @@ void curves() {
     check(ui.selected_curve() == 1, "touch curve header selects next curve");
 
     ui.open(Page::inputs);
-    press(ui, model, state, Key::right, 11);
+    press(ui, model, state, Key::right, 9);
     edit(ui, model, state, Key::right, 4);
     check(model.inputs[0].curve == 4 && model.inputs[0].destination == 0 &&
               !model.inputs[0].condition.enabled,
           "input curve selector leaves target and condition untouched");
     ui.open(Page::mixes);
-    press(ui, model, state, Key::right, 10);
+    press(ui, model, state, Key::right, 8);
     edit(ui, model, state, Key::right, 4);
     check(model.mixes[0].curve == 4 && model.mixes[0].destination == 0 &&
               !model.mixes[0].condition.enabled,
@@ -1042,6 +1074,7 @@ int main() {
     standard.small_text(12, 2, "a");
     check((standard.character_width() == 6) && (standard.character_height() == 10),
           "small annotation restores the standard font");
+    check(combined_condition_steps(), "combined switch choices skip unavailable levels");
     check(text_matches_pixel_rendering(),
           "column text preserves glyphs, clipping, page crossings and erasing");
     check(compact_text_matches_pixel_rendering(),

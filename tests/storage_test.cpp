@@ -146,8 +146,9 @@ constexpr bool malformed_dense_fields() {
     };
     constexpr std::array mutations{Mutation{82, 7, 51, 1, 1, store::Error::field},
                                    Mutation{82, 7, 27, 8, 201, store::Error::field},
-                                   Mutation{82, 7, 12, 5, 31, store::Error::model},
-                                   Mutation{82, 7, 17, 4, 9, store::Error::model},
+                                   Mutation{82, 7, 12, 9, 511, store::Error::model},
+                                   // First unused condition code after M48 down.
+                                   Mutation{82, 7, 12, 9, 260, store::Error::model},
                                    Mutation{194, 6, 46, 1, 1, store::Error::field},
                                    Mutation{194, 6, 23, 2, 3, store::Error::model},
                                    Mutation{338, 5, 36, 1, 1, store::Error::field},
@@ -271,6 +272,55 @@ constexpr bool snapshot_extensions() {
 
 static_assert(snapshot_extensions());
 
+constexpr bool same(const coretx::Condition &a, const coretx::Condition &b) {
+    return (a.enabled == b.enabled) && (a.index == b.index) && (a.position == b.position) &&
+           (a.inverted == b.inverted);
+}
+
+constexpr bool multiswitch_switch_storage() {
+    namespace detail = store::detail;
+    for (std::uint8_t index = 0; index < coretx::condition_count; ++index)
+        for (int position = -1; position <= static_cast<int>(coretx::SwitchPosition::pos6);
+             ++position) {
+            const coretx::Condition condition{true, index,
+                                              static_cast<coretx::SwitchPosition>(position), true};
+            const auto code = detail::condition_code(condition);
+            coretx::Condition decoded{};
+            if (!coretx::detail::valid_condition(condition)) {
+                if (code < (1U << detail::packed_model::condition_code_bits))
+                    return false;
+                continue;
+            }
+            decoded.enabled = decoded.inverted = true;
+            detail::decode_condition(code, decoded);
+            if (!same(decoded, condition))
+                return false;
+        }
+    auto state = fixture();
+    constexpr auto m48 = static_cast<std::uint8_t>(coretx::condition_count - 1);
+    state.model.inputs[0].source = {coretx::SourceKind::switch_position, m48, true};
+    state.model.inputs[0].condition = {true, coretx::multiswitch_switch_base,
+                                       coretx::SwitchPosition::down, false};
+    state.model.mixes[0].condition = {true, m48, coretx::SwitchPosition::up, true};
+    store::Record record{}, again{};
+    store::State restored{};
+    if (!store::encode(state, 5, record) || !store::decode(record, restored) ||
+        !store::encode(restored, 5, again) || (record != again) ||
+        (restored.model.inputs[0].source.kind != coretx::SourceKind::switch_position) ||
+        (restored.model.inputs[0].source.index != m48) ||
+        !restored.model.inputs[0].source.inverted ||
+        !same(restored.model.inputs[0].condition, state.model.inputs[0].condition) ||
+        !same(restored.model.mixes[0].condition, state.model.mixes[0].condition))
+        return false;
+    // Formats before 11 cannot represent M switches.
+    std::array<std::uint8_t, store::slot_size> buffer{};
+    detail::Writer old{buffer};
+    const detail::StateView<const coretx::Model, const coretx::ControlSetup> view{state.model,
+                                                                                  state.setup};
+    return !detail::transfer(old, view, true, true, true, true, false);
+}
+static_assert(multiswitch_switch_storage());
+
 constexpr bool obsolete_formats_are_rejected() {
     const auto original = fixture();
     store::Record current{};
@@ -309,7 +359,7 @@ constexpr bool sound_options() {
             state.model, state.setup};
         record.fill(0xFF);
         store::detail::Writer payload{std::span{record}.subspan(store::header_size)};
-        if (!store::detail::transfer(payload, old, true, false, false))
+        if (!store::detail::transfer(payload, old, true, false, false, false, false))
             return false;
         store::detail::Writer header{std::span{record}.first(store::header_size)};
         header.word(store::detail::magic);
@@ -366,7 +416,8 @@ constexpr bool curve_storage() {
         store::detail::Writer payload{std::span{record}.subspan(store::header_size)};
         const store::detail::StateView<const coretx::Model, const coretx::ControlSetup> old{
             original.model, original.setup};
-        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, version >= 9, false))
+        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, version >= 9,
+                                     version >= 10, false))
             return false;
         store::detail::Writer header{std::span{record}.first(store::header_size)};
         header.word(store::detail::magic);
@@ -456,7 +507,7 @@ constexpr bool tank_storage() {
         const store::detail::StateView<const coretx::Model, const coretx::ControlSetup> old{
             original.model, original.setup};
         store::detail::Writer payload{std::span{old_record}.subspan(store::header_size)};
-        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, false))
+        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, false, false, false))
             return false;
         store::detail::Writer header{std::span{old_record}.first(store::header_size)};
         header.word(store::detail::magic);

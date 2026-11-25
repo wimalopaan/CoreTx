@@ -84,7 +84,7 @@ constexpr bool valid_source(const Source &source, const bool allow_input) noexce
     case SourceKind::input:
         return allow_input && (source.index < input_count);
     case SourceKind::switch_position:
-        return source.index < switch_count;
+        return (source.index < switch_count) || multiswitch_index(source.index);
     case SourceKind::maximum:
         return source.index == 0;
     }
@@ -92,16 +92,30 @@ constexpr bool valid_source(const Source &source, const bool allow_input) noexce
 }
 
 constexpr bool valid_condition(const Condition &condition) noexcept {
-    return (((condition.index < switch_count) && valid_switch_position(condition.position)) ||
-            ((condition.index < (switch_count + logical_switch_count)) &&
-             ((condition.position == SwitchPosition::up) ||
-              (condition.position == SwitchPosition::down))));
+    return (
+        ((condition.index < switch_count) && valid_switch_position(condition.position)) ||
+        ((condition.index < condition_count) && ((condition.position == SwitchPosition::up) ||
+                                                 (condition.position == SwitchPosition::down))));
+}
+
+constexpr bool multiswitch_active(const std::uint8_t index, const Controls &controls) noexcept {
+    return (controls.multiswitch & (1U << (index - multiswitch_switch_base))) != 0;
+}
+
+constexpr bool multiswitch_available(const std::uint8_t index, const Controls &controls) noexcept {
+    return (controls.multiswitch_available & (1U << (index - multiswitch_switch_base))) != 0;
 }
 
 constexpr bool matches(const Condition &condition, const Controls &controls,
                        const LogicalFrame &logical) noexcept {
     if (!condition.enabled) {
         return true;
+    }
+    if (multiswitch_index(condition.index)) {
+        if (!multiswitch_available(condition.index, controls))
+            return false;
+        return (multiswitch_active(condition.index, controls) ==
+                (condition.position == SwitchPosition::down)) != condition.inverted;
     }
     if (condition.index >= switch_count) {
         const auto bit = 1U << (condition.index - switch_count);
@@ -123,8 +137,11 @@ constexpr bool valid_logical_operand(const Model &model, const std::uint8_t inde
                                      const SwitchPosition position) noexcept {
     if (index < switch_count)
         return valid_switch_position(position);
-    return (index < (switch_count + logical_switch_count)) &&
-           ((position == SwitchPosition::up) || (position == SwitchPosition::down)) &&
+    if ((position != SwitchPosition::up) && (position != SwitchPosition::down))
+        return false;
+    if (multiswitch_index(index))
+        return true;
+    return logical_index(index) &&
            (model.logical_switches[index - switch_count].function != LogicalFunction::disabled);
 }
 
@@ -132,7 +149,7 @@ constexpr std::uint8_t dependencies(const LogicalSwitch &line) noexcept {
     if (!boolean_function(line.function))
         return 0;
     const auto bit = [](const std::uint8_t index) constexpr -> unsigned {
-        return index >= switch_count ? (1U << (index - switch_count)) : 0U;
+        return logical_index(index) ? (1U << (index - switch_count)) : 0U;
     };
     return static_cast<std::uint8_t>(bit(line.a) | bit(line.b));
 }
@@ -140,8 +157,10 @@ constexpr std::uint8_t dependencies(const LogicalSwitch &line) noexcept {
 constexpr Status validate_logical(const Model &model) noexcept {
     for (std::size_t i = 0; i < logical_switch_count; ++i) {
         const auto &line = model.logical_switches[i];
-        if ((line.function > LogicalFunction::srff) || (line.a >= (analog_count + switch_count)) ||
-            (line.b >= (analog_count + switch_count)) || !valid_switch_position(line.position_a) ||
+        const auto operands =
+            boolean_function(line.function) ? condition_count : analog_count + switch_count;
+        if ((line.function > LogicalFunction::srff) || (line.a >= operands) ||
+            (line.b >= operands) || !valid_switch_position(line.position_a) ||
             !valid_switch_position(line.position_b) ||
             !in_range(line.threshold, -resolution, resolution))
             return {ErrorCode::logical_settings, Stage::model, i};
@@ -162,6 +181,24 @@ constexpr Status validate_logical(const Model &model) noexcept {
     }
     if (resolved != 0xFF)
         return {ErrorCode::logical_cycle, Stage::model, 0};
+    // MultiSwitch states feed back one cycle late; button conditions must not depend on them.
+    std::uint8_t multiswitch_dependent{};
+    for (std::size_t pass = 0; pass < logical_switch_count; ++pass)
+        for (std::size_t i = 0; i < logical_switch_count; ++i) {
+            const auto &line = model.logical_switches[i];
+            if (boolean_function(line.function) &&
+                (multiswitch_index(line.a) || multiswitch_index(line.b) ||
+                 ((dependencies(line) & multiswitch_dependent) != 0)))
+                multiswitch_dependent |= static_cast<std::uint8_t>(1U << i);
+        }
+    for (std::size_t page = 0; page < model.multiswitch.size(); ++page)
+        for (std::size_t button = 0; button < multiswitch_function_count; ++button) {
+            const auto condition = model.multiswitch[page].controls[button].condition();
+            if (condition.enabled && logical_index(condition.index) &&
+                ((multiswitch_dependent & (1U << (condition.index - switch_count))) != 0))
+                return {ErrorCode::logical_cycle, Stage::model,
+                        page * multiswitch_function_count + button};
+        }
     for (const auto channel : model.dashboard_channels) {
         if (channel > channel_count)
             return {ErrorCode::dashboard_settings, Stage::model, channel};
@@ -194,8 +231,9 @@ constexpr LogicalFrame evaluate_logical(const Model &model, const Controls &cont
             bool value{};
             if (boolean_function(line.function)) {
                 const auto available = [&](const std::uint8_t index) constexpr {
-                    return index < switch_count
-                               ? ((controls.active_switches & (1U << index)) != 0)
+                    return index < switch_count ? ((controls.active_switches & (1U << index)) != 0)
+                           : multiswitch_index(index)
+                               ? multiswitch_available(index, controls)
                                : ((result.available & (1U << (index - switch_count))) != 0);
                 };
                 if (!available(line.a) || !available(line.b))
@@ -282,9 +320,14 @@ constexpr std::int32_t source_value(const Source &source, const Controls &contro
         value = frame.inputs[source.index];
         break;
     case SourceKind::switch_position:
-        value = (controls.active_switches & (1U << source.index)) != 0
-                    ? switch_value(controls.switches[source.index])
-                    : 0;
+        if (multiswitch_index(source.index))
+            value = !multiswitch_available(source.index, controls) ? 0
+                    : multiswitch_active(source.index, controls)   ? resolution
+                                                                   : -resolution;
+        else
+            value = (controls.active_switches & (1U << source.index)) != 0
+                        ? switch_value(controls.switches[source.index])
+                        : 0;
         break;
     case SourceKind::maximum:
         value = resolution;
@@ -445,7 +488,7 @@ constexpr Status validate(const Model &model) noexcept {
     }
     const auto valid_condition = [&](const Condition &condition) constexpr {
         return detail::valid_condition(condition) &&
-               (!condition.enabled || (condition.index < switch_count) ||
+               (!condition.enabled || !logical_index(condition.index) ||
                 (model.logical_switches[condition.index - switch_count].function !=
                  LogicalFunction::disabled));
     };
@@ -455,8 +498,10 @@ constexpr Status validate(const Model &model) noexcept {
         const auto &page = model.multiswitch[page_index];
         for (std::size_t i = 0; i < page.controls.size(); ++i) {
             const auto &control = page.controls[i];
+            // Button conditions cannot reference MultiSwitch states.
             if (((control.flags() & ~multiswitch_control::valid_mask) != 0) ||
-                !valid_condition(control.condition()))
+                !valid_condition(control.condition()) ||
+                (control.condition().index >= multiswitch_switch_base))
                 return {ErrorCode::multiswitch_settings, Stage::model,
                         page_index * multiswitch_function_count + i};
             if (page.address < 0)

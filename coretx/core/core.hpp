@@ -23,7 +23,18 @@ inline constexpr std::size_t channel_count = 16;
 inline constexpr std::size_t max_input_lines = 16;
 inline constexpr std::size_t max_mix_lines = 24;
 inline constexpr std::size_t logical_switch_count = 8;
+// MultiSwitch button states M11..M48 follow L1..L8 in the condition index space.
+inline constexpr std::size_t multiswitch_switch_count = 32;
+inline constexpr std::size_t multiswitch_switch_base = switch_count + logical_switch_count;
+inline constexpr std::size_t condition_count = multiswitch_switch_base + multiswitch_switch_count;
 inline constexpr std::size_t curve_count = 4;
+
+[[nodiscard]] constexpr bool logical_index(const std::size_t index) noexcept {
+    return (index >= switch_count) && (index < multiswitch_switch_base);
+}
+[[nodiscard]] constexpr bool multiswitch_index(const std::size_t index) noexcept {
+    return (index >= multiswitch_switch_base) && (index < condition_count);
+}
 
 struct Curve {
     // The outer x coordinates are fixed at -100 and +100 percent.
@@ -63,6 +74,7 @@ enum class SourceKind : std::uint8_t { analog, input, switch_position, maximum }
 
 struct Source {
     SourceKind kind{SourceKind::analog};
+    // Switch positions use condition indices: physical switches/trim rockers and M11..M48.
     std::uint8_t index{};
     bool inverted{};
 };
@@ -92,7 +104,7 @@ enum class SwitchPosition : std::int8_t {
 
 struct Condition {
     bool enabled{};
-    // Physical switches, then trim rockers, then L1..L8 (down=true, up=false).
+    // Physical switches, trim rockers, L1..L8, then M11..M48 (down=true, up=false).
     std::uint8_t index{};
     SwitchPosition position{SwitchPosition::up};
     bool inverted{};
@@ -115,7 +127,7 @@ enum class LogicalFunction : std::uint8_t {
 struct LogicalSwitch {
     LogicalFunction function{};
     // Comparisons: analogs followed by physical switches/trim rockers.
-    // Boolean functions: physical switches/trim rockers followed by logical switches.
+    // Boolean functions: condition indices (switches, trim rockers, L1..L8, M11..M48).
     std::uint8_t a{};
     std::uint8_t b{};
     SwitchPosition position_a{SwitchPosition::up};
@@ -288,6 +300,7 @@ struct MultiSwitchPage {
     constexpr bool operator==(const MultiSwitchPage &) const noexcept = default;
 };
 inline constexpr std::size_t multiswitch_page_count = 4;
+static_assert(multiswitch_page_count * multiswitch_function_count == multiswitch_switch_count);
 
 struct Model {
     // Active lines must be grouped in ascending destination order.
@@ -318,6 +331,9 @@ struct Controls {
     std::array<TrimSteps, trim_count> trims{};
     std::uint16_t active_analogs{0xFFFF};
     std::uint32_t active_switches{(1U << switch_count) - 1U};
+    // Bit 8 * page + button; unavailable MultiSwitch states never match.
+    std::uint32_t multiswitch{};
+    std::uint32_t multiswitch_available{};
 };
 
 struct Frame {

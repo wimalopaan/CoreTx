@@ -4,7 +4,8 @@
 // Historical screens remain pure renderer fixtures, never dashboard routes.
 
 #include "boards/common/radio_errors.hpp"
-#include "boards/common/radio_storage.hpp"
+#include "boards/common/radio_settings.hpp"
+#include "boards/common/settings_storage.hpp"
 #include "coretx/ui/ui.hpp"
 #include "platform/stm32f072/afhds2a.hpp"
 #include "tests/translation.hpp"
@@ -13,7 +14,7 @@ namespace coretx::firmware {
 
 struct RadioInfo {
     RadioOutput output{};
-    RadioStorageStatus storage{};
+    SettingsStatus storage{};
     afhds2a::RxId receiver{};
     std::uint32_t frames{};
     const char *message{};
@@ -22,29 +23,29 @@ struct RadioInfo {
     bool linked{};
     afhds2a::ChannelMode channel_mode{};
 };
-[[nodiscard]] constexpr const char *storage_message(const RadioStorageStatus state) noexcept {
+[[nodiscard]] constexpr const char *storage_message(const SettingsStatus state) noexcept {
     namespace tr = coretx::ui::tr;
     switch (state) {
-    case RadioStorageStatus::loading:
+    case SettingsStatus::loading:
         return tr::radio_loading;
-    case RadioStorageStatus::ready:
-    case RadioStorageStatus::saved:
+    case SettingsStatus::ready:
+    case SettingsStatus::saved:
         return tr::radio_saved;
-    case RadioStorageStatus::empty:
+    case SettingsStatus::empty:
         return tr::radio_empty;
-    case RadioStorageStatus::saving:
+    case SettingsStatus::saving:
         return tr::radio_saving;
-    case RadioStorageStatus::missing:
+    case SettingsStatus::missing:
         return tr::radio_missing;
-    case RadioStorageStatus::multiple:
+    case SettingsStatus::multiple:
         return tr::radio_multiple;
-    case RadioStorageStatus::io_error:
+    case SettingsStatus::io_error:
         return tr::i2c_error;
-    case RadioStorageStatus::invalid:
+    case SettingsStatus::invalid:
         return tr::radio_invalid;
-    case RadioStorageStatus::version:
+    case SettingsStatus::version:
         return tr::radio_version;
-    case RadioStorageStatus::verify:
+    case SettingsStatus::verify:
         return tr::radio_verify;
     }
     return tr::unknown;

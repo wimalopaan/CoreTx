@@ -54,8 +54,7 @@ main { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr)
 .switch-toggle::before { content: ""; position: absolute; left: 50%; top: 50%; width: 28px; height: 36px; transform: translate(-50%, -50%); border: 2px solid #91a2ac; border-radius: 50%; background: radial-gradient(ellipse, #0c141b 25%, #677985 30%, #bac7cd 65%, #485b68 70%); }
 .switch-toggle::after { content: ""; position: absolute; left: 50%; top: calc(50% + var(--lever-position) / 2); width: 9px; height: 24px; transform: translate(-50%, -50%); border-radius: 4px; background: linear-gradient(90deg, #596b75, #e6edf0, #7f929d); }
 .switch-lever { position: absolute; z-index: 1; left: 50%; top: calc(50% + var(--lever-position)); width: 23px; height: 23px; transform: translate(-50%, -50%); border: 2px solid #93a5ae; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #f3f7f9, #9cafb8 55%, #526977); box-shadow: 0 2px 4px #0008; }
-.rear-controls { grid-column: 1 / -1; display: flex; gap: 10px; }
-.rear-controls button { flex: 1; }
+.digital-switches { display: contents; }
 .lcd-section { margin: 20px 0; text-align: center; }
 .lcd-controls { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: center; }
 .lcd-controls.has-trims { grid-template-columns: auto minmax(0, 1fr) auto; }
@@ -63,7 +62,7 @@ main { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr)
 .lcd-frame { display: inline-flex; max-width: 100%; background: #0c141b; padding: 12px; border: 1px solid #44515b; border-radius: 9px; box-shadow: inset 0 3px 8px #0008; }
 #lcd { display: block; width: 256px; height: 128px; image-rendering: pixelated; image-rendering: crisp-edges; background: #b6c99b; }
 #lcd.touch { touch-action: none; cursor: crosshair; }
-.sticks { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px; align-items: center; }
+.sticks { display: grid; grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr) auto; gap: 12px; align-items: center; }
 .stick-control { min-width: 0; text-align: center; }
 .stick-label { font-weight: 650; font-size: .85rem; margin-bottom: 10px; }
 .stick-pad { width: min(100%, 210px); aspect-ratio: 1; position: relative; margin: auto; border: 1px solid #607c8b; border-radius: 50%; touch-action: none; background: radial-gradient(circle, #32485b 0, #182936 67%, #101e29 69%, #243847 71%); cursor: crosshair; }
@@ -71,6 +70,25 @@ main { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr)
 .stick-pad::before { width: 1px; height: 84%; top: 8%; left: 50%; }
 .stick-pad::after { height: 1px; width: 84%; left: 8%; top: 50%; }
 .stick-knob { position: absolute; width: 30px; height: 30px; border-radius: 50%; background: var(--accent); border: 4px solid #477f70; box-shadow: 0 3px 9px #0008; transform: translate(-50%, -50%); top: 50%; left: 50%; pointer-events: none; }
+.stick-edge { align-self: start; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.stick-edge:empty, .edge-buttons:empty { display: none; }
+.edge-buttons { display: flex; flex-direction: column; gap: 10px; }
+.push-control { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: .75rem; color: var(--muted); }
+.push-button { width: 40px; height: 40px; min-height: 0; padding: 0; border-radius: 50%; border: 3px solid #4d6472; background: radial-gradient(circle at 40% 35%, #3a4c58, #1a2730 70%); box-shadow: 0 3px 6px #0009, inset 0 1px 2px #ffffff22; touch-action: none; }
+.push-button:hover:not(:disabled) { background: radial-gradient(circle at 40% 35%, #44596700, #1f303b 70%), #2a3d49; }
+.push-button.held, .push-button:active:not(:disabled) { border-color: var(--accent); background: radial-gradient(circle at 50% 55%, #2b3a44, #121c23 70%); box-shadow: inset 0 3px 6px #000c; transform: translateY(1px); }
+.stick-center { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.pots { display: flex; gap: 14px; }
+.pots:empty { display: none; }
+.pot-control { display: flex; flex-direction: column; align-items: center; gap: 5px; font-size: .75rem; color: var(--muted); }
+.pot-knob, .pot-slider { position: relative; touch-action: none; cursor: ns-resize; outline-offset: 3px; }
+.pot-knob { width: 46px; height: 46px; border-radius: 50%; border: 2px solid #93a5ae; background: radial-gradient(circle at 35% 30%, #f3f7f9, #b6c4cb 45%, #6d808b 80%, #3e505b); box-shadow: 0 3px 7px #0009, inset 0 -2px 4px #0005; }
+.pot-marker { position: absolute; inset: 4px; pointer-events: none; }
+.pot-marker::before { content: ""; position: absolute; left: 50%; top: 0; width: 3px; height: 13px; transform: translateX(-50%); border-radius: 2px; background: #1b2731; }
+.pot-slider { width: 26px; height: 120px; border-radius: 13px; border: 1px solid #607c8b; background: linear-gradient(90deg, #101e29, #243847 50%, #101e29); }
+.pot-slider::before { content: ""; position: absolute; left: 4px; right: 4px; top: 50%; height: 1px; background: #849aab66; }
+.pot-thumb { position: absolute; left: 50%; top: 50%; width: 34px; height: 16px; transform: translate(-50%, -50%); border-radius: 4px; border: 2px solid #93a5ae; background: linear-gradient(#f3f7f9, #9cafb8 55%, #526977); box-shadow: 0 2px 4px #0008; pointer-events: none; }
+.pot-knob.held, .pot-slider.held .pot-thumb { border-color: var(--accent); }
 .spring-options { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: .75rem; color: var(--muted); }
 .spring-options label { min-height: 32px; display: flex; align-items: center; gap: 4px; cursor: pointer; }
 input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; }
@@ -110,4 +128,4 @@ footer a { color: var(--accent); }
 @media (min-width: 1150px) { #lcd { width: 384px; height: 192px; } }
 @media (max-width: 840px) { main { grid-template-columns: 1fr; } body.expert-mode .channels-panel { grid-row: 3; } .page-header { align-items: flex-start; } .channels { grid-template-columns: 1fr 1fr; gap: 12px 24px; } .channel-scale { display: none; } }
 @media (max-width: 500px) { body { padding: 20px 12px; } .page-header { flex-direction: column; gap: 16px; } .panel { padding: 16px; } .sticks { gap: 14px; } .switches { gap: 6px; } .channels { grid-template-columns: 1fr; } .axis-control { grid-template-columns: 95px minmax(40px, 1fr) 70px; gap: 8px; } .badge { font-size: .65rem; } .navigation { grid-template-columns: repeat(4, 1fr); } .lcd-frame { padding: 8px; } }
-@media (max-width: 500px) { .trim-pair { grid-template-columns: 44px; } .profile-settings { width: 100%; } }
+@media (max-width: 500px) { .trim-pair { grid-template-columns: 44px; } .profile-settings { width: 100%; } .pot-slider { width: 20px; height: 96px; } .pot-thumb { width: 26px; } .pot-knob { width: 38px; height: 38px; } }

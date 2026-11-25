@@ -7,8 +7,11 @@
 extern "C" {
 void sim_init();
 int sim_step(int elapsed_ms);
+int sim_analog_count();
 void sim_set_analog(int index, int raw);
 void sim_set_switch(int index, int position);
+// Two bits per digital extension input: 0 off, 1 two-position, 2 three-position.
+int sim_digital_inputs();
 void sim_key(int key, int down);
 void sim_trim(int button, int down);
 // down < 0 cancels a stroke without recognizing a tap or swipe.

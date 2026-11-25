@@ -52,6 +52,15 @@ using Frame = std::array<std::uint8_t, set4::frame_size>;
     return result;
 }
 
+// Bit 8 * page + button for every enabled page, matching Controls::multiswitch.
+[[nodiscard]] constexpr std::uint32_t available(const Model &model) noexcept {
+    std::uint32_t result{};
+    for (std::size_t i = 0; i < model.multiswitch.size(); ++i)
+        if (enabled(model.multiswitch[i]))
+            result |= std::uint32_t{0xFF} << (i * switch_count);
+    return result;
+}
+
 [[nodiscard]] constexpr std::optional<std::size_t> slot(const Model &model,
                                                         std::size_t ordinal) noexcept {
     for (std::size_t i = 0; i < model.multiswitch.size(); ++i)
@@ -197,6 +206,15 @@ class Pages {
     }
     [[nodiscard]] constexpr std::uint8_t switches(const std::size_t index) const noexcept {
         return states_[index];
+    }
+    [[nodiscard]] constexpr std::uint32_t states() const noexcept {
+        std::uint32_t result{};
+        for (std::size_t i = 0; i < states_.size(); ++i)
+            result |= std::uint32_t{states_[i]} << (i * switch_count);
+        return result;
+    }
+    [[nodiscard]] constexpr std::uint32_t available() const noexcept {
+        return model_ != nullptr ? multiswitch::available(*model_) : 0;
     }
 
   private:

@@ -342,7 +342,7 @@ constexpr bool afhds_format_rendering() {
                 info.output = output;
                 info.ready = true;
                 info.receiver = {0xCAFEBABE};
-                info.storage = fw::RadioStorageStatus::io_error;
+                info.storage = fw::SettingsStatus::io_error;
                 fw::render_afhds2a(info, display, 12);
                 expected.text(0, 0, "AFHDS 2A");
                 expected.text(56, 0,

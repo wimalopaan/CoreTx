@@ -16,7 +16,6 @@ using Buttons =
     std::conditional_t<Board::Hardware::power_latch, fw::i6s::SetupControls<Io, Board::Hardware>,
                        fw::i6x::detail::KeysState<Io, Board::Hardware>>;
 constinit Converter converter{};
-constinit fw::RadioStorage<Board::Memory> identity{};
 constinit coretx::ui::Framebuffer display{};
 constinit Buttons buttons{};
 constinit fw::i6s::PowerButton power{};
@@ -134,7 +133,6 @@ extern "C" [[noreturn]] int main() noexcept {
         halt();
     initialize_buttons(buttons);
     Board::Probe::initialize();
-    identity.initialize(Board::transmitter_id());
     if (Board::Watchdog::start_runtime(Board::now_us()) != fw::WatchdogError::none)
         halt();
     bool selected{}, ready{}, cancelled{}, preview_visible{}, confirmation_armed{};
@@ -154,16 +152,8 @@ extern "C" [[noreturn]] int main() noexcept {
                 error = "Need exactly 1 EEPROM";
         }
         if (selected && !ready && !error) {
-            identity.service(now, Board::Probe::result());
-            if (identity.loaded()) {
-                if ((identity.status() != fw::RadioStorageStatus::ready) &&
-                    (identity.status() != fw::RadioStorageStatus::empty))
-                    error = "Radio identity invalid";
-                else {
-                    converter.initialize(identity.settings().transmitter);
-                    ready = true;
-                }
-            }
+            converter.initialize(Board::transmitter_id());
+            ready = true;
         }
         if (ready && !cancelled) {
             converter.service(now);

@@ -47,11 +47,16 @@ const AXES = [
   ["RV", "Rechter Knueppel vertikal"],
   ["LV", "Linker Knueppel vertikal"],
   ["LH", "Linker Knueppel horizontal"],
-  ["VRA", "Drehgeber / Seitengeber A"],
-  ["VRB", "Drehgeber / Seitengeber B"],
-  ["EXT 1", "Optional, ab Werk deaktiviert"],
-  ["EXT 2", "Optional, ab Werk deaktiviert"],
+  ["VRA", "i6X: Drehpoti, i6S: Seitenslider A"],
+  ["VRB", "i6X: Drehpoti, i6S: Seitenslider B"],
+  ...["VRC", "VRD", "VRE", "VRF", "VRG"].map(name =>
+    [name, "Zusaetzlicher Eingang, im Sendermenue aktivierbar"]),
 ];
+// Sticks and VRA/VRB are operated on the transmitter; the panel lists the additional inputs.
+const STICK_AXES = 4;
+const PANEL_AXES = 6;
+const DIGITAL_INPUTS = 5;
+const DIGITAL_NAMES = { i6x: ["SE", "SF"], i6s: ["SG", "SH", "SN", "SO", "SP"] };
 const STATUS = { loaded: 1, editable: 2, valid: 4, busy: 8, recovery: 16, off: 32, fatal: 64 };
 const STORAGE_PREFIX = "coretx.simulator.eeprom.v1.";
 const SETTINGS_PREFIX = "coretx.simulator.controls.v1.";
@@ -64,19 +69,24 @@ function startBrowser() {
     "profile", "expert-mode", "analog-panel", "storage-panel",
     "native-controls", "analog-controls", "switches", "sticks", "stick-centering",
     "trims-left", "trims-right", "axes", "lcd", "lcd-frame", "lcd-controls", "lcd-hint",
-    "navigation", "control-hint",
+    "navigation", "control-hint", "pots",
     "channels", "output-state", "run-status", "storage-status", "rf-status", "notice",
     "storage-warning", "fatal", "download", "import-file", "commit-import", "restore",
     "reset", "save-detail",
   ].map(id => [id, $(id)]));
   const context = elements.lcd.getContext("2d", { alpha: false });
   const image = context?.createImageData(128, 64);
-  const analogs = new Uint16Array(8).fill(2048);
+  const analogs = new Uint16Array(AXES.length).fill(2048);
   const switches = new Uint8Array(16);
   const springs = [true, true, true, true];
   const springInputs = [];
   const axisViews = [];
   const stickViews = [];
+  const potViews = [];
+  let digitalSwitches = null;
+  let digitalModes = -1;
+  let digitalPushes = [];
+  let edges = [];
   const channelViews = [];
   const holds = new Map();
   const keyboardHolds = new Map();
@@ -86,6 +96,7 @@ function startBrowser() {
   let module = null;
   let initialized = false;
   let profile = "i6x";
+  let analogCount = AXES.length;
   let changing = false;
   let staged = false;
   let protectedStorage = false;
@@ -250,8 +261,9 @@ function startBrowser() {
     savedRevision = observedRevision = module._sim_revision();
     changedAt = performance.now();
     saveRetryAt = 0;
-    for (let i = 0; i < analogs.length; i++) module._sim_set_analog(i, analogs[i]);
+    for (let i = 0; i < analogCount; i++) module._sim_set_analog(i, analogs[i]);
     for (let i = 0; i < switches.length; i++) module._sim_set_switch(i, switches[i]);
+    digitalModes = -1;
     module._sim_step(1);
     flags = module._sim_status();
     if (asStaged) detail("Teststand: Bisheriger Browser-Stand bleibt unveraendert. Erst nach Pruefung bewusst uebernehmen.");
@@ -273,7 +285,7 @@ function startBrowser() {
     try {
       const { default: createCoreTX } = await import(`./coretx-${nextProfile}.js`);
       const nextModule = await createCoreTX();
-      for (const name of ["_sim_init", "_sim_step", "_sim_set_analog", "_sim_set_switch",
+      for (const name of ["_sim_init", "_sim_step", "_sim_analog_count", "_sim_set_analog", "_sim_set_switch", "_sim_digital_inputs",
         "_sim_key", "_sim_trim", "_sim_touch", "_sim_eeprom", "_sim_revision", "_sim_busy",
         "_sim_status", "_sim_lcd", "_sim_channels", "_sim_error", "_sim_output", "UTF8ToString"]) {
         if (typeof nextModule[name] !== "function") throw new Error(`WASM-Export fehlt: ${name}`);
@@ -281,6 +293,7 @@ function startBrowser() {
       const stored = readStored(nextProfile);
       module = nextModule;
       profile = nextProfile;
+      analogCount = Math.min(module._sim_analog_count(), AXES.length);
       initialized = false;
       failed = false;
       protectedStorage = Boolean(stored.protect || stored.error);
@@ -342,10 +355,14 @@ function startBrowser() {
   function setAnalog(index, value) {
     if (!Number.isFinite(value)) return;
     analogs[index] = clamp(Math.round(value), 0, 4095);
-    axisViews[index].range.value = analogs[index];
-    axisViews[index].number.value = analogs[index];
+    const view = axisViews[index];
+    if (view) {
+      view.range.value = analogs[index];
+      view.number.value = analogs[index];
+    }
     updateStickPositions();
-    nativeCall(() => module._sim_set_analog(index, analogs[index]));
+    potViews[index]?.update(analogs[index]);
+    if (index < analogCount) nativeCall(() => module._sim_set_analog(index, analogs[index]));
   }
 
   function updateStickPositions() {
@@ -427,10 +444,15 @@ function startBrowser() {
         window.setTimeout(() => setHold(id, source, false, setter), 90);
       }
     });
+    return release;
   }
 
   function buildAxes() {
     AXES.forEach(([name, description], index) => {
+      if (index < PANEL_AXES) {
+        axisViews.push(null);
+        return;
+      }
       const row = document.createElement("div");
       row.className = "axis-control";
       const label = document.createElement("label");
@@ -462,7 +484,7 @@ function startBrowser() {
       number.addEventListener("blur", () => { number.value = analogs[index]; });
       row.append(label, range, number);
       elements.axes.append(row);
-      axisViews.push({ range, number });
+      axisViews.push({ row, range, number });
     });
   }
 
@@ -480,7 +502,7 @@ function startBrowser() {
       pad.className = "stick-pad";
       pad.setAttribute("role", "group");
       pad.setAttribute("aria-labelledby", label.id);
-      pad.setAttribute("aria-description", "Ziehen mit Maus oder Touch. Tastatur und genaue Werte unter Analoge Eingaenge im Expertenmodus.");
+      pad.setAttribute("aria-description", "Ziehen mit Maus oder Touch.");
       const knob = document.createElement("span");
       knob.className = "stick-knob";
       pad.append(knob);
@@ -529,9 +551,213 @@ function startBrowser() {
       }
       wrapper.append(label, pad);
       if (right) elements.sticks.append(wrapper);
-      else elements.sticks.insertBefore(wrapper, elements["stick-centering"]);
+      else elements.sticks.insertBefore(wrapper, elements["stick-centering"].parentElement);
       stickViews.push({ x, y, knob, right });
     }
+  }
+
+  function buildSwitch(name, id, threeWay, initial, change) {
+    const label = document.createElement("div");
+    label.className = "switch-control";
+    const caption = document.createElement("span");
+    caption.textContent = `${name} / ${threeWay ? 3 : 2}-fach`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "switch-toggle";
+    button.dataset.position = String(initial);
+    button.setAttribute("aria-label", `Schalter ${name}`);
+    const lever = document.createElement("span");
+    lever.className = "switch-lever";
+    lever.setAttribute("aria-hidden", "true");
+    button.append(lever);
+    const position = document.createElement("span");
+    position.className = "switch-position";
+    position.id = `switch-position-${id}`;
+    position.textContent = ["Oben", "Mitte", "Unten"][initial];
+    position.setAttribute("aria-live", "polite");
+    button.setAttribute("aria-describedby", position.id);
+    button.title = `${threeWay ? 3 : 2} Stellungen; mit Klick, Enter oder Leertaste umschalten.`;
+    const positions = threeWay ? [0, 1, 2] : [0, 2];
+    let current = initial;
+    button.addEventListener("click", () => {
+      current = positions[(positions.indexOf(current) + 1) % positions.length];
+      button.dataset.position = String(current);
+      position.textContent = ["Oben", "Mitte", "Unten"][current];
+      change(current);
+    });
+    label.append(caption, button, position);
+    return label;
+  }
+
+  // Digital extension inputs appear as soon as they are enabled in the sender input setup.
+  // Two-position: contact closed = down. Three-position: contact i = up, contact i+1 = down.
+  function updateDigitalSwitches() {
+    const modes = module._sim_digital_inputs();
+    if (modes === digitalModes || !digitalSwitches) return;
+    digitalModes = modes;
+    digitalSwitches.replaceChildren();
+    for (const { id, release } of digitalPushes) {
+      release();
+      pointerReleases.delete(release);
+      dynamicReleases.delete(release);
+      holds.delete(id);
+    }
+    digitalPushes = [];
+    if (profile === "i6x") edges.forEach(({ buttons }) => buttons.replaceChildren());
+    for (let i = 0; i < DIGITAL_INPUTS; i++) module._sim_set_switch(4 + i, 0);
+    DIGITAL_NAMES[profile].forEach((name, i) => {
+      const mode = (modes >> (2 * i)) & 3;
+      if (!mode) return;
+      const threeWay = mode === 2;
+      if (profile === "i6x") {
+        // i6X: SE at the left, SF at the right edge. Three-position: upper and lower contact.
+        const contacts = threeWay ? [[i, "oben"], [i + 1, "unten"]] : [[i, ""]];
+        for (const [bit, text] of contacts) {
+          const id = `d${bit}`;
+          const push = buildPushButton(name, id, text, down => module._sim_set_switch(4 + bit, down ? 2 : 0));
+          digitalPushes.push({ id, release: push.release });
+          edges[Math.min(i, 1)].buttons.append(push.wrapper);
+        }
+        return;
+      }
+      const apply = position => nativeCall(() => {
+        if (threeWay) {
+          module._sim_set_switch(4 + i, position === 0 ? 2 : 0);
+          module._sim_set_switch(5 + i, position === 2 ? 2 : 0);
+        } else module._sim_set_switch(4 + i, position);
+      });
+      digitalSwitches.append(buildSwitch(name, 4 + i, threeWay, threeWay ? 1 : 0, apply));
+    });
+  }
+
+  // i6X: VRA/VRB are free-running rotary pots between the sticks; i6S: self-centering
+  // side sliders next to the sticks.
+  function buildPot(index, slider) {
+    const [name] = AXES[index];
+    const wrapper = document.createElement("div");
+    wrapper.className = slider ? "pot-control slider" : "pot-control knob";
+    const control = document.createElement("div");
+    control.className = slider ? "pot-slider" : "pot-knob";
+    control.tabIndex = 0;
+    control.setAttribute("role", "slider");
+    control.setAttribute("aria-label", slider ? `${name} Slider, selbstneutralisierend` : `${name} Drehpoti`);
+    control.setAttribute("aria-orientation", "vertical");
+    control.setAttribute("aria-valuemin", "0");
+    control.setAttribute("aria-valuemax", "4095");
+    control.title = slider ? `${name}: ziehen, federt auf Mitte zurueck`
+      : `${name}: senkrecht ziehen, Mausrad oder Pfeiltasten; Doppelklick stellt Mitte ein`;
+    const thumb = document.createElement("span");
+    thumb.className = slider ? "pot-thumb" : "pot-marker";
+    control.append(thumb);
+    const caption = document.createElement("span");
+    caption.className = "pot-label";
+    caption.textContent = name;
+    wrapper.append(control, caption);
+    const active = () => initialized && !changing && !failed;
+    let pointer = null;
+    let startY = 0;
+    let startValue = 2048;
+    const fromPointer = event => {
+      if (slider) {
+        const rect = control.getBoundingClientRect();
+        return (1 - clamp((event.clientY - rect.top) / rect.height, 0, 1)) * 4095;
+      }
+      return startValue + (startY - event.clientY) * 20;
+    };
+    const release = () => {
+      if (pointer === null) return;
+      pointer = null;
+      control.classList.remove("held");
+      if (slider) setAnalog(index, 2048);
+    };
+    pointerReleases.add(release);
+    dynamicReleases.add(release);
+    control.addEventListener("pointerdown", event => {
+      if (event.button !== 0 || pointer !== null || !active()) return;
+      event.preventDefault();
+      control.focus({ preventScroll: true });
+      pointer = event.pointerId;
+      startY = event.clientY;
+      startValue = analogs[index];
+      control.setPointerCapture(pointer);
+      control.classList.add("held");
+      if (slider) setAnalog(index, fromPointer(event));
+    });
+    control.addEventListener("pointermove", event => {
+      if (pointer === event.pointerId) setAnalog(index, fromPointer(event));
+    });
+    for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+      control.addEventListener(type, event => { if (pointer === event.pointerId) release(); });
+    }
+    control.addEventListener("keydown", event => {
+      const step = event.shiftKey ? 512 : 64;
+      const value = { ArrowUp: analogs[index] + step, ArrowRight: analogs[index] + step,
+        ArrowDown: analogs[index] - step, ArrowLeft: analogs[index] - step,
+        PageUp: analogs[index] + 512, PageDown: analogs[index] - 512,
+        Home: 0, End: 4095 }[event.key];
+      if (value === undefined || !active()) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setAnalog(index, value);
+    });
+    if (slider) {
+      control.addEventListener("keyup", () => { if (pointer === null) setAnalog(index, 2048); });
+      control.addEventListener("blur", () => { if (pointer === null) setAnalog(index, 2048); });
+    } else {
+      control.addEventListener("wheel", event => {
+        if (!active() || event.deltaY === 0) return;
+        event.preventDefault();
+        setAnalog(index, analogs[index] + (event.deltaY < 0 ? 64 : -64));
+      }, { passive: false });
+      control.addEventListener("dblclick", () => { if (active()) setAnalog(index, 2048); });
+    }
+    potViews[index] = {
+      update(value) {
+        control.setAttribute("aria-valuenow", String(value));
+        if (slider) thumb.style.top = `${(1 - value / 4095) * 100}%`;
+        else thumb.style.transform = `rotate(${(value / 4095 - 0.5) * 270}deg)`;
+      },
+    };
+    potViews[index].update(analogs[index]);
+    return wrapper;
+  }
+
+  function buildPots() {
+    document.querySelectorAll(".pot-control, .stick-edge").forEach(element => element.remove());
+    potViews.length = 0;
+    const slider = profile === "i6s";
+    // Outer columns of the stick row: SE/SF push buttons and the i6S side sliders.
+    edges = ["left", "right"].map(side => {
+      const edge = document.createElement("div");
+      edge.className = `stick-edge ${side}`;
+      const buttons = document.createElement("div");
+      buttons.className = "edge-buttons";
+      edge.append(buttons);
+      return { edge, buttons };
+    });
+    elements.sticks.prepend(edges[0].edge);
+    elements.sticks.append(edges[1].edge);
+    const [vra, vrb] = [buildPot(4, slider), buildPot(5, slider)];
+    if (slider) {
+      edges[0].edge.append(vra);
+      edges[1].edge.append(vrb);
+    } else
+      elements.pots.append(vra, vrb);
+  }
+
+  function buildPushButton(name, id, text, setter) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "push-control";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "push-button";
+    button.setAttribute("aria-label", `Taster ${name}${text ? ` ${text}` : ""}, halten zum Druecken`);
+    button.title = `${name}${text ? ` ${text}` : ""}: Taster, gedrueckt halten`;
+    const caption = document.createElement("span");
+    caption.className = "push-label";
+    caption.textContent = text ? `${name} ${text}` : name;
+    wrapper.append(caption, button);
+    return { wrapper, release: bindHold(button, id, setter, true) };
   }
 
   function buildPhysicalControls() {
@@ -541,6 +767,8 @@ function startBrowser() {
     }
     dynamicReleases.clear();
     elements.switches.replaceChildren();
+    buildPots();
+    axisViews.forEach((view, index) => { if (view) view.row.hidden = index >= analogCount; });
     elements["trims-left"].replaceChildren();
     elements["trims-right"].replaceChildren();
     elements["trims-left"].hidden = profile === "i6s";
@@ -591,51 +819,23 @@ function startBrowser() {
       elements.navigation.append(button);
     }
     ["SA", "SB", "SC", "SD"].forEach((name, index) => {
-      const label = document.createElement("div");
-      label.className = "switch-control";
       const threeWay = index === 2 || (index === 1 && profile === "i6s");
-      const caption = document.createElement("span");
-      caption.textContent = `${name} / ${threeWay ? 3 : 2}-fach`;
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "switch-toggle";
-      button.dataset.position = "0";
-      button.setAttribute("aria-label", `Schalter ${name}`);
-      const lever = document.createElement("span");
-      lever.className = "switch-lever";
-      lever.setAttribute("aria-hidden", "true");
-      button.append(lever);
-      const position = document.createElement("span");
-      position.className = "switch-position";
-      position.id = `switch-position-${index}`;
-      position.textContent = "Oben";
-      position.setAttribute("aria-live", "polite");
-      button.setAttribute("aria-describedby", position.id);
-      button.title = `${threeWay ? 3 : 2} Stellungen; mit Klick, Enter oder Leertaste umschalten.`;
-      const positions = threeWay ? [0, 1, 2] : [0, 2];
-      button.addEventListener("click", () => {
-        switches[index] = positions[(positions.indexOf(switches[index]) + 1) % positions.length];
-        button.dataset.position = String(switches[index]);
-        position.textContent = ["Oben", "Mitte", "Unten"][switches[index]];
-        nativeCall(() => module._sim_set_switch(index, switches[index]));
-      });
-      label.append(caption, button, position);
-      elements.switches.append(label);
+      elements.switches.append(buildSwitch(name, index, threeWay, 0, position => {
+        switches[index] = position;
+        nativeCall(() => module._sim_set_switch(index, position));
+      }));
     });
+    digitalSwitches = document.createElement("div");
+    digitalSwitches.className = "digital-switches";
+    elements.switches.append(digitalSwitches);
+    digitalModes = -1;
     if (profile === "i6s") {
-      const rear = document.createElement("div");
-      rear.className = "rear-controls";
-      [["SE", 14], ["SF", 15]].forEach(([name, index]) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = `${name} / Ruecktaster halten`;
-        bindHold(button, `s${index}`, down => {
+      [["SE", 14], ["SF", 15]].forEach(([name, index], side) => {
+        edges[side].buttons.append(buildPushButton(name, `s${index}`, "", down => {
           switches[index] = down ? 2 : 0;
           module._sim_set_switch(index, switches[index]);
-        }, true);
-        rear.append(button);
+        }).wrapper);
       });
-      elements.switches.append(rear);
     } else {
       AXES.slice(0, 4).forEach(([name], axis) => {
         const pair = document.createElement("div");
@@ -655,7 +855,7 @@ function startBrowser() {
         elements[axis < 2 ? "trims-right" : "trims-left"].append(pair);
       });
     }
-    for (let i = 0; i < 8; i++) setAnalog(i, analogs[i]);
+    for (let i = 0; i < analogs.length; i++) setAnalog(i, analogs[i]);
     updateStickPositions();
     resizeLCD();
   }
@@ -721,6 +921,7 @@ function startBrowser() {
       context.putImageData(image, 0, 0);
     }
     renderChannels();
+    updateDigitalSwitches();
     let state;
     if (flags & STATUS.fatal) state = "Fataler Firmware-Fehler";
     else if (flags & STATUS.off) state = "Sender ausgeschaltet";
@@ -802,8 +1003,8 @@ function startBrowser() {
     holds.clear();
     keyboardHolds.clear();
     document.querySelectorAll("button.held").forEach(button => button.classList.remove("held"));
-    if (axisViews.length === 8) {
-      for (let i = 0; i < 4; i++) if (springs[i]) setAnalog(i, 2048);
+    if (axisViews.length === AXES.length) {
+      for (let i = 0; i < STICK_AXES; i++) if (springs[i]) setAnalog(i, 2048);
     }
   }
 

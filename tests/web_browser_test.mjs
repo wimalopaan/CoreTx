@@ -207,7 +207,8 @@ try {
   await page.locator("#profile").selectOption("i6s");
   await page.waitForFunction(() => document.querySelector("#profile").value === "i6s" &&
     document.querySelector("#output-state").textContent.startsWith("Gueltige"));
-  assert.equal(await page.locator(".rear-controls button").count(), 2);
+  assert.equal(await page.locator(".stick-edge .push-button").count(), 2);
+  assert.deepEqual(await page.locator(".stick-edge .push-label").allTextContents(), ["SE", "SF"]);
   await checkSwitch("SB", ["Mitte", "Unten", "Oben"]);
   assert.equal(await page.locator("#trims-left").isVisible(), false);
   assert.equal(await page.locator("#trims-right").isVisible(), false);

@@ -91,7 +91,7 @@ bool legacy_curve_record(const md::Data &data, const std::uint8_t version, md::R
     std::fill(record.begin() + 34, record.end(), 0xFF);
     codec::Writer out{std::span{record}.first(md::record_size - 4), 34};
     if (!codec::transfer_model_counts(out, data.model) ||
-        !codec::transfer_model_lines(out, data.model, false) ||
+        !codec::transfer_model_lines(out, data.model, false, version >= 11) ||
         !codec::transfer_model_extension(out, data.model) ||
         !codec::transfer_multiswitch(out, data.model, version >= 8) ||
         !codec::transfer_dashboard_options(out, data.model, true) ||
@@ -697,10 +697,16 @@ bool multiswitch_menu_persistence() {
     press(Key::ok);
     if (!settle(store) || (control.condition().index != coretx::switch_count))
         return false;
+    const auto negated_logical = [&control] {
+        return (control.condition().index == coretx::switch_count) &&
+               (control.condition().position == coretx::SwitchPosition::down) &&
+               control.condition().inverted;
+    };
     press(Key::ok);
-    press(Key::down); // Logical false; reopening Switch must retain that active level.
+    for (unsigned i = 0; i < (2 * coretx::switch_count * fw::menu_detail::condition_positions); ++i)
+        press(Key::down); // "!L1" is the last negated choice; reopening Switch must retain it.
     press(Key::ok);
-    if (!settle(store) || (control.condition().position != coretx::SwitchPosition::up))
+    if (!settle(store) || !negated_logical())
         return false;
     {
         auto overview = menu;
@@ -720,7 +726,7 @@ bool multiswitch_menu_persistence() {
     }
     press(Key::ok);
     press(Key::ok);
-    if (!settle(store) || (control.condition().position != coretx::SwitchPosition::up))
+    if (!settle(store) || !negated_logical())
         return false;
     press(Key::cancel);
     press(Key::cancel);
@@ -754,14 +760,14 @@ constexpr bool multiswitch_condition_choices() {
     setup.modes[2] = coretx::InputMode::three_position;
     if (!diagnostics.set_input_setup(setup))
         return false;
-    int choice = -1;
+    int choice = 0;
     const auto step = [&](const int direction) constexpr {
         choice = fw::menu_detail::change_condition(choice, direction, diagnostics);
-        return fw::menu_detail::select_condition(choice, false);
+        return fw::menu_detail::select_condition(choice);
     };
     for (int position = 2; position <= 7; ++position) {
         const auto condition = step(1);
-        if (!condition.enabled || (condition.index != 0) ||
+        if (!condition.enabled || condition.inverted || (condition.index != 0) ||
             (static_cast<int>(condition.position) != position))
             return false;
     }
@@ -770,26 +776,35 @@ constexpr bool multiswitch_condition_choices() {
         if ((condition.index != 2) || (static_cast<int>(condition.position) != position))
             return false;
     }
-    const auto logical_false = step(1);
-    const auto logical_true = step(1);
-    if ((logical_false.index != coretx::switch_count) ||
-        (logical_false.position != coretx::SwitchPosition::up) ||
-        (logical_true.index != coretx::switch_count) ||
-        (logical_true.position != coretx::SwitchPosition::down) ||
-        !fw::menu_detail::select_condition(choice, true).inverted)
+    // Logical switches only offer "L1"; the negation lies below "off".
+    const auto logical = step(1);
+    if ((logical.index != coretx::switch_count) ||
+        (logical.position != coretx::SwitchPosition::down) || logical.inverted)
         return false;
     const auto last = choice;
     (void)step(1);
     if (choice != last)
         return false;
-    for (unsigned i = 0; i < 11; ++i)
+    for (unsigned i = 0; i < 10; ++i)
         (void)step(-1);
-    if (choice != -1)
+    if (choice != 0)
+        return false;
+    const auto negated = step(-1);
+    if (!negated.inverted || (negated.index != 0) ||
+        (negated.position != coretx::SwitchPosition::pos1))
+        return false;
+    for (unsigned i = 0; i < 9; ++i)
+        (void)step(-1);
+    const auto negated_logical = fw::menu_detail::select_condition(choice);
+    if ((negated_logical.index != coretx::switch_count) || !negated_logical.inverted ||
+        (negated_logical.position != coretx::SwitchPosition::down) ||
+        (fw::menu_detail::change_condition(choice, -1, diagnostics) != choice))
         return false;
     setup.modes.fill(coretx::InputMode::off);
     model.logical_switches[0].function = coretx::LogicalFunction::disabled;
     return diagnostics.set_input_setup(setup) &&
-           (fw::menu_detail::change_condition(-1, 1, diagnostics) == -1);
+           (fw::menu_detail::change_condition(0, 1, diagnostics) == 0) &&
+           (fw::menu_detail::change_condition(0, -1, diagnostics) == 0);
 }
 
 bool dashboard_feature_gates() {
@@ -888,20 +903,13 @@ bool dashboard_and_logical_menu_persistence() {
         press(Key::up); // SRFF.
     press(Key::ok);
     press(Key::down);
-    press(Key::down);
     press(Key::ok);
-    press(Key::up);
-    press(Key::up); // A down.
-    press(Key::ok);
-    press(Key::down);
-    press(Key::down);
-    press(Key::ok);
-    press(Key::up); // B = SB.
+    press(Key::up); // A = SAv.
     press(Key::ok);
     press(Key::down);
     press(Key::ok);
-    press(Key::up);
-    press(Key::up); // B down.
+    for (int i = 0; i < 3; ++i)
+        press(Key::up); // B = SBv.
     press(Key::ok_long);
     if (!settle(store) || (menu.screen() != fw::MenuScreen::logical_switches) ||
         (store.data().model.logical_switches[0].function != coretx::LogicalFunction::srff))

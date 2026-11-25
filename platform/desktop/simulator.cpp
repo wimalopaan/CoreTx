@@ -233,6 +233,7 @@ bool queue_editor_smoke_events(SDL_Window *const window) {
     constexpr SDL_Point field{80, 8};
     constexpr SDL_Point ok{110, 56};
     constexpr SDL_Point plus{80, 56};
+    constexpr SDL_Point minus{48, 56};
     constexpr SDL_Point row2{110, 28};
     constexpr SDL_Point row3{110, 36};
     for (std::size_t i = 0; i < coretx::ui::page_count - 3; ++i)
@@ -247,9 +248,8 @@ bool queue_editor_smoke_events(SDL_Window *const window) {
             return false;
         }
     }
-    // Retarget the duplicate, then configure its switch, position and inversion.
-    if (!clicks(window, {row2, plus, ok, field, row3, plus, ok, field, row3, plus, ok, field, row3,
-                         plus, ok})) {
+    // Retarget the duplicate, then select the negated switch condition "!SA-".
+    if (!clicks(window, {row2, plus, ok, field, row3, minus, minus, ok})) {
         return false;
     }
     // Duplicate again; reject the first delete and explicitly confirm the second.

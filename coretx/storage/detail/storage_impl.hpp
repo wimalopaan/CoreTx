@@ -135,6 +135,20 @@ inline constexpr unsigned source_kind_bits = 2;
 inline constexpr unsigned source_index_bits = 5;
 inline constexpr unsigned condition_index_bits = 5;
 inline constexpr unsigned position_bits = 4;
+// Format 11 combines source kind and index as well as condition index and position, which
+// makes room for M11..M48 without enlarging the lines.
+inline constexpr unsigned source_code_bits = source_kind_bits + source_index_bits;
+inline constexpr unsigned condition_code_bits = condition_index_bits + position_bits;
+inline constexpr unsigned switch_positions = 9;
+inline constexpr unsigned binary_condition_code = switch_count * switch_positions;
+inline constexpr std::uint8_t input_code = 16;
+inline constexpr std::uint8_t maximum_code = 32;
+inline constexpr std::uint8_t switch_code = 64;
+static_assert((analog_count <= input_code) && (input_count <= (maximum_code - input_code)));
+static_assert((binary_condition_code + (condition_count - switch_count) * 2) <=
+              (1U << condition_code_bits));
+static_assert(static_cast<int>(SwitchPosition::pos6) + 2 == switch_positions);
+static_assert(condition_count <= ((1U << source_code_bits) - switch_code));
 inline constexpr unsigned input_destination_bits = 3;
 inline constexpr unsigned output_destination_bits = 4;
 inline constexpr unsigned side_bits = 2;
@@ -206,22 +220,126 @@ template <typename Archive> class PackedFields {
     unsigned used_{};
 };
 
+constexpr std::uint8_t source_code(const Source &source) noexcept {
+    namespace bits = packed_model;
+    unsigned base{};
+    unsigned limit{};
+    switch (source.kind) {
+    case SourceKind::analog:
+        limit = bits::input_code;
+        break;
+    case SourceKind::input:
+        base = bits::input_code;
+        limit = bits::maximum_code - bits::input_code;
+        break;
+    case SourceKind::maximum:
+        base = bits::maximum_code;
+        limit = bits::switch_code - bits::maximum_code;
+        break;
+    case SourceKind::switch_position:
+        base = bits::switch_code;
+        limit = (1U << bits::source_code_bits) - bits::switch_code;
+        break;
+    }
+    // An unrepresentable source exceeds the field and fails the write.
+    return static_cast<std::uint8_t>(source.index < limit ? base + source.index
+                                                          : 1U << bits::source_code_bits);
+}
+
+constexpr void decode_source(const std::uint8_t code, Source &source) noexcept {
+    namespace bits = packed_model;
+    std::uint8_t base{};
+    if (code < bits::input_code)
+        source.kind = SourceKind::analog;
+    else if (code < bits::maximum_code) {
+        source.kind = SourceKind::input;
+        base = bits::input_code;
+    } else if (code < bits::switch_code) {
+        source.kind = SourceKind::maximum;
+        base = bits::maximum_code;
+    } else {
+        source.kind = SourceKind::switch_position;
+        base = bits::switch_code;
+    }
+    source.index = static_cast<std::uint8_t>(code - base);
+}
+
+constexpr std::uint16_t condition_code(const Condition &condition) noexcept {
+    namespace bits = packed_model;
+    const auto position = static_cast<int>(condition.position) + 1;
+    if ((condition.index < switch_count) && (position >= 0) &&
+        (position < static_cast<int>(bits::switch_positions)))
+        return static_cast<std::uint16_t>(condition.index * bits::switch_positions +
+                                          static_cast<unsigned>(position));
+    if ((condition.index >= switch_count) && (condition.index < condition_count) &&
+        ((condition.position == SwitchPosition::up) ||
+         (condition.position == SwitchPosition::down)))
+        return static_cast<std::uint16_t>(bits::binary_condition_code +
+                                          (condition.index - switch_count) * 2U +
+                                          (condition.position == SwitchPosition::down ? 1U : 0U));
+    // An unrepresentable condition exceeds the field and fails the write.
+    return 1U << bits::condition_code_bits;
+}
+
+constexpr void decode_condition(const std::uint16_t code, Condition &condition) noexcept {
+    namespace bits = packed_model;
+    if (code < bits::binary_condition_code) {
+        condition.index = static_cast<std::uint8_t>(code / bits::switch_positions);
+        condition.position =
+            static_cast<SwitchPosition>(static_cast<int>(code % bits::switch_positions) - 1);
+    } else {
+        const auto binary = static_cast<unsigned>(code - bits::binary_condition_code);
+        // Unused codes decode to an invalid index and are rejected by validation.
+        condition.index = binary < (condition_count - switch_count) * 2U
+                              ? static_cast<std::uint8_t>(switch_count + binary / 2)
+                              : std::numeric_limits<std::uint8_t>::max();
+        condition.position = (binary % 2) != 0 ? SwitchPosition::down : SwitchPosition::up;
+    }
+}
+
 template <typename Archive, typename ModelType>
 constexpr bool transfer_model_lines(Archive &archive, ModelType &model,
-                                    const bool packed_curves = false) noexcept {
+                                    const bool packed_curves = false,
+                                    const bool multiswitch_switches = true) noexcept {
     namespace bits = packed_model;
     const auto common = [&](auto &fields, auto &line, const unsigned destination_bits) constexpr {
         fields.field(destination_bits, line.destination);
-        fields.field(bits::source_kind_bits, line.source.kind);
-        fields.field(bits::source_index_bits, line.source.index);
+        if (multiswitch_switches) {
+            auto code = source_code(line.source);
+            fields.field(bits::source_code_bits, code);
+            if constexpr (!std::is_const_v<ModelType>)
+                decode_source(code, line.source);
+        } else {
+            fields.field(bits::source_kind_bits, line.source.kind);
+            fields.field(bits::source_index_bits, line.source.index);
+        }
         fields.field(bits::flag_bits, line.source.inverted);
         fields.field(bits::flag_bits, line.condition.enabled);
-        fields.field(bits::condition_index_bits, line.condition.index);
-        auto position = static_cast<std::uint8_t>(static_cast<int>(line.condition.position) + 1);
-        fields.field(bits::position_bits, position);
+        if (multiswitch_switches) {
+            auto code = condition_code(line.condition);
+            fields.field(bits::condition_code_bits, code);
+            if constexpr (!std::is_const_v<ModelType>)
+                decode_condition(code, line.condition);
+        } else {
+            fields.field(bits::condition_index_bits, line.condition.index);
+            auto position =
+                static_cast<std::uint8_t>(static_cast<int>(line.condition.position) + 1);
+            fields.field(bits::position_bits, position);
+            if constexpr (!std::is_const_v<ModelType>)
+                line.condition.position =
+                    static_cast<SwitchPosition>(static_cast<int>(position) - 1);
+        }
         fields.field(bits::flag_bits, line.condition.inverted);
-        if constexpr (!std::is_const_v<ModelType>)
-            line.condition.position = static_cast<SwitchPosition>(static_cast<int>(position) - 1);
+        if constexpr (!std::is_const_v<ModelType>) {
+            // Older formats had no M switches; their indices stay invalid.
+            if (!multiswitch_switches) {
+                if (line.condition.index >= multiswitch_switch_base)
+                    line.condition.index = std::numeric_limits<std::uint8_t>::max();
+                if ((line.source.kind == SourceKind::switch_position) &&
+                    (line.source.index >= multiswitch_switch_base))
+                    line.source.index = std::numeric_limits<std::uint8_t>::max();
+            }
+        }
     };
     for (auto &line : model.inputs) {
         PackedFields fields{archive, bits::input_bytes};
@@ -472,7 +590,8 @@ constexpr bool transfer_tank(Archive &archive, Snapshot &model, const bool enabl
 template <typename Archive, typename Snapshot>
 constexpr bool transfer(Archive &archive, Snapshot &state, const bool sound_options = true,
                         const bool curve_options = true, const bool tank_options = true,
-                        const bool third_motor = true) noexcept {
+                        const bool third_motor = true,
+                        const bool multiswitch_switches = true) noexcept {
     if (!transfer_model_counts(archive, state.model))
         return false;
     for (auto &calibration : state.setup.calibration) {
@@ -484,7 +603,7 @@ constexpr bool transfer(Archive &archive, Snapshot &state, const bool sound_opti
         archive.field(mapping.physical_index);
         archive.field(mapping.reversed);
     }
-    return transfer_model_lines(archive, state.model) &&
+    return transfer_model_lines(archive, state.model, false, multiswitch_switches) &&
            transfer_model_extension(archive, state.model) &&
            transfer_multiswitch(archive, state.model) &&
            transfer_dashboard_options(archive, state.model, sound_options) &&
@@ -553,7 +672,8 @@ template <typename Snapshot>
         return {{Error::length, 6}, 0};
     }
     Reader payload{record.subspan(header_size, length)};
-    if (!transfer(payload, state, version >= 7, version >= 8, version >= 9, version >= 10)) {
+    if (!transfer(payload, state, version >= 7, version >= 8, version >= 9, version >= 10,
+                  version >= 11)) {
         return {{Error::field, header_size + payload.error_offset}, 0};
     }
     if (payload.position != length) {

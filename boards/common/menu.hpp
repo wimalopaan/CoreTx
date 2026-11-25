@@ -59,14 +59,14 @@ inline constexpr std::size_t visible_rows = 4;
 inline constexpr int list_y = 12;
 inline constexpr int row_height = 10;
 inline constexpr int footer_split = 64;
-inline constexpr std::array input_fields{tr::menu_source,     tr::menu_weight,     tr::menu_expo,
-                                         tr::menu_offset,     tr::menu_trim,       tr::menu_side,
-                                         tr::menu_invert,     tr::menu_target,     tr::menu_switch,
-                                         tr::menu_switch_pos, tr::menu_switch_not, tr::menu_curve};
-inline constexpr std::array mix_fields{tr::menu_source,     tr::menu_weight, tr::menu_offset,
-                                       tr::menu_multiplex,  tr::menu_trim,   tr::menu_invert,
-                                       tr::menu_target,     tr::menu_switch, tr::menu_switch_pos,
-                                       tr::menu_switch_not, tr::menu_curve};
+inline constexpr std::array input_fields{
+    tr::menu_source, tr::menu_weight, tr::menu_expo,   tr::menu_offset, tr::menu_trim,
+    tr::menu_side,   tr::menu_invert, tr::menu_target, tr::menu_switch, tr::menu_curve};
+inline constexpr std::array mix_fields{tr::menu_source,    tr::menu_weight, tr::menu_offset,
+                                       tr::menu_multiplex, tr::menu_trim,   tr::menu_invert,
+                                       tr::menu_target,    tr::menu_switch, tr::menu_curve};
+static_assert(input_fields.size() == coretx::ui::detail::input_fields.size());
+static_assert(mix_fields.size() == coretx::ui::detail::mix_fields.size());
 inline constexpr std::array output_fields{tr::menu_minimum, tr::menu_maximum, tr::menu_subtrim,
                                           tr::menu_reverse};
 inline constexpr std::array actions{tr::menu_new, tr::menu_copy, tr::menu_delete, tr::menu_move_up,
@@ -86,10 +86,8 @@ constexpr const char *tank_label(const MixRole role) noexcept {
 #endif
 inline constexpr std::array<std::string_view, 11> logical_functions{
     "--", "A > X", "A < X", "A = X", "A != X", "A >= X", "A <= X", "AND", "OR", "XOR", "SRFF"};
-inline constexpr std::array logical_fields{
-    tr::menu_function,   tr::menu_operand_a, tr::menu_switch_pos,
-    tr::menu_switch_not, tr::menu_operand_b, tr::menu_switch_pos,
-    tr::menu_switch_not, tr::menu_threshold, tr::menu_invert};
+inline constexpr std::array logical_fields{tr::menu_function, tr::menu_operand_a,
+                                           tr::menu_operand_b, tr::menu_threshold, tr::menu_invert};
 
 constexpr void row(coretx::ui::Framebuffer &display, const std::size_t index,
                    const std::size_t selected, const std::size_t first,
@@ -126,62 +124,33 @@ constexpr void condition(coretx::ui::Framebuffer &display, const int x, const in
         return;
     std::array<char, 6> buffer{};
     const auto label = switch_condition_label(condition, buffer);
-    const bool logical = (condition.index >= switch_count) &&
-                         (condition.index < (switch_count + logical_switch_count));
-    const int left =
-        std::min(x + ((logical && !condition.inverted) ? display.character_width() : 0),
-                 coretx::ui::Framebuffer::width -
-                     static_cast<int>(label.size()) * display.character_width());
+    const int left = std::min(x, coretx::ui::Framebuffer::width -
+                                     static_cast<int>(label.size()) * display.character_width());
     display.text(left, y, label, ink);
 }
 
-inline constexpr int condition_positions =
-    static_cast<int>(SwitchPosition::pos6) - static_cast<int>(SwitchPosition::up) + 1;
+using coretx::ui::detail::condition_choice;
+using coretx::ui::detail::condition_positions;
+using coretx::ui::detail::select_condition;
 
-constexpr int condition_choice(const Condition &condition) noexcept {
-    return condition.enabled ? (int{condition.index} * condition_positions +
-                                static_cast<int>(condition.position) + 1)
-                             : -1;
+constexpr coretx::ui::detail::SwitchChoices
+switch_choices(const Diagnostics &diagnostics, const std::uint32_t multiswitch = 0) noexcept {
+    coretx::ui::detail::SwitchChoices choices{diagnostics.switch_mask(), diagnostics.six_mask(), 0,
+                                              multiswitch, 0};
+    for (std::size_t i = 0; i < switch_count; ++i)
+        if ((i >= physical_switch_count) || diagnostics.three_position(i))
+            choices.middle |= 1U << i;
+    for (std::size_t i = 0; i < logical_switch_count; ++i)
+        if (diagnostics.model().logical_switches[i].function != LogicalFunction::disabled)
+            choices.logical |= static_cast<std::uint8_t>(1U << i);
+    return choices;
 }
 
-constexpr Condition select_condition(const int choice, const bool inverted) noexcept {
-    return {choice >= 0, static_cast<std::uint8_t>(choice < 0 ? 0 : choice / condition_positions),
-            static_cast<SwitchPosition>(choice < 0 ? -1 : choice % condition_positions - 1),
-            inverted};
-}
-
+// MultiSwitch button conditions are limited to physical and logical switches.
 constexpr int change_condition(const int choice, const int direction,
                                const Diagnostics &diagnostics) noexcept {
-    constexpr int maximum =
-        static_cast<int>(switch_count + logical_switch_count) * condition_positions - 1;
-    const auto switches = diagnostics.switch_mask();
-    const auto six = diagnostics.six_mask();
-    int next = choice;
-    for (;;) {
-        const int candidate = std::clamp(next + direction, -1, maximum);
-        if (candidate == next)
-            return choice;
-        next = candidate;
-        if (next < 0)
-            return next;
-        const auto condition = select_condition(next, false);
-        const auto index = condition.index;
-        const auto position = condition.position;
-        if (index >= switch_count) {
-            if ((diagnostics.model().logical_switches[index - switch_count].function !=
-                 LogicalFunction::disabled) &&
-                ((position == SwitchPosition::up) || (position == SwitchPosition::down)))
-                return next;
-        } else if ((switches & (1U << index)) != 0) {
-            if ((six & (1U << index)) != 0) {
-                if (position >= SwitchPosition::pos1)
-                    return next;
-            } else if ((position == SwitchPosition::up) || (position == SwitchPosition::down) ||
-                       ((position == SwitchPosition::middle) &&
-                        ((index >= physical_switch_count) || diagnostics.three_position(index))))
-                return next;
-        }
-    }
+    return coretx::ui::detail::step_condition(choice, direction, switch_choices(diagnostics),
+                                              switch_count + logical_switch_count);
 }
 } // namespace menu_detail
 
@@ -219,8 +188,10 @@ class Menu {
     template <typename Store>
     constexpr MenuCommand handle(const Key key, Store &store, Diagnostics &diagnostics,
                                  const RadioOutput output) noexcept {
-        editor_.set_sources(diagnostics.analog_mask(), diagnostics.switch_mask(),
-                            diagnostics.six_mask());
+        const auto choices =
+            menu_detail::switch_choices(diagnostics, multiswitch_mask(diagnostics.model()));
+        editor_.set_sources(diagnostics.analog_mask(), choices.switches, choices.six_position,
+                            choices.multiswitch, choices.middle);
         can_initialize_ = store.can_initialize();
         if (key == Key::none)
             return {};
@@ -432,8 +403,7 @@ class Menu {
                     else if (selected_ == 3)
                         valid = control.set_address(draft_value_);
                     else {
-                        valid = control.set_condition(menu_detail::select_condition(
-                            draft_value_, control.condition().inverted));
+                        valid = control.set_condition(menu_detail::select_condition(draft_value_));
                     }
                     if (!valid) {
                         page = old;
@@ -512,7 +482,9 @@ class Menu {
                 editing_ = !editing_;
             } else if (editing_) {
                 if ((key == Key::up) || (key == Key::down))
-                    change_logical(key == Key::up ? 1 : -1);
+                    change_logical(
+                        key == Key::up ? 1 : -1,
+                        menu_detail::switch_choices(diagnostics, multiswitch_mask(model)));
             } else
                 move_selection(key, menu_detail::logical_fields.size());
             return {};
@@ -1139,7 +1111,7 @@ class Menu {
                 } else {
                     auto condition = control.condition();
                     if (editing)
-                        condition = menu_detail::select_condition(draft_value_, condition.inverted);
+                        condition = menu_detail::select_condition(draft_value_);
                     if (condition.enabled)
                         menu_detail::condition(display, 101, y, condition, ink);
                     else
@@ -1162,7 +1134,13 @@ class Menu {
         else if ((key == Key::down) && ((selected_ + 1) < count))
             ++selected_;
     }
-    constexpr void change_logical(const int direction) noexcept {
+    [[nodiscard]] static constexpr std::uint32_t multiswitch_mask(const Model &model) noexcept {
+        if constexpr (features::multiswitch)
+            return coretx::multiswitch::available(model);
+        return 0;
+    }
+    constexpr void change_logical(const int direction,
+                                  const coretx::ui::detail::SwitchChoices &choices) noexcept {
         auto &line = logical_draft_;
         const auto change = [direction](const int value, const int minimum,
                                         const int maximum) constexpr {
@@ -1174,26 +1152,33 @@ class Menu {
             // Changing the function starts with safe physical operands.
             line.a = line.b = 0;
             line.position_a = line.position_b = SwitchPosition::up;
-        } else if ((selected_ == 1) || (selected_ == 4)) {
+            line.inverted_a = line.inverted_b = false;
+        } else if ((selected_ == 1) || (selected_ == 2)) {
             auto &index = selected_ == 1 ? line.a : line.b;
             auto &position = selected_ == 1 ? line.position_a : line.position_b;
-            const bool boolean = coretx::detail::boolean_function(line.function);
-            index = static_cast<std::uint8_t>(change(index, 0, boolean ? 23 : 31));
-            if (boolean && (index >= switch_count))
-                position = SwitchPosition::down;
-        } else if ((selected_ == 2) || (selected_ == 5)) {
-            auto &position = selected_ == 2 ? line.position_a : line.position_b;
-            const auto index = selected_ == 2 ? line.a : line.b;
-            const bool logical =
-                coretx::detail::boolean_function(line.function) && (index >= switch_count);
-            position =
-                static_cast<SwitchPosition>(logical ? (position == SwitchPosition::down ? -1 : 1)
-                                                    : change(static_cast<int>(position), -1, 7));
+            auto &inverted = selected_ == 1 ? line.inverted_a : line.inverted_b;
+            if (coretx::detail::boolean_function(line.function)) {
+                // Boolean operands are one choice of switch, position and negation, e.g. "!SA^".
+                const auto choice = coretx::ui::detail::step_condition(
+                    menu_detail::condition_choice({true, index, position, inverted}), direction,
+                    choices, condition_count);
+                if (choice != 0) {
+                    const auto condition = menu_detail::select_condition(choice);
+                    index = condition.index;
+                    position = condition.position;
+                    inverted = condition.inverted;
+                }
+            } else if (selected_ == 1) {
+                // Comparison sources are signed: negative values select the inverted source.
+                constexpr int sources = static_cast<int>(analog_count + switch_count);
+                int choice = inverted ? -(index + 1) : index + 1;
+                choice = change(choice, -sources, sources);
+                if (choice == 0)
+                    choice = direction;
+                inverted = choice < 0;
+                index = static_cast<std::uint8_t>((choice < 0 ? -choice : choice) - 1);
+            }
         } else if (selected_ == 3)
-            line.inverted_a = !line.inverted_a;
-        else if (selected_ == 6)
-            line.inverted_b = !line.inverted_b;
-        else if (selected_ == 7)
             line.threshold =
                 static_cast<std::int16_t>(change(line.threshold, -resolution, resolution));
         else
@@ -1206,28 +1191,27 @@ class Menu {
             display.text(64, y,
                          menu_detail::logical_functions[static_cast<std::size_t>(line.function)],
                          ink);
-        else if ((field == 1) || (field == 4)) {
+        else if ((field == 1) || (field == 2)) {
             const auto index = field == 1 ? line.a : line.b;
             if (coretx::detail::boolean_function(line.function))
                 menu_detail::condition(
                     display, 96, y,
-                    {true, index, field == 1 ? line.position_a : line.position_b, false}, ink);
-            else if (field == 1)
+                    field == 1 ? Condition{true, index, line.position_a, line.inverted_a}
+                               : Condition{true, index, line.position_b, line.inverted_b},
+                    ink);
+            else if (field == 1) {
+                if (line.inverted_a)
+                    display.text(90, y, "-", ink);
                 coretx::ui::detail::draw_source(
                     display, 96, y,
                     {index < analog_count ? SourceKind::analog : SourceKind::switch_position,
                      static_cast<std::uint8_t>(index < analog_count ? index : index - analog_count),
                      false},
                     ink, &switch_names);
-            else
+            } else
                 display.text(111, y, "--", ink);
         } else {
-            const int value = field == 2   ? static_cast<int>(line.position_a)
-                              : field == 3 ? line.inverted_a
-                              : field == 5 ? static_cast<int>(line.position_b)
-                              : field == 6 ? line.inverted_b
-                              : field == 7 ? line.threshold
-                                           : line.inverted;
+            const int value = field == 3 ? line.threshold : line.inverted;
             display.number(127, y, value, ink);
         }
     }
@@ -1405,9 +1389,8 @@ class Menu {
                 } else if ((page == coretx::ui::Page::inputs) && (i == 5))
                     display.text(110, y, value == 0 ? "+/-" : value == 1 ? "-" : "+", ink);
                 else if (((page == coretx::ui::Page::outputs) && (i == 3)) ||
-                         ((page == coretx::ui::Page::inputs) && ((i == 6) || (i == 10))) ||
-                         ((page == coretx::ui::Page::mixes) &&
-                          ((i == 4) || (i == 5) || (i == 9)))) {
+                         ((page == coretx::ui::Page::inputs) && (i == 6)) ||
+                         ((page == coretx::ui::Page::mixes) && ((i == 4) || (i == 5)))) {
                     const std::string_view answer = value == 0 ? tr::menu_no : tr::menu_yes;
                     display.text(128 - static_cast<int>(answer.size()) * 6, y, answer, ink);
                 } else if ((i ==
@@ -1422,17 +1405,12 @@ class Menu {
                     if (value == 0)
                         display.text(110, y, tr::radio_off, ink);
                     else
-                        coretx::ui::detail::draw_source(display, 104, y,
-                                                        {SourceKind::switch_position,
-                                                         static_cast<std::uint8_t>(value - 1),
-                                                         false},
-                                                        ink, &switch_names);
-                } else if ((i ==
-                            static_cast<std::size_t>(page == coretx::ui::Page::inputs ? 9 : 8)) &&
-                           (page != coretx::ui::Page::outputs))
-                    display.text(120, y, value < 0 ? "^" : value > 0 ? "v" : "-", ink);
-                else if (((page == coretx::ui::Page::inputs) && (i == 11)) ||
-                         ((page == coretx::ui::Page::mixes) && (i == 10))) {
+                        menu_detail::condition(display, 98, y, menu_detail::select_condition(value),
+                                               ink);
+                } else if (((page == coretx::ui::Page::inputs) &&
+                            (i == coretx::ui::detail::input_curve_field)) ||
+                           ((page == coretx::ui::Page::mixes) &&
+                            (i == coretx::ui::detail::mix_curve_field))) {
                     if (value == 0)
                         display.text(110, y, tr::radio_off, ink);
                     else

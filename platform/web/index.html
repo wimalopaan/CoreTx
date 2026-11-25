@@ -34,7 +34,10 @@
         <legend class="sr-only">Physische Senderbedienung</legend>
         <div id="switches" class="switches"></div>
         <div id="sticks" class="sticks">
-          <div id="stick-centering" class="spring-options" role="group" aria-label="Automatische Knueppelzentrierung"><span>Zentrieren</span></div>
+          <div class="stick-center">
+            <div id="pots" class="pots" role="group" aria-label="Drehpotis VRA und VRB"></div>
+            <div id="stick-centering" class="spring-options" role="group" aria-label="Automatische Knueppelzentrierung"><span>Zentrieren</span></div>
+          </div>
         </div>
         <div class="lcd-section">
           <div id="lcd-controls" class="lcd-controls">
@@ -65,7 +68,7 @@
     <section id="analog-panel" class="panel analog-panel" aria-labelledby="analog-heading" hidden>
       <div class="section-heading"><h2 id="analog-heading">Analoge Eingaenge</h2><span class="badge">ADC 0&ndash;4095</span></div>
       <fieldset id="analog-controls" disabled><legend class="sr-only">Analoge Rohwerte</legend><div id="axes" class="axes"></div></fieldset>
-      <p class="hint">EXT 1/2 sind optionale Erweiterungen und in der Firmware standardmaessig deaktiviert.</p>
+      <p class="hint">VRC&ndash;VRF (i6S bis VRG) sind zusaetzliche Eingaenge und wirken erst, wenn sie im Sendermenue unter Eingangssetup aktiviert sind. Knueppel sowie VRA/VRB werden direkt am Sender bedient.</p>
     </section>
 
     <section id="storage-panel" class="panel storage-panel" aria-labelledby="storage-heading" hidden>

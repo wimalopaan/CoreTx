@@ -7,7 +7,7 @@ Originalfirmware und externes EEPROM getrennt sichern.
 Neutrale Kanalausgabe ist kein garantierter Motor-Aus-Failsafe.
 
 Experimentelle Firmware für *Flysky FS-i6X und FS-i6S* mit STM32F072,
-128 KiB Flash und 16 KiB RAM. Aktuelle Firmwareversion im Quellcode: *6*
+128 KiB Flash und 16 KiB RAM. Aktuelle Firmwareversion im Quellcode: *8*
 (`coretx/version.hpp`).
 
 == Ziele
@@ -77,6 +77,14 @@ Die Berechnung erfolgt lokal im Browser; Modelldaten werden nicht hochgeladen.
 * *Externes CRSF:* bidirektionale UART für Kanalausgabe, Telemetrie und
   Modulkonfiguration. Es ist immer nur ein HF-Pfad aktiv.
 * *MultiSwitch:* CRSF-Dashboards und SET4-Befehle für kompatible Empfänger/Module.
+  Die 32 Tastenzustände aktivierter Seiten stehen zusätzlich als Schalter
+  M11..M48 (Seite, Taste) für Bedingungen, logische Schalter sowie als Input-/
+  Mischerquelle zur Verfügung, auch mit internem HF-Modul. Sie beginnen nach dem
+  Einschalten oder Modellwechsel aus und werden nicht gespeichert. Im Format 11
+  gespeicherte Modelle sind mit älterer Firmware nicht lesbar.
+* *Schalterbedingungen:* Schalter, Position und Negation sind wie in EdgeTX eine
+  Auswahl, z.B. `SA^`, `SB3`, `L1`, `M23`; negierte Einträge wie `!SA^`, `!L1`
+  liegen unterhalb von AUS.
 * *Zusätzliche Eingänge:* einzeln abschaltbare Potis und analoge Stufenschalter;
   zusätzliche Digitalschalter lassen sich ebenfalls abschalten und, soweit
   unterstützt, zu Dreistufenschaltern kombinieren.

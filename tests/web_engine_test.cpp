@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "boards/common/input_storage.hpp"
 #include "boards/common/model_storage.hpp"
 #include "platform/web/simulator.hpp"
 
@@ -123,6 +124,55 @@ int main() {
     sim_step(100);
     require(sim_channels()[4] == 1024, "Switch release and positions reach channel bars");
     require(sim_channels()[5] == -1024, "Output bars represent final channels, not mixer sums");
+    if constexpr (fw::features::extended_inputs) {
+        // The last additional input (VRF on i6X, VRG on i6S) is reachable from the browser.
+        const auto auxiliary = 6 + fw::extra_adc_count - 1;
+        coretx::InputSetup setup{fw::Hardware::sb_three_position};
+        setup.extra_analog = true;
+        setup.modes[auxiliary] = coretx::InputMode::pot;
+        const auto inputs = fw::input_storage::encode(setup, 1);
+        std::copy(inputs.begin(), inputs.end(), memory.begin() + fw::input_storage::base_address);
+        data.model.mixes[6].source = {
+            coretx::SourceKind::analog,
+            static_cast<std::uint8_t>(coretx::auxiliary_analog_indices[auxiliary]), false};
+        require(fw::models::encode(data, 0, true, 101, record), "Encode extra input model");
+        std::copy(record.begin(), record.end(), memory.begin() + fw::models::base);
+        sim_init();
+        settle();
+        require(sim_analog_count() == static_cast<int>(6 + fw::extra_adc_count),
+                "Browser exposes all additional analog inputs");
+        sim_set_analog(sim_analog_count() - 1, 0);
+        sim_step(100);
+        require(sim_channels()[6] == -1024, "Last additional input reaches the mixer");
+        sim_set_analog(sim_analog_count() - 1, 4095);
+        sim_step(100);
+        require(sim_channels()[6] == 1024, "Additional input follows the browser value");
+        require(sim_digital_inputs() == 0, "Digital extensions are off by default");
+        setup.set_digital_mode(0, coretx::DigitalInputMode::three_position);
+        const auto digital = fw::input_storage::encode(setup, 2);
+        std::copy(digital.begin(), digital.end(), memory.begin() + fw::input_storage::base_address);
+        data.model.mixes[6].source = {coretx::SourceKind::switch_position, 11, false};
+        require(fw::models::encode(data, 0, true, 102, record), "Encode digital input model");
+        std::copy(record.begin(), record.end(), memory.begin() + fw::models::base);
+        sim_init();
+        settle();
+        require(sim_digital_inputs() == 2, "Browser sees the enabled three-position extension");
+        sim_step(100);
+        require(sim_channels()[6] == 0, "Open three-position contacts are the middle position");
+        sim_set_switch(4, 2);
+        sim_step(100);
+        require(sim_channels()[6] == -1024, "First contact is the up position");
+        sim_set_switch(4, 0);
+        sim_set_switch(5, 2);
+        sim_step(100);
+        require(sim_channels()[6] == 1024, "Second contact is the down position");
+        sim_set_switch(5, 0);
+        data.model.mixes[6].source = {coretx::SourceKind::switch_position, 16, false};
+        require(fw::models::encode(data, 0, true, 103, record), "Restore model");
+        std::copy(record.begin(), record.end(), memory.begin() + fw::models::base);
+        sim_init();
+        settle();
+    }
     if constexpr (fw::features::i6s) {
         sim_set_switch(14, 2);
         sim_step(100);

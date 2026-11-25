@@ -3,7 +3,7 @@
 
 #include "boards/common/controls.hpp"
 #include "boards/common/model_format.hpp"
-#include "boards/common/radio_storage.hpp"
+#include "boards/common/radio_settings.hpp"
 #include "platform/stm32f072/crsf.hpp"
 
 #include <memory>
@@ -181,7 +181,8 @@ constexpr int decode(const Record &record, const std::size_t index, const afhds2
     for (auto &ch : data.name)
         ch = static_cast<char>(in.byte());
     if (!coretx::storage::detail::transfer_model_counts(in, data.model) ||
-        !coretx::storage::detail::transfer_model_lines(in, data.model, version >= 8) ||
+        !coretx::storage::detail::transfer_model_lines(in, data.model, version >= 8,
+                                                       version >= 11) ||
         !coretx::storage::detail::transfer_model_extension(in, data.model) ||
         !coretx::storage::detail::transfer_multiswitch(in, data.model, version >= 8) ||
         !coretx::storage::detail::transfer_dashboard_options(in, data.model, version >= 7) ||

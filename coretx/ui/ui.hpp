@@ -11,6 +11,126 @@ namespace coretx::ui {
 // Display names of the switch sources; the board defines them because the auxiliary inputs differ.
 using SwitchNames = std::array<std::string_view, switch_count>;
 
+namespace detail {
+
+// A switch condition is one signed choice of switch, position and negation, e.g. "SA^" or
+// "!SA^": 0 is off, inverted conditions are negative. L and M only offer "L1"/"!L1".
+inline constexpr int condition_positions =
+    static_cast<int>(SwitchPosition::pos6) - static_cast<int>(SwitchPosition::up) + 1;
+
+struct SwitchChoices {
+    std::uint32_t switches{};
+    std::uint16_t six_position{};
+    std::uint32_t middle{};
+    std::uint32_t multiswitch{};
+    std::uint8_t logical{};
+};
+
+[[nodiscard]] constexpr bool binary_condition(const std::size_t index) noexcept {
+    return logical_index(index) || multiswitch_index(index);
+}
+
+// L and M are active in position down; position up is shown as the negation.
+[[nodiscard]] constexpr bool condition_negated(const Condition &condition) noexcept {
+    return condition.inverted !=
+           (binary_condition(condition.index) && (condition.position == SwitchPosition::up));
+}
+
+[[nodiscard]] constexpr int condition_choice(const Condition &condition) noexcept {
+    if (!condition.enabled)
+        return 0;
+    const auto position =
+        binary_condition(condition.index) ? SwitchPosition::down : condition.position;
+    const int choice = int{condition.index} * condition_positions + static_cast<int>(position) + 2;
+    return condition_negated(condition) ? -choice : choice;
+}
+
+[[nodiscard]] constexpr Condition select_condition(const int choice) noexcept {
+    if (choice == 0)
+        return {};
+    const int code = (choice < 0 ? -choice : choice) - 1;
+    return {true, static_cast<std::uint8_t>(code / condition_positions),
+            static_cast<SwitchPosition>(code % condition_positions - 1), choice < 0};
+}
+
+[[nodiscard]] constexpr bool condition_available(const Condition &condition,
+                                                 const SwitchChoices &choices) noexcept {
+    const auto index = condition.index;
+    const auto position = condition.position;
+    const bool binary = (position == SwitchPosition::up) || (position == SwitchPosition::down);
+    if (index < switch_count) {
+        if ((choices.switches & (1U << index)) == 0)
+            return false;
+        if ((choices.six_position & (1U << index)) != 0)
+            return (position >= SwitchPosition::pos1) && (position <= SwitchPosition::pos6);
+        return binary ||
+               ((position == SwitchPosition::middle) && ((choices.middle & (1U << index)) != 0));
+    }
+    if (logical_index(index))
+        return (position == SwitchPosition::down) &&
+               ((choices.logical & (1U << (index - switch_count))) != 0);
+    return (position == SwitchPosition::down) && multiswitch_index(index) &&
+           ((choices.multiswitch & (1U << (index - multiswitch_switch_base))) != 0);
+}
+
+// Steps to the next available choice for switch indices below indices; negated choices lie
+// below "off" as in EdgeTX.
+[[nodiscard]] constexpr int step_condition(const int choice, const int direction,
+                                           const SwitchChoices &choices,
+                                           const std::size_t indices) noexcept {
+    const int maximum = static_cast<int>(indices) * condition_positions;
+    int next = choice;
+    for (;;) {
+        const int candidate = next + direction < -maximum  ? -maximum
+                              : next + direction > maximum ? maximum
+                                                           : next + direction;
+        if (candidate == next)
+            return choice;
+        next = candidate;
+        if ((next == 0) || condition_available(select_condition(next), choices))
+            return next;
+    }
+}
+
+[[nodiscard]] constexpr std::string_view condition_label(const Condition &condition,
+                                                         std::array<char, 6> &buffer,
+                                                         const SwitchNames &names) noexcept {
+    if (!condition.enabled)
+        return {};
+    std::size_t size{};
+    if (condition_negated(condition))
+        buffer[size++] = '!';
+    if (logical_index(condition.index)) {
+        buffer[size++] = 'L';
+        buffer[size++] = static_cast<char>('1' + (condition.index - switch_count));
+    } else if (multiswitch_index(condition.index)) {
+        const auto index = condition.index - multiswitch_switch_base;
+        buffer[size++] = 'M';
+        buffer[size++] = static_cast<char>('1' + index / multiswitch_function_count);
+        buffer[size++] = static_cast<char>('1' + index % multiswitch_function_count);
+    } else if ((condition.index < switch_count) && !names[condition.index].empty() &&
+               valid_switch_position(condition.position)) {
+        for (const auto character : names[condition.index].substr(0, 3))
+            buffer[size++] = character;
+        buffer[size++] = condition.position == SwitchPosition::up     ? '^'
+                         : condition.position == SwitchPosition::down ? 'v'
+                         : condition.position == SwitchPosition::middle
+                             ? '-'
+                             : static_cast<char>('1' + static_cast<int>(condition.position) - 2);
+    } else
+        buffer[size++] = '?';
+    return {buffer.data(), size};
+}
+
+[[nodiscard]] constexpr std::string_view condition_label(const Condition &condition,
+                                                         std::array<char, 6> &buffer,
+                                                         const SwitchNames *const names) noexcept {
+    constexpr SwitchNames unnamed{};
+    return condition_label(condition, buffer, names != nullptr ? *names : unnamed);
+}
+
+} // namespace detail
+
 class Framebuffer {
   public:
     static constexpr int width = 128;
@@ -135,10 +255,14 @@ class Interface {
     [[nodiscard]] constexpr LineAction action() const noexcept { return action_; }
     [[nodiscard]] constexpr bool confirm_delete() const noexcept { return confirm_delete_; }
     constexpr void set_sources(const std::uint16_t analogs, const std::uint32_t switches,
-                               const std::uint16_t six_position) noexcept {
+                               const std::uint16_t six_position,
+                               const std::uint32_t multiswitch = 0,
+                               const std::uint32_t three_position = ~0U) noexcept {
         analog_sources_ = analogs;
         switch_sources_ = switches;
         six_position_sources_ = six_position;
+        multiswitch_sources_ = multiswitch;
+        three_position_sources_ = three_position;
     }
     [[nodiscard]] constexpr bool take_changed() noexcept {
         const bool changed = model_changed_;
@@ -186,6 +310,7 @@ class Interface {
     constexpr void commit_edit(Model &model) noexcept;
     constexpr void perform_action(Model &model) noexcept;
     [[nodiscard]] constexpr bool line_page() const noexcept;
+    [[nodiscard]] constexpr detail::SwitchChoices switch_choices(const Model &model) const noexcept;
     [[nodiscard]] constexpr std::size_t control_analog_count() const noexcept {
         return raw_controls_ ? calibration_count : analog_count;
     }
@@ -230,6 +355,8 @@ class Interface {
     std::uint16_t analog_sources_{0xFFFF};
     std::uint32_t switch_sources_{(1U << switch_count) - 1U};
     std::uint16_t six_position_sources_{};
+    std::uint32_t multiswitch_sources_{};
+    std::uint32_t three_position_sources_{~0U};
     const SwitchNames *switch_names_{};
 };
 

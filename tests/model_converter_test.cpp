@@ -8,7 +8,7 @@ namespace {
 namespace fw = coretx::firmware;
 namespace md = fw::models;
 constexpr coretx::afhds2a::TxId tx{0x12345678};
-constexpr auto fixture_versions = std::to_array<std::uint8_t>({6, 7, 8, 9});
+constexpr auto fixture_versions = std::to_array<std::uint8_t>({6, 7, 8, 9, 10});
 static_assert(fixture_versions.front() == coretx::storage::oldest_format_version);
 static_assert(fixture_versions.back() + 1 == fw::converter_target &&
                   fixture_versions.size() ==
@@ -91,9 +91,12 @@ md::Record fixture(std::uint8_t version, std::uint8_t slot = 0, std::uint32_t ge
         r[p++] = 1; // Mixer curve 4: high selection bit, stored after curve coordinates.
     }
     if (version >= 9) {
-        // Historical v9 tank defaults, reversal disabled, one manual mixer role.
-        for (auto byte : {0x10, 0x08, 0xF2, 0x08, 0x00})
+        // Historical v9 tank defaults, reversal disabled; v10 adds third motor channel 3.
+        for (auto byte : {0x10, 0x08, 0xF2, 0x08})
             r[p++] = static_cast<std::uint8_t>(byte);
+        if (version >= 10)
+            r[p++] = 0x02;
+        r[p++] = 0x00; // One manual mixer role.
     }
     seal(r);
     return r;
@@ -135,7 +138,7 @@ struct Memory {
                         marker.begin());
             fw::model_migration::Info info{};
             CHECK(fw::model_migration::decode(marker, info) == fw::model_migration::Status::valid);
-            CHECK(info.kind == fw::model_migration::Kind::conversion && info.target == 10);
+            CHECK(info.kind == fw::model_migration::Kind::conversion && info.target == 11);
         }
         ++writes;
         if (cut && writes == cut) {
@@ -204,7 +207,7 @@ void converted(const std::array<std::uint8_t, 16384> &original) {
         md::Data data{md::empty_model};
         md::Info info{};
         CHECK(md::decode(r, slot, tx, data, info) == 1);
-        CHECK(r[4] == 10 && info.present == (slot != 2));
+        CHECK(r[4] == 11 && info.present == (slot != 2));
         CHECK(info.generation == (slot == 0 ? 11U : slot == 1 ? 0U : 2U));
         CHECK(data.radio.receiver.value == 0x87654321 && data.radio.transmitter == tx);
         CHECK(data.radio.output == fw::RadioOutput::internal && data.baud_index == 1);
@@ -373,7 +376,7 @@ void newest_wrap() {
     md::Data data{md::empty_model};
     md::Info info{};
     CHECK(md::decode(actual, 0, tx, data, info) == 1);
-    CHECK(actual[4] == 10 && info.generation == 2 && data.name[0] == 'N');
+    CHECK(actual[4] == 11 && info.generation == 2 && data.name[0] == 'N');
     CHECK(!data.model.multiswitch_beep);
 }
 void marker_prefix_repairs() {
@@ -385,7 +388,8 @@ void marker_prefix_repairs() {
     CHECK(completed.confirm() && settle(completed) == State::complete);
     const auto targets = Memory::bytes;
     fw::model_migration::Record expected{};
-    fw::model_migration::encode(fw::model_migration::Kind::conversion, 10, expected);
+    fw::model_migration::encode(fw::model_migration::Kind::conversion, fw::converter_target,
+                                expected);
     for (const bool clearing : {false, true}) {
         for (std::size_t prefix = 1; prefix < expected.size(); ++prefix) {
             Memory::reset();
@@ -415,9 +419,11 @@ void marker_repair_refusals() {
     for (unsigned which = 0; which < 5; ++which) {
         seed();
         fw::model_migration::Record marker{};
-        fw::model_migration::encode(fw::model_migration::Kind::conversion, 10, marker);
+        fw::model_migration::encode(fw::model_migration::Kind::conversion, fw::converter_target,
+                                    marker);
         if (which == 0) {
-            fw::model_migration::encode(fw::model_migration::Kind::conversion, 11, marker);
+            fw::model_migration::encode(fw::model_migration::Kind::conversion,
+                                        fw::converter_target + 1, marker);
         } else if (which == 1) {
             marker[4] = 2; // An unknown future marker schema is never repairable.
             seal(marker);
@@ -465,7 +471,7 @@ void fixture_contract() {
         md::Record converted_record{};
         std::copy_n(Memory::bytes.begin() + md::base + md::record_size, converted_record.size(),
                     converted_record.begin());
-        CHECK(converted_record[4] == 10);
+        CHECK(converted_record[4] == 11);
         CHECK(md::decode(converted_record, 0, tx, data, info) == 1 && info.generation == 11);
         fixture_lines(data, version);
         CHECK(!data.model.tank.third_motor && data.model.tank.third_curve == 0);

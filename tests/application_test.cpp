@@ -994,13 +994,12 @@ bool power_off_during_load() {
     c.samples.fill(2048);
     c.touch_ready = true;
     c.touch_event = s::TouchEvent::sample;
-    coretx::storage::State calibration{fw::diagnostic_model, {}};
-    calibration.setup.calibration.fill({0, 2048, 4095});
-    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
-    coretx::storage::Record calibration_record{};
-    if (!coretx::storage::encode(calibration, 0, calibration_record))
-        return false;
-    std::copy(calibration_record.begin(), calibration_record.end(), c.eeprom.begin());
+    coretx::ControlSetup calibration{};
+    calibration.calibration.fill({0, 2048, 4095});
+    calibration.mapping[0].reversed = calibration.mapping[1].reversed = true;
+    const auto calibration_record = coretx::firmware::calibration_storage::encode(calibration, 0);
+    std::copy(calibration_record.begin(), calibration_record.end(),
+              c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
     fw::models::Data data{};
     data.radio.transmitter = {0x12345678};
     data.radio.output = fw::features::crsf    ? fw::RadioOutput::external
@@ -1048,15 +1047,14 @@ template <template <typename> typename BoardPolicy> bool input_setup_recovery() 
     c.eeprom.fill(0xFF);
     const auto base = coretx::firmware::input_storage::base_address;
     std::fill_n(c.eeprom.begin() + base, 256, 0);
-    coretx::storage::State legacy{fw::diagnostic_model, {}};
-    for (auto &axis : legacy.setup.calibration)
+    coretx::ControlSetup legacy{};
+    for (auto &axis : legacy.calibration)
         axis = {0, 2048, 4095};
-    legacy.setup.calibration[4] = {100, 1000, 3500};
-    legacy.setup.mapping[0].reversed = legacy.setup.mapping[1].reversed = true;
-    coretx::storage::Record calibration{};
-    if (!coretx::storage::encode(legacy, 0, calibration))
-        return false;
-    std::copy(calibration.begin(), calibration.end(), c.eeprom.begin());
+    legacy.calibration[4] = {100, 1000, 3500};
+    legacy.mapping[0].reversed = legacy.mapping[1].reversed = true;
+    const auto calibration = coretx::firmware::calibration_storage::encode(legacy, 0);
+    std::copy(calibration.begin(), calibration.end(),
+              c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
     fw::Application<Board> app{};
     (void)app.initialize();
     const auto press = [&](const Key key) {
@@ -1130,13 +1128,12 @@ bool overview_keeps_channels_live() {
     c.eeprom.fill(0xFF);
     c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
-    coretx::storage::State calibration{fw::diagnostic_model, {}};
-    calibration.setup.calibration.fill({0, 2048, 4095});
-    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
-    coretx::storage::Record record{};
-    if (!coretx::storage::encode(calibration, 0, record))
-        return false;
-    std::copy(record.begin(), record.end(), c.eeprom.begin());
+    coretx::ControlSetup calibration{};
+    calibration.calibration.fill({0, 2048, 4095});
+    calibration.mapping[0].reversed = calibration.mapping[1].reversed = true;
+    const auto record = coretx::firmware::calibration_storage::encode(calibration, 0);
+    std::copy(record.begin(), record.end(),
+              c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
     fw::models::Data model{};
     model.radio.transmitter = {0x12345678};
     model.radio.receiver = {0x87654321};
@@ -1460,14 +1457,13 @@ template <template <typename> typename BoardPolicy> bool transmitter_menu_models
     c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
     c.samples[0] = 0;
-    coretx::storage::State legacy{fw::diagnostic_model, {}};
-    for (auto &axis : legacy.setup.calibration)
+    coretx::ControlSetup legacy{};
+    for (auto &axis : legacy.calibration)
         axis = {0, 2048, 4095};
-    legacy.setup.mapping[0].reversed = legacy.setup.mapping[1].reversed = true;
-    coretx::storage::Record calibration{};
-    if (!coretx::storage::encode(legacy, 0, calibration))
-        return false;
-    std::copy(calibration.begin(), calibration.end(), c.eeprom.begin());
+    legacy.mapping[0].reversed = legacy.mapping[1].reversed = true;
+    const auto calibration = coretx::firmware::calibration_storage::encode(legacy, 0);
+    std::copy(calibration.begin(), calibration.end(),
+              c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
     fw::models::Data first{}, second{};
     first.radio = {{0x12345678},
                    {0x87654321},
@@ -1726,10 +1722,6 @@ bool expanded_input_reboot() {
     setup.modes[6] = coretx::InputMode::six_position;
     const auto record = fw::input_storage::encode(setup, 3);
     std::copy(record.begin(), record.end(), c.eeprom.begin() + fw::input_storage::base_address);
-    fw::RadioSettings radio{};
-    radio.output = fw::RadioOutput::external;
-    const auto rf = fw::radio_storage::encode(radio, 3);
-    std::copy(rf.begin(), rf.end(), c.eeprom.begin() + fw::radio_storage::base_address);
     fw::Application<typename Test::Board> app{};
     (void)app.initialize();
     for (unsigned i = 0; i < 1000; ++i)
@@ -1789,13 +1781,12 @@ template <template <typename> typename BoardPolicy> bool logical_model_lifecycle
     c.eeprom.fill(0xFF);
     c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(0);
-    coretx::storage::State calibration{fw::diagnostic_model, {}};
-    calibration.setup.calibration.fill({0, 2048, 4095});
-    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
-    coretx::storage::Record record{};
-    if (!coretx::storage::encode(calibration, 0, record))
-        return false;
-    std::copy(record.begin(), record.end(), c.eeprom.begin());
+    coretx::ControlSetup calibration{};
+    calibration.calibration.fill({0, 2048, 4095});
+    calibration.mapping[0].reversed = calibration.mapping[1].reversed = true;
+    const auto record = coretx::firmware::calibration_storage::encode(calibration, 0);
+    std::copy(record.begin(), record.end(),
+              c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
     fw::models::Data data{};
     data.radio.transmitter = {0x12345678};
     data.radio.output = coretx::firmware::RadioOutput::off;
@@ -2023,13 +2014,12 @@ bool crsf_configuration_menu(const bool dashboard = false) {
     c.eeprom.fill(0xFF);
     c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
-    coretx::storage::State calibration{fw::diagnostic_model, {}};
-    calibration.setup.calibration.fill({0, 2048, 4095});
-    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
-    coretx::storage::Record record{};
-    if (!coretx::storage::encode(calibration, 0, record))
-        return false;
-    std::copy(record.begin(), record.end(), c.eeprom.begin());
+    coretx::ControlSetup calibration{};
+    calibration.calibration.fill({0, 2048, 4095});
+    calibration.mapping[0].reversed = calibration.mapping[1].reversed = true;
+    const auto record = coretx::firmware::calibration_storage::encode(calibration, 0);
+    std::copy(record.begin(), record.end(),
+              c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
     fw::models::Data data{};
     data.radio.transmitter = {0x12345678};
     data.model.crsf_dashboard = dashboard;
@@ -2154,13 +2144,12 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
     c.samples.fill(2048);
     c.touch_ready = true;
     c.touch_event = s::TouchEvent::sample;
-    coretx::storage::State calibration{fw::diagnostic_model, {}};
-    calibration.setup.calibration.fill({0, 2048, 4095});
-    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
-    coretx::storage::Record record{};
-    if (!coretx::storage::encode(calibration, 0, record))
-        return false;
-    std::copy(record.begin(), record.end(), c.eeprom.begin());
+    coretx::ControlSetup calibration{};
+    calibration.calibration.fill({0, 2048, 4095});
+    calibration.mapping[0].reversed = calibration.mapping[1].reversed = true;
+    const auto record = coretx::firmware::calibration_storage::encode(calibration, 0);
+    std::copy(record.begin(), record.end(),
+              c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
     fw::models::Data model{};
     model.radio.transmitter = {0x12345678};
     model.radio.output = coretx::firmware::RadioOutput::external;
@@ -2171,6 +2160,11 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
     model.model.multiswitch[1].controls[6].set_condition(
         {true, coretx::switch_count, coretx::SwitchPosition::down});
     model.model.crsf_dashboard = true;
+    // The last diagnostic mix follows M21, the first button of page 2.
+    auto &m21 = model.model.mixes[model.model.mixes.size() - 1];
+    m21.source = {coretx::SourceKind::switch_position,
+                  static_cast<std::uint8_t>(coretx::multiswitch_switch_base + 8), false};
+    const auto m21_channel = m21.destination;
     fw::models::Record model_record{};
     if (!fw::models::encode(model, 0, true, 0, model_record))
         return false;
@@ -2180,7 +2174,7 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
     for (unsigned i = 0; i < 300; ++i)
         (void)step(app, c, c.now + 1000U);
     if (!app.diagnostics().output_valid() || !c.powered ||
-        (app.diagnostics().dashboard_pages() != 5))
+        (app.diagnostics().dashboard_pages() != 5) || (c.tx_channels[m21_channel] >= 0))
         return false;
     const auto touch = [&](const unsigned x, const unsigned y, const bool pressed,
                            const s::Gesture gesture = s::Gesture::none) {
@@ -2246,6 +2240,8 @@ template <template <typename> typename BoardPolicy> bool multiswitch_dashboard()
             return false;
         press_key(app, c, Key::cancel);
     }
+    if (c.tx_channels[m21_channel] <= 0)
+        return false;
     next();
     if ((app.diagnostics().page() != 3) || (c.multiswitch_states[1] != 1) ||
         (c.multiswitch_states[3] != 0))
@@ -2465,13 +2461,13 @@ template <template <typename> typename BoardPolicy> bool active_model_background
         c.samples[0] = 0;
         c.touch_ready = true;
         c.touch_event = s::TouchEvent::sample;
-        coretx::storage::State calibration{fw::diagnostic_model, {}};
-        calibration.setup.calibration.fill({0, 2048, 4095});
-        calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
-        coretx::storage::Record calibration_record{};
-        if (!coretx::storage::encode(calibration, 0, calibration_record))
-            return false;
-        std::copy(calibration_record.begin(), calibration_record.end(), c.eeprom.begin());
+        coretx::ControlSetup calibration{};
+        calibration.calibration.fill({0, 2048, 4095});
+        calibration.mapping[0].reversed = calibration.mapping[1].reversed = true;
+        const auto calibration_record =
+            coretx::firmware::calibration_storage::encode(calibration, 0);
+        std::copy(calibration_record.begin(), calibration_record.end(),
+                  c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
         fw::models::Data data{};
         data.radio.transmitter = {0x12345678};
         data.radio.output =
@@ -2556,7 +2552,7 @@ template <template <typename> typename BoardPolicy> bool model_recovery_dialog()
             const auto &snapshot = model.model;
             codec::Writer out{std::span{record}.first(record.size() - 4), 34};
             if (!codec::transfer_model_counts(out, snapshot) ||
-                !codec::transfer_model_lines(out, snapshot, true) ||
+                !codec::transfer_model_lines(out, snapshot, true, false) ||
                 !codec::transfer_model_extension(out, snapshot) ||
                 !codec::transfer_multiswitch(out, snapshot, true) ||
                 !codec::transfer_dashboard_options(out, snapshot) ||
@@ -2719,13 +2715,12 @@ bool trim_application() {
         c.eeprom.fill(0xFF);
         c.adc_event = fw::ScanEvent::complete;
         c.samples.fill(2048);
-        coretx::storage::State calibration{fw::diagnostic_model, {}};
-        calibration.setup.calibration.fill({0, 2048, 4095});
-        calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
-        coretx::storage::Record record{};
-        if (!coretx::storage::encode(calibration, 0, record))
-            return false;
-        std::copy(record.begin(), record.end(), c.eeprom.begin());
+        coretx::ControlSetup calibration{};
+        calibration.calibration.fill({0, 2048, 4095});
+        calibration.mapping[0].reversed = calibration.mapping[1].reversed = true;
+        const auto record = coretx::firmware::calibration_storage::encode(calibration, 0);
+        std::copy(record.begin(), record.end(),
+                  c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
         coretx::InputSetup inputs{};
         inputs.trim_beep = trim_sound;
         const auto input_record = fw::input_storage::encode(inputs, 0);
@@ -2880,13 +2875,12 @@ bool external_module_inputs() {
     c.eeprom.fill(0xFF);
     c.adc_event = fw::ScanEvent::complete;
     c.samples.fill(2048);
-    coretx::storage::State calibration{fw::diagnostic_model, {}};
-    calibration.setup.calibration.fill({0, 2048, 4095});
-    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
-    coretx::storage::Record calibration_record{};
-    if (!coretx::storage::encode(calibration, 0, calibration_record))
-        return false;
-    std::copy(calibration_record.begin(), calibration_record.end(), c.eeprom.begin());
+    coretx::ControlSetup calibration{};
+    calibration.calibration.fill({0, 2048, 4095});
+    calibration.mapping[0].reversed = calibration.mapping[1].reversed = true;
+    const auto calibration_record = coretx::firmware::calibration_storage::encode(calibration, 0);
+    std::copy(calibration_record.begin(), calibration_record.end(),
+              c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
     coretx::InputSetup setup{true};
     setup.external_module = false;
     setup.set_digital_mode(2, coretx::DigitalInputMode::three_position);
@@ -2958,13 +2952,12 @@ bool setup_controls() {
     c.samples.fill(2048);
     c.touch_ready = true;
     c.touch_event = s::TouchEvent::sample;
-    coretx::storage::State calibration{fw::diagnostic_model, {}};
-    calibration.setup.calibration.fill({0, 2048, 4095});
-    calibration.setup.mapping[0].reversed = calibration.setup.mapping[1].reversed = true;
-    coretx::storage::Record record{};
-    if (!coretx::storage::encode(calibration, 0, record))
-        return false;
-    std::copy(record.begin(), record.end(), c.eeprom.begin());
+    coretx::ControlSetup calibration{};
+    calibration.calibration.fill({0, 2048, 4095});
+    calibration.mapping[0].reversed = calibration.mapping[1].reversed = true;
+    const auto record = coretx::firmware::calibration_storage::encode(calibration, 0);
+    std::copy(record.begin(), record.end(),
+              c.eeprom.begin() + coretx::firmware::calibration_storage::base_address);
     fw::models::Data model{};
     model.radio.transmitter = {0x12345678};
     model.radio.output = fw::features::crsf ? fw::RadioOutput::external : fw::RadioOutput::off;

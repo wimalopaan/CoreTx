@@ -328,6 +328,15 @@ class Diagnostics {
         if (changed)
             refresh(true);
     }
+    // MultiSwitch button states of the previous cycle; they act as M11..M48 switches.
+    constexpr void observe_multiswitch(const std::uint32_t states,
+                                       const std::uint32_t available) noexcept {
+        if ((multiswitch_ == states) && (multiswitch_available_ == available))
+            return;
+        multiswitch_ = states;
+        multiswitch_available_ = available;
+        refresh(true);
+    }
     [[nodiscard]] constexpr const ControlSetup &setup() const noexcept { return setup_; }
     [[nodiscard]] constexpr const PreparedControls &prepared() const noexcept { return prepared_; }
     [[nodiscard]] constexpr const Evaluation &evaluation() const noexcept { return evaluation_; }
@@ -589,6 +598,8 @@ class Diagnostics {
         if (rear_inputs_)
             controls.active_switches |= 3U << physical_switch_count;
         controls.trims = model_->trims;
+        controls.multiswitch = multiswitch_;
+        controls.multiswitch_available = multiswitch_available_;
         if constexpr (board::trim_buttons) {
             controls.active_switches |= std::uint32_t{model_->trim_switches}
                                         << physical_switch_count;
@@ -626,6 +637,8 @@ class Diagnostics {
     PreparedControls prepared_{};
     Evaluation evaluation_{};
     LogicalState logical_state_{};
+    std::uint32_t multiswitch_{};
+    std::uint32_t multiswitch_available_{};
     bool logical_commit_enabled_{true};
     std::array<SwitchPosition, physical_switch_count> candidate_{};
     std::array<TimestampUs, physical_switch_count> changed_{};

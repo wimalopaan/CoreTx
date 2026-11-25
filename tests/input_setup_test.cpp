@@ -68,17 +68,17 @@ void journal() {
     auto &memory = Test::context;
     Store failed;
     failed.service(TimestampUs{0}, {fw::StorageProbeState::failed, fw::I2cError::bus, 0});
-    CHECK(failed.loaded() && (failed.status() == fw::RadioStorageStatus::io_error) &&
+    CHECK(failed.loaded() && (failed.status() == fw::SettingsStatus::io_error) &&
           !failed.writable() && (failed.message() != nullptr));
     Store store{features::i6s};
     service(store);
-    CHECK((store.status() == fw::RadioStorageStatus::empty) && store.writable());
+    CHECK((store.status() == fw::SettingsStatus::empty) && store.writable());
     InputSetup first{features::i6s};
     first.modes[4] = InputMode::pot_detent;
     first.calibration[4] = {100, 1500, 4000};
     CHECK(store.save(first));
     service(store);
-    CHECK(store.status() == fw::RadioStorageStatus::saved);
+    CHECK(store.status() == fw::SettingsStatus::saved);
     const auto snapshot = memory;
     InputSetup second = first;
     second.extra_analog = true;
@@ -95,7 +95,7 @@ void journal() {
         CHECK(writing.save(second));
         service(writing);
         if (prefix < 4)
-            CHECK(!writing.writable() && (writing.status() == fw::RadioStorageStatus::io_error));
+            CHECK(!writing.writable() && (writing.status() == fw::SettingsStatus::io_error));
         struct RebootScenario {};
         using RebootTest = test::FakeApplication<RebootScenario, MemoryState, Memory>;
         RebootTest::reset();
@@ -138,13 +138,13 @@ void journal() {
               memory.bytes.begin() + fw::input_storage::base_address + 128);
     Store future;
     service(future);
-    CHECK((future.status() == fw::RadioStorageStatus::version) && !future.writable());
+    CHECK((future.status() == fw::SettingsStatus::version) && !future.writable());
     CHECK(!future.save(first));
     CHECK(!future.can_recover() && !future.recover());
     memory.bytes.fill(0);
     Store foreign;
     service(foreign);
-    CHECK((foreign.status() == fw::RadioStorageStatus::invalid) && !foreign.writable());
+    CHECK((foreign.status() == fw::SettingsStatus::invalid) && !foreign.writable());
     CHECK(!foreign.save(first));
     for (const auto generation : {0U, 0x80000000U, 0xFFFFFFFFU}) {
         memory = snapshot;
@@ -163,7 +163,7 @@ void journal() {
         if (generation == 0xFFFFFFFFU)
             CHECK(reboot.writable() && (reboot.setup() == first));
         else
-            CHECK(!reboot.writable() && (reboot.status() == fw::RadioStorageStatus::invalid));
+            CHECK(!reboot.writable() && (reboot.status() == fw::SettingsStatus::invalid));
     }
 }
 void newer_first_slot() {
@@ -182,7 +182,7 @@ void newer_first_slot() {
     // Slot 1 is decoded last; the newer slot 0 has to be read again.
     fw::InputStorage<Test::Board> store{features::i6s};
     service(store);
-    CHECK((store.status() == fw::RadioStorageStatus::ready) && store.writable());
+    CHECK((store.status() == fw::SettingsStatus::ready) && store.writable());
     CHECK(store.setup() == newer);
 }
 void recovery() {
@@ -207,20 +207,20 @@ void recovery() {
         memory = snapshot;
         Store store{features::i6s};
         service(store);
-        CHECK((store.status() == fw::RadioStorageStatus::invalid) && store.can_recover());
+        CHECK((store.status() == fw::SettingsStatus::invalid) && store.can_recover());
         memory.writes_left = prefix;
         CHECK(store.recover() && !store.loaded() && !store.writable());
         CHECK(store.owns_memory() && !store.recover());
         service(store);
         CHECK(store.loaded() && !store.owns_memory());
         if (prefix == 5) {
-            CHECK((store.status() == fw::RadioStorageStatus::saved) && store.writable());
+            CHECK((store.status() == fw::SettingsStatus::saved) && store.writable());
             CHECK(store.setup() == InputSetup{features::i6s});
             auto edited = store.setup();
             edited.modes[4] = InputMode::pot_detent;
             CHECK(store.save(edited));
         } else
-            CHECK((store.status() == fw::RadioStorageStatus::io_error) && !store.writable());
+            CHECK((store.status() == fw::SettingsStatus::io_error) && !store.writable());
         CHECK(
             std::equal(memory.bytes.begin(), memory.bytes.begin() + base, snapshot.bytes.begin()));
         CHECK(std::equal(memory.bytes.begin() + base + 256, memory.bytes.end(),
@@ -235,7 +235,7 @@ void recovery() {
             CHECK(reboot.writable());
             CHECK(reboot.setup() == (prefix == 1 ? old : InputSetup{features::i6s}));
         } else
-            CHECK((reboot.status() == fw::RadioStorageStatus::invalid) && !reboot.writable());
+            CHECK((reboot.status() == fw::SettingsStatus::invalid) && !reboot.writable());
     }
     memory = snapshot;
     Store verification{features::i6s};
@@ -247,7 +247,7 @@ void recovery() {
     CHECK(memory.writes_left == 95);
     memory.bytes[base + 14] ^= 1;
     service(verification);
-    CHECK((verification.status() == fw::RadioStorageStatus::verify) && !verification.writable());
+    CHECK((verification.status() == fw::SettingsStatus::verify) && !verification.writable());
 
     fw::Diagnostics diagnostics{features::i6s};
     fw::InputMenu menu;
@@ -391,12 +391,17 @@ void decoding() {
     editor.handle(ui::Key::enter, model, controls);
     CHECK((model.inputs[0].condition.index == 2) &&
           (model.inputs[0].condition.position == SwitchPosition::pos1));
-    editor.handle(ui::Key::right, model, controls);
     editor.handle(ui::Key::enter, model, controls);
-    for (unsigned i = 0; i < 10; ++i)
+    for (unsigned i = 0; i < 5; ++i)
         editor.handle(ui::Key::right, model, controls);
     editor.handle(ui::Key::enter, model, controls);
-    CHECK(model.inputs[0].condition.position == SwitchPosition::pos6);
+    CHECK((model.inputs[0].condition.index == 2) &&
+          (model.inputs[0].condition.position == SwitchPosition::pos6));
+    editor.handle(ui::Key::enter, model, controls);
+    editor.handle(ui::Key::right, model, controls);
+    editor.handle(ui::Key::enter, model, controls);
+    CHECK((model.inputs[0].condition.index != 2) &&
+          (model.inputs[0].condition.position != SwitchPosition::middle));
     fw::InputMenu menu;
     menu.open();
     CHECK(menu.handle(fw::Key::ok, diagnostics, fw::RadioOutput::external, true, false, nullptr) ==
@@ -751,7 +756,7 @@ void digital_configuration() {
         const auto choice = fw::menu_detail::condition_choice(
             {true, static_cast<std::uint8_t>(auxiliary_count + pair), SwitchPosition::up, false});
         CHECK(fw::menu_detail::select_condition(
-                  fw::menu_detail::change_condition(choice, 1, diagnostics), false)
+                  fw::menu_detail::change_condition(choice, 1, diagnostics))
                   .position == SwitchPosition::middle);
         std::uint32_t now = 100'000;
         for (const auto contacts : {1U, 2U, 0U, 3U, 1U}) {

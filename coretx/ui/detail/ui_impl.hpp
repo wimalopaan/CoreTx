@@ -31,12 +31,13 @@ constexpr int touch_zone(const int x, const int y) noexcept {
 inline constexpr std::array<std::string_view, analog_count> analog_names{
     "AIL", "ELE", "THR", "RUD", "VRA", "VRB", "SA",  "SB",
     "SC",  "SD",  "VRC", "VRD", "VRE", "VRF", "VRG", "A16"};
-inline constexpr std::array<std::string_view, 12> input_fields{
-    "SOURCE", "WEIGHT %", "EXPO %", "OFFSET %", "TRIM",   "SIDE",
-    "INVERT", "TARGET",   "SWITCH", "SW POS",   "SW NOT", "CURVE"};
-inline constexpr std::array<std::string_view, 11> mix_fields{
-    "SOURCE", "WEIGHT %", "OFFSET %", "MODE",   "TRIM", "INVERT",
-    "TARGET", "SWITCH",   "SW POS",   "SW NOT", "CURVE"};
+inline constexpr std::array<std::string_view, 10> input_fields{
+    "SOURCE", "WEIGHT %", "EXPO %", "OFFSET %", "TRIM",
+    "SIDE",   "INVERT",   "TARGET", "SWITCH",   "CURVE"};
+inline constexpr std::array<std::string_view, 9> mix_fields{
+    "SOURCE", "WEIGHT %", "OFFSET %", "MODE", "TRIM", "INVERT", "TARGET", "SWITCH", "CURVE"};
+inline constexpr std::uint8_t input_curve_field = 9;
+inline constexpr std::uint8_t mix_curve_field = 8;
 inline constexpr std::array<std::string_view, 2> curve_fields{"X %", "Y %"};
 #if CORETX_MODUL_TANKMIX
 inline constexpr std::array<std::string_view, 11> tank_fields{
@@ -50,8 +51,9 @@ inline constexpr std::array<std::string_view, 5> action_names{"ADD", "DUPLICATE"
                                                               "MOVE UP", "MOVE DOWN"};
 
 constexpr int extra_field(const Page &page, const std::uint8_t field) noexcept {
-    return (page == Page::inputs) && (field >= 7) && (field <= 10) ? static_cast<int>(field) - 7
-           : (page == Page::mixes) && (field >= 6) && (field <= 9) ? static_cast<int>(field) - 6
+    // 0 target, 1 switch condition.
+    return (page == Page::inputs) && (field >= 7) && (field <= 8)  ? static_cast<int>(field) - 7
+           : (page == Page::mixes) && (field >= 6) && (field <= 7) ? static_cast<int>(field) - 6
                                                                    : -1;
 }
 
@@ -228,16 +230,24 @@ constexpr int field_count(const Page &page) noexcept {
     return 0;
 }
 
+// Choices: analogs, switches/trim rockers, M11..M48, MAX, then inputs.
+inline constexpr int source_switch_choices =
+    static_cast<int>(switch_count + multiswitch_switch_count);
+inline constexpr int source_choices = static_cast<int>(analog_count) + source_switch_choices + 1;
+
 constexpr int source_choice(const Source &source, const bool allow_inputs) noexcept {
     switch (source.kind) {
     case SourceKind::analog:
         return source.index;
     case SourceKind::switch_position:
-        return static_cast<int>(analog_count) + source.index;
+        return static_cast<int>(analog_count) +
+               (multiswitch_index(source.index)
+                    ? source.index - static_cast<int>(logical_switch_count)
+                    : source.index);
     case SourceKind::maximum:
-        return static_cast<int>(analog_count + switch_count);
+        return source_choices - 1;
     case SourceKind::input:
-        return allow_inputs ? static_cast<int>(analog_count + switch_count + 1) + source.index : 0;
+        return allow_inputs ? source_choices + source.index : 0;
     }
     return 0;
 }
@@ -247,14 +257,16 @@ constexpr Source select_source(int choice, const bool inverted) noexcept {
         return {SourceKind::analog, static_cast<std::uint8_t>(choice), inverted};
     }
     choice -= static_cast<int>(analog_count);
-    if (choice < static_cast<int>(switch_count)) {
+    if (choice < source_switch_choices) {
+        if (choice >= static_cast<int>(switch_count))
+            choice += static_cast<int>(logical_switch_count);
         return {SourceKind::switch_position, static_cast<std::uint8_t>(choice), inverted};
     }
-    if (choice == static_cast<int>(switch_count)) {
+    if (choice == source_switch_choices) {
         return {SourceKind::maximum, 0, inverted};
     }
-    return {SourceKind::input,
-            static_cast<std::uint8_t>(choice - static_cast<int>(switch_count) - 1), inverted};
+    return {SourceKind::input, static_cast<std::uint8_t>(choice - source_switch_choices - 1),
+            inverted};
 }
 
 constexpr void indexed_label(Framebuffer &display, const int x, const int y,
@@ -277,10 +289,14 @@ constexpr void draw_source(Framebuffer &display, const int x, const int y, const
         indexed_label(display, x, y, "I", source.index, ink);
         break;
     case SourceKind::switch_position: {
-        if ((source.index >= switch_count) &&
-            (source.index < (switch_count + logical_switch_count)))
+        if (logical_index(source.index))
             indexed_label(display, x, y, "L", source.index - switch_count, ink);
-        else
+        else if (multiswitch_index(source.index)) {
+            const auto index = source.index - multiswitch_switch_base;
+            const char label[]{'M', static_cast<char>('1' + index / multiswitch_function_count),
+                               static_cast<char>('1' + index % multiswitch_function_count)};
+            display.text(x, y, {label, sizeof(label)}, ink);
+        } else
             display.text(
                 x, y, names && (source.index < switch_count) ? (*names)[source.index] : "?", ink);
         break;
@@ -526,11 +542,7 @@ constexpr int Interface::value(const Model &model, const std::uint8_t field) con
                    : page_ == Page::inputs                 ? model.inputs[selected].destination
                                                            : model.mixes[selected].destination;
         case 1:
-            return condition.enabled ? condition.index + 1 : 0;
-        case 2:
-            return static_cast<int>(condition.position);
-        case 3:
-            return condition.inverted;
+            return detail::condition_choice(condition);
         }
     }
     if (page_ == Page::inputs) {
@@ -550,7 +562,7 @@ constexpr int Interface::value(const Model &model, const std::uint8_t field) con
             return static_cast<int>(line.side);
         case 6:
             return line.source.inverted;
-        case 11:
+        case detail::input_curve_field:
             return line.curve;
         }
     } else if (page_ == Page::mixes) {
@@ -568,7 +580,7 @@ constexpr int Interface::value(const Model &model, const std::uint8_t field) con
             return line.carry_trim;
         case 5:
             return line.source.inverted;
-        case 10:
+        case detail::mix_curve_field:
             return line.curve;
         }
     } else if (page_ == Page::outputs) {
@@ -646,22 +658,7 @@ constexpr void Interface::set_value(Model &model, const int value) noexcept {
             pending_destination_ = value;
             break;
         case 1:
-            condition.enabled = value != 0;
-            if (condition.enabled) {
-                condition.index = static_cast<std::uint8_t>(value - 1);
-                const bool six = (six_position_sources_ & (1U << condition.index)) != 0;
-                condition.position =
-                    condition.index >= switch_count
-                        ? SwitchPosition::down
-                        : static_cast<SwitchPosition>(std::clamp(
-                              static_cast<int>(condition.position), six ? 2 : -1, six ? 7 : 1));
-            }
-            break;
-        case 2:
-            condition.position = static_cast<SwitchPosition>(value);
-            break;
-        case 3:
-            condition.inverted = value != 0;
+            condition = detail::select_condition(value);
             break;
         }
         return;
@@ -690,7 +687,7 @@ constexpr void Interface::set_value(Model &model, const int value) noexcept {
         case 6:
             line.source.inverted = value != 0;
             break;
-        case 11:
+        case detail::input_curve_field:
             line.curve = static_cast<std::uint8_t>(value);
             break;
         }
@@ -715,7 +712,7 @@ constexpr void Interface::set_value(Model &model, const int value) noexcept {
         case 5:
             line.source.inverted = value != 0;
             break;
-        case 10:
+        case detail::mix_curve_field:
             line.curve = static_cast<std::uint8_t>(value);
             break;
         }
@@ -753,20 +750,15 @@ constexpr void Interface::change(Model &model, const int direction, const bool c
     if (extra == 0) {
         maximum = static_cast<int>(page_ == Page::inputs ? input_count : channel_count) - 1;
     } else if (extra == 1) {
-        maximum = static_cast<int>(switch_count + logical_switch_count);
-    } else if (extra == 2) {
-        const auto &condition = page_ == Page::inputs ? model.inputs[row(model)].condition
-                                                      : model.mixes[row(model)].condition;
-        const bool six = (six_position_sources_ & (1U << condition.index)) != 0;
-        minimum = six ? 2 : -1;
-        maximum = six ? 7 : 1;
-        if (condition.index >= switch_count)
-            step = 2;
-    } else if (extra == 3) {
-        maximum = 1;
+        const auto current = value(model);
+        const auto next =
+            detail::step_condition(current, direction, switch_choices(model), condition_count);
+        if (next != current)
+            set_value(model, next);
+        return;
     } else if (page_ == Page::inputs) {
         if (field == 0) {
-            maximum = static_cast<int>(analog_count + switch_count);
+            maximum = detail::source_choices - 1;
         } else if ((field >= 1) && (field <= 3)) {
             constexpr std::array minima{InputWeight::minimum, ExpoPercent::minimum,
                                         InputOffset::minimum};
@@ -779,19 +771,19 @@ constexpr void Interface::change(Model &model, const int direction, const bool c
             maximum = static_cast<int>(TrimSource::stick4);
         } else if (field == 5) {
             maximum = static_cast<int>(InputSide::positive);
-        } else if (field == 11) {
+        } else if (field == detail::input_curve_field) {
             maximum = static_cast<int>(curve_count);
         }
     } else if (page_ == Page::mixes) {
         if (field == 0) {
-            maximum = static_cast<int>(analog_count + switch_count + input_count);
+            maximum = detail::source_choices + static_cast<int>(input_count) - 1;
         } else if ((field == 1) || (field == 2)) {
             minimum = field == 1 ? MixWeight::minimum : MixOffset::minimum;
             maximum = field == 1 ? MixWeight::maximum : MixOffset::maximum;
             step = coarse ? 10 : 1;
         } else if (field == 3) {
             maximum = static_cast<int>(Multiplex::replace);
-        } else if (field == 10) {
+        } else if (field == detail::mix_curve_field) {
             maximum = static_cast<int>(curve_count);
         }
     } else if ((page_ == Page::outputs) && (field < 3)) {
@@ -830,25 +822,19 @@ constexpr void Interface::change(Model &model, const int direction, const bool c
     }
 #endif
     int next = std::clamp(value(model) + direction * step, minimum, maximum);
-    if ((extra == 1) || (line_page() && (field == 0))) {
+    if (line_page() && (field == 0)) {
+        const auto choices = switch_choices(model);
         for (;;) {
-            bool available{};
-            if (extra == 1)
-                available =
-                    (next == 0) ||
-                    ((next > static_cast<int>(switch_count)) &&
-                     (model.logical_switches[static_cast<std::size_t>(next - 1) - switch_count]
-                          .function != LogicalFunction::disabled)) ||
-                    ((next <= static_cast<int>(switch_count)) &&
-                     ((switch_sources_ & (1U << (next - 1))) != 0));
-            else {
-                const auto source = detail::select_source(next, false);
-                available = source.kind == SourceKind::analog
-                                ? (analog_sources_ & (1U << source.index)) != 0
-                            : source.kind == SourceKind::switch_position
-                                ? (switch_sources_ & (1U << source.index)) != 0
-                                : true;
-            }
+            const auto source = detail::select_source(next, false);
+            const bool available =
+                source.kind == SourceKind::analog ? (analog_sources_ & (1U << source.index)) != 0
+                : source.kind == SourceKind::switch_position
+                    ? (source.index < switch_count ? (choices.switches & (1U << source.index)) != 0
+                       : multiswitch_index(source.index)
+                           ? (choices.multiswitch &
+                              (1U << (source.index - multiswitch_switch_base))) != 0
+                           : false)
+                    : true;
             if (available)
                 break;
             next += direction;
@@ -857,6 +843,15 @@ constexpr void Interface::change(Model &model, const int direction, const bool c
         }
     }
     set_value(model, next);
+}
+
+constexpr detail::SwitchChoices Interface::switch_choices(const Model &model) const noexcept {
+    detail::SwitchChoices choices{switch_sources_, six_position_sources_, three_position_sources_,
+                                  multiswitch_sources_, 0};
+    for (std::size_t i = 0; i < logical_switch_count; ++i)
+        if (model.logical_switches[i].function != LogicalFunction::disabled)
+            choices.logical |= static_cast<std::uint8_t>(1U << i);
+    return choices;
 }
 
 constexpr bool Interface::line_page() const noexcept {
@@ -1463,26 +1458,12 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
                 detail::indexed_label(display, 98, y, input ? "I" : "CH", shown, ink);
             } else if (extra == 1) {
                 if (condition.enabled) {
-                    detail::draw_source(display, 98, y,
-                                        {SourceKind::switch_position, condition.index, false}, ink,
-                                        switch_names_);
+                    std::array<char, 6> buffer{};
+                    display.text(98, y, detail::condition_label(condition, buffer, switch_names_),
+                                 ink);
                 } else {
                     display.text(104, y, "OFF", ink);
                 }
-            } else if (extra == 2) {
-                if (condition.position >= SwitchPosition::pos1) {
-                    const char position[]{
-                        static_cast<char>('1' + static_cast<int>(condition.position) -
-                                          static_cast<int>(SwitchPosition::pos1))};
-                    display.text(98, y, {position, sizeof(position)}, ink);
-                } else
-                    display.text(98, y,
-                                 condition.position == SwitchPosition::up       ? "UP"
-                                 : condition.position == SwitchPosition::middle ? "MID"
-                                                                                : "DOWN",
-                                 ink);
-            } else if (extra == 3) {
-                display.text(104, y, condition.inverted ? "YES" : "NO", ink);
             } else if (field == 0) {
                 detail::draw_source(display, 98, y, source, ink, switch_names_);
             } else if (input) {
@@ -1510,7 +1491,7 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
                 case 6:
                     display.text(104, y, source.inverted ? "YES" : "NO", ink);
                     break;
-                case 11:
+                case detail::input_curve_field:
                     if (item.curve == 0)
                         display.text(104, y, "OFF", ink);
                     else
@@ -1539,7 +1520,7 @@ constexpr void Interface::render(const Model &model, const Controls &controls,
                 case 5:
                     display.text(104, y, source.inverted ? "YES" : "NO", ink);
                     break;
-                case 10:
+                case detail::mix_curve_field:
                     if (item.curve == 0)
                         display.text(104, y, "OFF", ink);
                     else

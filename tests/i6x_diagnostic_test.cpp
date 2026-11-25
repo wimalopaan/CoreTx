@@ -2086,7 +2086,10 @@ struct PersistenceFixture : coretx::test::RegisterFixture<Scenario, EepromRegist
     }
 };
 
-coretx::Model calibration_workspace{};
+namespace cal = hw::calibration_storage;
+constexpr std::size_t cal_first = cal::base_address;
+constexpr std::size_t cal_second = cal::base_address + cal::record_size;
+constexpr std::size_t cal_end = cal::base_address + 2U * cal::record_size;
 
 template <typename Probe, typename Storage>
 bool run_persistence(EepromRegisters &io, Storage &storage, hw::Diagnostics &diagnostics) {
@@ -2094,8 +2097,7 @@ bool run_persistence(EepromRegisters &io, Storage &storage, hw::Diagnostics &dia
         io.cell(reg::tim2_cnt) += 100;
         const auto now = io.now_us();
         Probe::service(coretx::TimestampUs{now});
-        storage.service(coretx::TimestampUs{now}, Probe::result(), diagnostics,
-                        calibration_workspace);
+        storage.service(coretx::TimestampUs{now}, Probe::result(), diagnostics);
         if (!storage.busy()) {
             return true;
         }
@@ -2114,12 +2116,20 @@ void apply_calibration(hw::Diagnostics &diagnostics, Storage &storage,
     storage.handle(hw::Key::ok, diagnostics);
 }
 
+[[nodiscard]] bool outside_calibration(const std::array<std::uint8_t, 16384> &memory,
+                                       const std::uint8_t value) {
+    const auto same = [value](const auto byte) { return byte == value; };
+    return std::all_of(memory.begin(), memory.begin() + cal_first, same) &&
+           std::all_of(memory.begin() + cal_end, memory.end(), same);
+}
+
 bool persistent_calibration() {
     struct IoTestScenario {};
     using IoTest = PersistenceFixture<IoTestScenario>;
     IoTest::reset();
     auto &io = IoTest::registers;
-    std::fill(io.memory.begin() + 2U * coretx::storage::slot_size, io.memory.end(), 0xA6);
+    std::fill(io.memory.begin(), io.memory.begin() + cal_first, 0xA6);
+    std::fill(io.memory.begin() + cal_end, io.memory.end(), 0xA6);
     using Probe = IoTest::Probe;
     hw::Diagnostics diagnostics{};
     IoTest::Storage storage{};
@@ -2127,7 +2137,7 @@ bool persistent_calibration() {
     storage.handle(hw::Key::ok, diagnostics);
     if ((diagnostics.phase() != hw::CalibrationPhase::idle) ||
         !run_persistence<Probe>(io, storage, diagnostics) ||
-        (storage.state() != hw::CalibrationStorageState::empty) || diagnostics.calibrated() ||
+        (storage.status() != hw::SettingsStatus::empty) || diagnostics.calibrated() ||
         (io.payload_writes != 0)) {
         return false;
     }
@@ -2141,11 +2151,11 @@ bool persistent_calibration() {
     }
     storage.handle(hw::Key::cancel, diagnostics);
     apply_calibration(diagnostics, storage);
-    if ((storage.state() != hw::CalibrationStorageState::saving) || !diagnostics.calibrated() ||
+    if (!storage.busy() || !diagnostics.calibrated() ||
         !run_persistence<Probe>(io, storage, diagnostics) ||
-        (storage.state() != hw::CalibrationStorageState::saved) || (storage.generation() != 0) ||
-        io.page_crossed || (io.payload_writes != (coretx::storage::slot_size + 1U)) ||
-        (io.ready_polls <= 17U)) {
+        (storage.status() != hw::SettingsStatus::saved) || (storage.generation() != 0) ||
+        io.page_crossed || (io.payload_writes != (cal::record_size + 1U)) ||
+        (std::string_view{storage.label(true)} != coretx::ui::tr::ok_cal)) {
         return false;
     }
     struct RebootTestScenario {};
@@ -2158,8 +2168,9 @@ bool persistent_calibration() {
     hw::Diagnostics restored{};
     NextProbe::initialize();
     if (!run_persistence<NextProbe>(reboot, next_storage, restored) ||
-        (next_storage.state() != hw::CalibrationStorageState::loaded) || !restored.calibrated() ||
-        (reboot.payload_writes != 0) || (restored.setup().calibration[0].minimum != 400)) {
+        (next_storage.status() != hw::SettingsStatus::ready) || !restored.calibrated() ||
+        (reboot.payload_writes != 0) ||
+        (restored.setup().calibration != diagnostics.setup().calibration)) {
         return false;
     }
     restored.observe(stock_samples(400), coretx::TimestampUs{0});
@@ -2168,23 +2179,17 @@ bool persistent_calibration() {
     }
     apply_calibration(restored, next_storage, 600);
     if (!run_persistence<NextProbe>(reboot, next_storage, restored) ||
-        (next_storage.state() != hw::CalibrationStorageState::saved) ||
-        (next_storage.generation() != 1) ||
-        !std::equal(io.memory.begin(), io.memory.begin() + coretx::storage::slot_size,
-                    reboot.memory.begin())) {
+        (next_storage.status() != hw::SettingsStatus::saved) || (next_storage.generation() != 1) ||
+        !std::equal(io.memory.begin() + cal_first, io.memory.begin() + cal_second,
+                    reboot.memory.begin() + cal_first)) {
         return false;
     }
-    coretx::storage::State decoded{};
-    const auto selected = coretx::storage::select(
-        std::span{reboot.memory}.first(coretx::storage::slot_size),
-        std::span{reboot.memory}.subspan(coretx::storage::slot_size, coretx::storage::slot_size));
-    return selected && (selected.slot == 1) &&
-           std::all_of(reboot.memory.begin() + 2U * coretx::storage::slot_size, reboot.memory.end(),
-                       [](const auto value) { return value == 0xA6; }) &&
-           coretx::storage::decode(std::span{reboot.memory}.subspan(coretx::storage::slot_size,
-                                                                    coretx::storage::slot_size),
-                                   decoded) &&
-           (decoded.setup.calibration[0].minimum == 600);
+    cal::Record second{};
+    std::copy_n(reboot.memory.begin() + cal_second, second.size(), second.begin());
+    const auto decoded = cal::decode(second);
+    return decoded.valid() && (decoded.generation == 1) &&
+           (decoded.setup.calibration[0].minimum == 600) &&
+           outside_calibration(reboot.memory, 0xA6);
 }
 
 bool persistence_failures() {
@@ -2199,8 +2204,8 @@ bool persistence_failures() {
         hw::Diagnostics diagnostics{};
         Probe::initialize();
         if (!run_persistence<Probe>(io, storage, diagnostics) ||
-            (storage.state() != (responders == 0 ? hw::CalibrationStorageState::not_found
-                                                 : hw::CalibrationStorageState::multiple))) {
+            (storage.status() !=
+             (responders == 0 ? hw::SettingsStatus::missing : hw::SettingsStatus::multiple))) {
             return false;
         }
         apply_calibration(diagnostics, storage);
@@ -2225,9 +2230,9 @@ bool persistence_failures() {
         io.never_ready = !protect;
         apply_calibration(diagnostics, storage);
         if (!run_persistence<Probe>(io, storage, diagnostics) ||
-            (storage.state() != (protect ? hw::CalibrationStorageState::verify_error
-                                         : hw::CalibrationStorageState::io_error)) ||
-            (!protect && (storage.error() != hw::I2cError::timeout)) ||
+            (storage.status() !=
+             (protect ? hw::SettingsStatus::verify : hw::SettingsStatus::io_error)) ||
+            (!protect && (IoTest::Memory::error() != hw::I2cError::timeout)) ||
             (std::string_view{storage.label(true)} != coretx::ui::tr::ram_cal)) {
             return false;
         }
@@ -2243,23 +2248,17 @@ bool persistence_failures() {
 bool persistence_recovery() {
     hw::Diagnostics calibrated{};
     calibrate(calibrated);
-    coretx::storage::State snapshot{hw::diagnostic_model, calibrated.setup()};
-    coretx::storage::Record first{};
-    coretx::storage::Record second{};
-    if (!coretx::storage::encode(snapshot, 7, first)) {
-        return false;
-    }
-    snapshot.setup.calibration[0].minimum = 600;
-    if (!coretx::storage::encode(snapshot, 8, second)) {
-        return false;
-    }
-    for (const auto cut : std::array<std::size_t, 7>{0, 1, 64, 500, 961, 1000, 1025}) {
+    auto setup = calibrated.setup();
+    const auto first = cal::encode(setup, 7);
+    setup.calibration[0].minimum = 600;
+    auto second = cal::encode(setup, 8);
+    for (const auto cut : std::array<std::size_t, 7>{0, 1, 2, 32, 63, 64, 65}) {
         struct IoTestScenario {};
         using IoTest = PersistenceFixture<IoTestScenario>;
         IoTest::reset();
         auto &io = IoTest::registers;
-        std::copy(first.begin(), first.end(), io.memory.begin());
-        std::copy(first.begin(), first.end(), io.memory.begin() + coretx::storage::slot_size);
+        std::copy(first.begin(), first.end(), io.memory.begin() + cal_first);
+        std::copy(first.begin(), first.end(), io.memory.begin() + cal_second);
         using Probe = IoTest::Probe;
         IoTest::Storage storage{};
         hw::Diagnostics diagnostics{};
@@ -2270,8 +2269,7 @@ bool persistence_recovery() {
         apply_calibration(diagnostics, storage, 600);
         for (std::size_t step = 0; (io.payload_writes < cut) && (step < 30'000); ++step) {
             io.cell(reg::tim2_cnt) += 100;
-            storage.service(coretx::TimestampUs{io.now_us()}, Probe::result(), diagnostics,
-                            calibration_workspace);
+            storage.service(coretx::TimestampUs{io.now_us()}, Probe::result(), diagnostics);
         }
         struct RebootTestScenario {};
         using RebootTest = PersistenceFixture<RebootTestScenario>;
@@ -2283,93 +2281,100 @@ bool persistence_recovery() {
         hw::Diagnostics restored{};
         NextProbe::initialize();
         if (!run_persistence<NextProbe>(reboot, next_storage, restored) ||
-            (next_storage.state() != hw::CalibrationStorageState::loaded) ||
-            !restored.calibrated() ||
+            (next_storage.status() != hw::SettingsStatus::ready) || !restored.calibrated() ||
             ((restored.setup().calibration[0].minimum != 400) &&
              (restored.setup().calibration[0].minimum != 600))) {
             return false;
         }
     }
     // Corrupt the newer slot; the intact older one must still load.
-    second[100] ^= 1U;
+    second[20] ^= 1U;
     struct IoTestScenario {};
     using IoTest = PersistenceFixture<IoTestScenario>;
     IoTest::reset();
     auto &io = IoTest::registers;
-    std::copy(first.begin(), first.end(), io.memory.begin());
-    std::copy(second.begin(), second.end(), io.memory.begin() + coretx::storage::slot_size);
+    std::copy(first.begin(), first.end(), io.memory.begin() + cal_first);
+    std::copy(second.begin(), second.end(), io.memory.begin() + cal_second);
     using Probe = IoTest::Probe;
     IoTest::Storage storage{};
     hw::Diagnostics restored{};
     Probe::initialize();
     if (!run_persistence<Probe>(io, storage, restored) ||
-        (storage.state() != hw::CalibrationStorageState::loaded) || (storage.generation() != 7) ||
+        (storage.status() != hw::SettingsStatus::ready) || (storage.generation() != 7) ||
         (restored.setup().calibration[0].minimum != 400)) {
         return false;
     }
-    // Reject a CRC-correct but physically impossible stock calibration.
-    snapshot.setup.calibration[0].maximum = 6000;
-    if (!coretx::storage::encode(snapshot, 9, first)) {
-        return false;
-    }
+    // Reject a CRC-correct but physically impossible stock calibration without writing.
+    setup.calibration[0].maximum = 6000;
+    const auto impossible = cal::encode(setup, 9);
     struct InvalidIoTestScenario {};
     using InvalidIoTest = PersistenceFixture<InvalidIoTestScenario>;
     InvalidIoTest::reset();
     auto &invalid_io = InvalidIoTest::registers;
-    std::copy(first.begin(), first.end(), invalid_io.memory.begin());
+    std::copy(impossible.begin(), impossible.end(), invalid_io.memory.begin() + cal_first);
     using InvalidProbe = InvalidIoTest::Probe;
     InvalidIoTest::Storage invalid_storage{};
     hw::Diagnostics invalid_diagnostics{};
     InvalidProbe::initialize();
-    return run_persistence<InvalidProbe>(invalid_io, invalid_storage, invalid_diagnostics) &&
-           (invalid_storage.state() == hw::CalibrationStorageState::invalid) &&
-           (invalid_storage.record_error() == coretx::storage::Error::setup) &&
-           !invalid_diagnostics.calibrated() && (invalid_io.payload_writes == 0);
+    if (!run_persistence<InvalidProbe>(invalid_io, invalid_storage, invalid_diagnostics) ||
+        (invalid_storage.status() != hw::SettingsStatus::invalid) ||
+        invalid_diagnostics.calibrated() || (invalid_io.payload_writes != 0))
+        return false;
+    // A new calibration replaces the rejected record in the other slot.
+    apply_calibration(invalid_diagnostics, invalid_storage, 600);
+    if (!run_persistence<InvalidProbe>(invalid_io, invalid_storage, invalid_diagnostics) ||
+        (invalid_storage.status() != hw::SettingsStatus::saved) ||
+        (invalid_storage.generation() != 10))
+        return false;
+    struct ReplacedScenario {};
+    using Replaced = PersistenceFixture<ReplacedScenario>;
+    Replaced::reset();
+    Replaced::registers.memory = invalid_io.memory;
+    Replaced::Storage replaced{};
+    hw::Diagnostics replaced_diagnostics{};
+    Replaced::Probe::initialize();
+    return run_persistence<Replaced::Probe>(Replaced::registers, replaced, replaced_diagnostics) &&
+           (replaced.status() == hw::SettingsStatus::ready) && replaced_diagnostics.calibrated() &&
+           (replaced_diagnostics.setup().calibration[0].minimum == 600);
 }
 
 bool persistence_slot_selection() {
     hw::Diagnostics calibrated{};
     calibrate(calibrated);
-    coretx::storage::State newer{hw::diagnostic_model, calibrated.setup()};
-    newer.model.crsf_dashboard = !hw::diagnostic_model.crsf_dashboard;
-    coretx::storage::State older{hw::diagnostic_model, calibrated.setup()};
-    older.setup.calibration[0].minimum = 600;
-    coretx::storage::Record first{};
-    coretx::storage::Record second{};
-    if (!coretx::storage::encode(newer, 9, first) || !coretx::storage::encode(older, 8, second))
-        return false;
+    auto older_setup = calibrated.setup();
+    older_setup.calibration[0].minimum = 600;
+    const auto first = cal::encode(calibrated.setup(), 9);
+    auto second = cal::encode(older_setup, 8);
     // Slot 1 is decoded last, so a winning slot 0 must be read again into the shared buffer.
     struct NewerFirstScenario {};
     using NewerFirst = PersistenceFixture<NewerFirstScenario>;
     NewerFirst::reset();
-    std::copy(first.begin(), first.end(), NewerFirst::registers.memory.begin());
-    std::copy(second.begin(), second.end(),
-              NewerFirst::registers.memory.begin() + coretx::storage::slot_size);
+    std::copy(first.begin(), first.end(), NewerFirst::registers.memory.begin() + cal_first);
+    std::copy(second.begin(), second.end(), NewerFirst::registers.memory.begin() + cal_second);
     NewerFirst::Storage storage{};
     hw::Diagnostics restored{};
     NewerFirst::Probe::initialize();
     if (!run_persistence<NewerFirst::Probe>(NewerFirst::registers, storage, restored) ||
-        (storage.state() != hw::CalibrationStorageState::loaded) || (storage.generation() != 9) ||
-        !storage.legacy_loaded() || (restored.setup().calibration[0].minimum == 600) ||
-        (calibration_workspace.crsf_dashboard != newer.model.crsf_dashboard)) {
+        (storage.status() != hw::SettingsStatus::ready) || (storage.generation() != 9) ||
+        (restored.setup().calibration != calibrated.setup().calibration)) {
         return false;
     }
-    // Equal generations with different contents stay ambiguous.
-    if (!coretx::storage::encode(older, 9, second))
-        return false;
+    // Equal generations with different contents stay ambiguous and are never overwritten.
+    second = cal::encode(older_setup, 9);
     struct AmbiguousScenario {};
     using Ambiguous = PersistenceFixture<AmbiguousScenario>;
     Ambiguous::reset();
-    std::copy(first.begin(), first.end(), Ambiguous::registers.memory.begin());
-    std::copy(second.begin(), second.end(),
-              Ambiguous::registers.memory.begin() + coretx::storage::slot_size);
+    std::copy(first.begin(), first.end(), Ambiguous::registers.memory.begin() + cal_first);
+    std::copy(second.begin(), second.end(), Ambiguous::registers.memory.begin() + cal_second);
     Ambiguous::Storage ambiguous{};
     hw::Diagnostics untouched{};
     Ambiguous::Probe::initialize();
-    return run_persistence<Ambiguous::Probe>(Ambiguous::registers, ambiguous, untouched) &&
-           (ambiguous.state() == hw::CalibrationStorageState::invalid) &&
-           (ambiguous.record_error() == coretx::storage::Error::generation) &&
-           !ambiguous.legacy_loaded() && !untouched.calibrated();
+    if (!run_persistence<Ambiguous::Probe>(Ambiguous::registers, ambiguous, untouched) ||
+        (ambiguous.status() != hw::SettingsStatus::invalid) || untouched.calibrated())
+        return false;
+    apply_calibration(untouched, ambiguous);
+    return untouched.calibrated() && !ambiguous.busy() &&
+           (Ambiguous::registers.payload_writes == 0);
 }
 
 bool eeprom_transactions() {
@@ -2437,74 +2442,30 @@ bool eeprom_transactions() {
 bool persistence_format_protection() {
     hw::Diagnostics calibrated{};
     calibrate(calibrated);
-    const coretx::storage::State snapshot{hw::diagnostic_model, calibrated.setup()};
-    coretx::storage::Record record{};
-    if (!coretx::storage::encode(snapshot, 3, record)) {
-        return false;
-    }
-    record[4] = coretx::storage::format_version + 1;
-    coretx::storage::detail::Writer checksum{std::span{record}.subspan(12, 4)};
-    checksum.word(coretx::storage::detail::record_crc(record));
+    auto record = cal::encode(calibrated.setup(), 3);
+    record[3] = '2';
+    coretx::storage::detail::Writer checksum{std::span{record}.last(4)};
+    checksum.word(coretx::storage::crc32(std::span{record}.first(cal::record_size - 4)));
     struct IoTestScenario {};
     using IoTest = PersistenceFixture<IoTestScenario>;
     IoTest::reset();
     auto &io = IoTest::registers;
-    std::copy(record.begin(), record.end(), io.memory.begin());
+    std::copy(record.begin(), record.end(), io.memory.begin() + cal_first);
     using Probe = IoTest::Probe;
     IoTest::Storage storage{};
     hw::Diagnostics diagnostics{};
     Probe::initialize();
     if (!run_persistence<Probe>(io, storage, diagnostics) ||
-        (storage.record_error() != coretx::storage::Error::version) || diagnostics.calibrated()) {
+        (storage.status() != hw::SettingsStatus::version) || diagnostics.calibrated()) {
         return false;
     }
     apply_calibration(diagnostics, storage);
     if (!diagnostics.calibrated() || (io.payload_writes != 0) || storage.busy() ||
-        (storage.state() != hw::CalibrationStorageState::invalid)) {
+        (storage.status() != hw::SettingsStatus::version)) {
         return false;
     }
-    for (std::uint8_t version = 1; version < coretx::storage::oldest_format_version; ++version) {
-        record[4] = version;
-        coretx::storage::detail::Writer old_checksum{std::span{record}.subspan(12, 4)};
-        old_checksum.word(coretx::storage::detail::record_crc(record));
-        struct ObsoleteTestScenario {};
-        using ObsoleteTest = PersistenceFixture<ObsoleteTestScenario>;
-        ObsoleteTest::reset();
-        auto &obsolete = ObsoleteTest::registers;
-        std::copy(record.begin(), record.end(), obsolete.memory.begin());
-        using ObsoleteProbe = ObsoleteTest::Probe;
-        ObsoleteTest::Storage obsolete_storage{};
-        hw::Diagnostics obsolete_diagnostics{};
-        ObsoleteProbe::initialize();
-        if (!run_persistence<ObsoleteProbe>(obsolete, obsolete_storage, obsolete_diagnostics) ||
-            (obsolete_storage.state() != hw::CalibrationStorageState::invalid) ||
-            obsolete_diagnostics.calibrated() || (obsolete.payload_writes != 0)) {
-            return false;
-        }
-        apply_calibration(obsolete_diagnostics, obsolete_storage, 600);
-        if (!run_persistence<ObsoleteProbe>(obsolete, obsolete_storage, obsolete_diagnostics) ||
-            (obsolete_storage.state() != hw::CalibrationStorageState::saved)) {
-            return false;
-        }
-        struct RecreatedTestScenario {};
-        using RecreatedTest = PersistenceFixture<RecreatedTestScenario>;
-        RecreatedTest::reset();
-        auto &recreated = RecreatedTest::registers;
-        recreated.memory = obsolete.memory;
-        using RecreatedProbe = RecreatedTest::Probe;
-        RecreatedTest::Storage recreated_storage{};
-        hw::Diagnostics recreated_diagnostics{};
-        RecreatedProbe::initialize();
-        if (!run_persistence<RecreatedProbe>(recreated, recreated_storage, recreated_diagnostics) ||
-            (recreated_storage.state() != hw::CalibrationStorageState::loaded) ||
-            !recreated_diagnostics.calibrated() ||
-            (recreated_diagnostics.setup().calibration[0].minimum != 600) ||
-            (recreated.payload_writes != 0)) {
-            return false;
-        }
-    }
-    // Existing factory/foreign data is not automatically overwritten, only an explicit
-    // successfully completed calibration may replace an unrecognized record.
+    // Unrecognized data, e.g. the former 1 KiB calibration record, is replaced only by an
+    // explicit, successfully completed calibration.
     struct FactoryTestScenario {};
     using FactoryTest = PersistenceFixture<FactoryTestScenario>;
     FactoryTest::reset();
@@ -2515,13 +2476,27 @@ bool persistence_format_protection() {
     hw::Diagnostics factory_diagnostics{};
     FactoryProbe::initialize();
     if (!run_persistence<FactoryProbe>(factory, factory_storage, factory_diagnostics) ||
-        (factory_storage.state() != hw::CalibrationStorageState::invalid) ||
+        (factory_storage.status() != hw::SettingsStatus::invalid) ||
         (factory.payload_writes != 0)) {
         return false;
     }
     apply_calibration(factory_diagnostics, factory_storage);
-    return run_persistence<FactoryProbe>(factory, factory_storage, factory_diagnostics) &&
-           (factory_storage.state() == hw::CalibrationStorageState::saved);
+    if (!run_persistence<FactoryProbe>(factory, factory_storage, factory_diagnostics) ||
+        (factory_storage.status() != hw::SettingsStatus::saved) ||
+        !outside_calibration(factory.memory, 0x5A))
+        return false;
+    struct RecreatedTestScenario {};
+    using RecreatedTest = PersistenceFixture<RecreatedTestScenario>;
+    RecreatedTest::reset();
+    auto &recreated = RecreatedTest::registers;
+    recreated.memory = factory.memory;
+    RecreatedTest::Storage recreated_storage{};
+    hw::Diagnostics recreated_diagnostics{};
+    RecreatedTest::Probe::initialize();
+    return run_persistence<RecreatedTest::Probe>(recreated, recreated_storage,
+                                                 recreated_diagnostics) &&
+           (recreated_storage.status() == hw::SettingsStatus::ready) &&
+           recreated_diagnostics.calibrated() && (recreated.payload_writes == 0);
 }
 
 bool cooperative_persistence() {
@@ -2549,8 +2524,7 @@ bool cooperative_persistence() {
         io.cell(reg::tim2_cnt) += 100;
         const auto now = io.now_us();
         Probe::service(coretx::TimestampUs{now});
-        storage.service(coretx::TimestampUs{now}, Probe::result(), diagnostics,
-                        calibration_workspace);
+        storage.service(coretx::TimestampUs{now}, Probe::result(), diagnostics);
         const auto event = Adc::service(coretx::TimestampUs{now});
         if ((event == hw::ScanEvent::failed) || (Display::service(display) != LcdError::none)) {
             return false;
@@ -2564,7 +2538,7 @@ bool cooperative_persistence() {
             applied = true;
         }
         if (applied && !storage.busy() && !Display::busy()) {
-            return (storage.state() == hw::CalibrationStorageState::saved) && (scans > 10) &&
+            return (storage.status() == hw::SettingsStatus::saved) && (scans > 10) &&
                    Adc::valid() && !io.lcd_timing_error && !io.page_crossed;
         }
     }
