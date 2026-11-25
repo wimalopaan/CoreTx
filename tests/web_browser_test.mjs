@@ -110,21 +110,40 @@ try {
                        .evaluateAll(buttons => buttons.map(button => Number(button.dataset.key))),
                    [ 1, 2, 5, 6 ]);
   assert.equal(await page.locator(".navigation [data-touch]").count(), 0);
-  await page.locator("#axis-0").fill("0");
+  assert.deepEqual(await page.locator("#analog-controls .axis-control").evaluateAll(rows =>
+    rows.filter(row => !row.hidden).map(row => row.querySelector("label").firstChild.textContent)),
+                   ["VRC", "VRD", "VRE", "VRF"]);
+  assert.deepEqual(await page.locator("#pots .pot-label").allTextContents(), ["VRA", "VRB"]);
+  assert.equal(await page.locator(".stick-edge .push-button").count(), 0,
+               "i6X SE/SF only appear when enabled in the input setup");
+  const knobLeft = index => page.locator(".stick-knob").nth(index).evaluate(knob => parseFloat(knob.style.left));
+  const right = await page.locator(".stick-pad").last().boundingBox();
+  await page.mouse.move(right.x + right.width / 2, right.y + right.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(right.x + right.width + 20, right.y + right.height / 2);
   await page.waitForFunction(() => document.querySelector(".channel-value").textContent === "+100.0%");
-  await page.locator("#axis-0").fill("2048");
-  await page.getByRole("checkbox", { name: "RH automatisch zentrieren", exact: true }).uncheck();
+  await page.mouse.up();
+  await page.waitForFunction(() => document.querySelector(".channel-value").textContent === "0.0%");
+  const vra = page.getByRole("slider", { name: "VRA Drehpoti", exact: true });
+  await vra.focus();
+  await page.keyboard.press("Shift+ArrowUp");
+  assert.equal(await vra.getAttribute("aria-valuenow"), "2560");
+  await vra.dblclick();
+  assert.equal(await vra.getAttribute("aria-valuenow"), "2048");
+  await page.getByRole("checkbox", { name: "LH automatisch zentrieren", exact: true }).uncheck();
 
   await page.locator(".stick-pad").first().scrollIntoViewIfNeeded();
   const stick = await page.locator(".stick-pad").first().boundingBox();
   await page.mouse.move(stick.x + stick.width / 2, stick.y + stick.height / 2);
   await page.mouse.down();
   await page.mouse.move(stick.x + stick.width - 3, stick.y + 3);
-  await page.waitForFunction(() => Number(document.querySelector("#axis-3").value) > 4000);
+  assert.ok(await knobLeft(0) > 97);
   await page.mouse.up();
-  await page.waitForFunction(() => document.querySelector("#axis-3").value === "2048");
+  assert.ok(await knobLeft(0) > 97, "Unchecked LH stays deflected");
+  await page.getByRole("checkbox", { name: "LH automatisch zentrieren", exact: true }).check();
+  assert.ok(Math.abs(await knobLeft(0) - 50) < 0.1, "Checking LH centering recenters the stick");
+  await page.getByRole("checkbox", { name: "RH automatisch zentrieren", exact: true }).uncheck();
 
-  await page.waitForFunction(storageKey => localStorage.getItem(storageKey) !== null, key + "i6x");
   const trim = page.getByRole("button", { name: "Trimmung RH erhoehen", exact: true });
   await trim.hover();
   await page.mouse.down();
@@ -132,6 +151,7 @@ try {
   await page.mouse.up();
   await page.waitForFunction(() => document.querySelector(".channel-value").textContent !== "0.0%");
   await page.waitForFunction(() => document.querySelector("#storage-status").textContent === "Browser-Stand gesichert");
+  await page.waitForFunction(storageKey => localStorage.getItem(storageKey) !== null, key + "i6x");
   const edited = await page.locator(".channel-value").first().textContent();
   const saved = await page.evaluate(storageKey => localStorage.getItem(storageKey), key + "i6x");
   await page.reload();
