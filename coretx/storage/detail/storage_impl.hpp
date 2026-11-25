@@ -384,9 +384,15 @@ constexpr bool transfer_model_lines(Archive &archive, ModelType &model,
 
 template <typename Archive, typename Snapshot>
 constexpr bool transfer_multiswitch(Archive &archive, Snapshot &model,
-                                    const bool packed_labels = false) noexcept {
+                                    const bool packed_labels = false,
+                                    const bool layouts = false) noexcept {
     for (auto &page : model.multiswitch) {
         auto address = static_cast<std::uint16_t>(page.address);
+        // Format 12: 9-bit address (256 = disabled), then two layout bits.
+        if constexpr (std::is_const_v<Snapshot>)
+            if (layouts)
+                address = static_cast<std::uint16_t>((page.address < 0 ? 256U : address) |
+                                                     (static_cast<unsigned>(page.layout) << 9));
         archive.field(address);
         archive.field(page.momentary);
         if (packed_labels) {
@@ -407,8 +413,18 @@ constexpr bool transfer_multiswitch(Archive &archive, Snapshot &model,
                     if constexpr (!std::is_const_v<Snapshot>)
                         character = static_cast<char>(byte);
                 }
-        if constexpr (!std::is_const_v<Snapshot>)
-            page.address = static_cast<std::int16_t>(address);
+        if constexpr (!std::is_const_v<Snapshot>) {
+            if (layouts) {
+                if ((address & 0xF800U) != 0 || (address & 0x1FFU) > 256U)
+                    archive.reject(archive.position - (packed_labels ? 45 : 51));
+                page.layout = static_cast<MultiSwitchLayout>((address >> 9) & 3U);
+                page.address =
+                    (address & 0x1FFU) == 256U ? -1 : static_cast<std::int16_t>(address & 0x1FFU);
+            } else {
+                page.layout = MultiSwitchLayout::rows2_columns4;
+                page.address = static_cast<std::int16_t>(address);
+            }
+        }
     }
     return archive.good;
 }
@@ -590,8 +606,8 @@ constexpr bool transfer_tank(Archive &archive, Snapshot &model, const bool enabl
 template <typename Archive, typename Snapshot>
 constexpr bool transfer(Archive &archive, Snapshot &state, const bool sound_options = true,
                         const bool curve_options = true, const bool tank_options = true,
-                        const bool third_motor = true,
-                        const bool multiswitch_switches = true) noexcept {
+                        const bool third_motor = true, const bool multiswitch_switches = true,
+                        const bool multiswitch_layouts = true) noexcept {
     if (!transfer_model_counts(archive, state.model))
         return false;
     for (auto &calibration : state.setup.calibration) {
@@ -605,7 +621,7 @@ constexpr bool transfer(Archive &archive, Snapshot &state, const bool sound_opti
     }
     return transfer_model_lines(archive, state.model, false, multiswitch_switches) &&
            transfer_model_extension(archive, state.model) &&
-           transfer_multiswitch(archive, state.model) &&
+           transfer_multiswitch(archive, state.model, false, multiswitch_layouts) &&
            transfer_dashboard_options(archive, state.model, sound_options) &&
            transfer_multiswitch_controls(archive, state.model) &&
            transfer_curves(archive, state.model, curve_options) &&
@@ -673,7 +689,7 @@ template <typename Snapshot>
     }
     Reader payload{record.subspan(header_size, length)};
     if (!transfer(payload, state, version >= 7, version >= 8, version >= 9, version >= 10,
-                  version >= 11)) {
+                  version >= 11, version >= 12)) {
         return {{Error::field, header_size + payload.error_offset}, 0};
     }
     if (payload.position != length) {

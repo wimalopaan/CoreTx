@@ -33,6 +33,7 @@ inline constexpr auto multiswitch_momentary = text<13>("Momentary");
 inline constexpr auto multiswitch_help = text<32>("OK: select  HOLD OK: menu");
 inline constexpr auto multiswitch_select_help = text<32>("UP/DN: pick OK: on BACK: exit");
 inline constexpr auto multiswitch_touch_help = text<32>("Tap / hold; swipe: page");
+inline constexpr auto multiswitch_layout = text<10>("Layout");
 inline constexpr auto menu_logical = text<21>("Logical switches");
 inline constexpr auto menu_function = text<21>("Function");
 inline constexpr auto menu_operand_a = text<21>("A / Set");

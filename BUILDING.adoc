@@ -67,9 +67,9 @@ Do not substitute these images for normal operation.
 == Model storage recovery and converter
 
 Before enabling RF, the main firmware checks the model directory and both banks
-of all eight model slots. The main firmware requires exactly the current format 11
+of all eight model slots. The main firmware requires exactly the current format 12
 in every valid model record, including inactive slots and older journal banks.
-The shared converter can still read native model formats 6 through 11.
+The shared converter can still read native model formats 6 through 12.
 Any different format version, unrecoverable model data, a missing required module or an
 unfinished conversion/reset blocks normal operation and all model writes.
 The LCD shows the reason and, when available, the stored/required versions:
@@ -103,12 +103,12 @@ with matching HEX/ELF/resource-report files. These are not operating firmware.
 * Back up the *external EEPROM*, not only internal flash.
 * Flash the converter matching the transmitter through <<dfu-update,ROM DFU>>.
 * Start normally (hold both front power buttons for 3 s on i6S). Inspect source
-  versions, target format 11 and model count. Release the controls, then confirm
+  versions, target format 12 and model count. Release the controls, then confirm
   with OK (i6X) or the left rear button (i6S); Cancel/right rear cancels.
 * Keep power stable until conversion and read-back verification finish.
 * Switch off, enter ROM DFU again and flash the matching normal firmware.
 
-The converter upgrades native CoreTX model formats 6/7/8/9/10 to 11, preserves model
+The converter upgrades native CoreTX model formats 6/7/8/9/10/11 to 12, preserves model
 names, receiver settings and active-model selection, and resumes interrupted
 conversion using the journal and migration marker. It does not import Flysky
 factory/EdgeTX EEPROMs, repair arbitrary corrupt data or downgrade future formats.

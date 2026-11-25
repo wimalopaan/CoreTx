@@ -151,6 +151,7 @@ bool codec() {
     for (std::size_t i = 0; i < data.model.multiswitch.size(); ++i) {
         auto &page = data.model.multiswitch[i];
         page.address = static_cast<std::int16_t>(i == 3 ? 255 : i);
+        page.layout = static_cast<coretx::MultiSwitchLayout>(i % 3);
         page.momentary = static_cast<std::uint8_t>(1U << i);
         for (std::size_t label = 0; label < page.labels.size(); ++label)
             for (std::size_t character = 0; character < page.labels[label].size(); ++character) {
@@ -178,6 +179,8 @@ bool codec() {
         restored.model.multiswitch_beep || (restored.model.curves[3].x != data.model.curves[3].x) ||
         (restored.model.curves[3].y != data.model.curves[3].y))
         return false;
+    for (auto &page : data.model.multiswitch)
+        page.layout = coretx::MultiSwitchLayout::rows2_columns4;
     for (std::size_t i = 0; i < data.model.inputs.size(); ++i)
         if (restored.model.inputs[i].curve != data.model.inputs[i].curve)
             return false;
@@ -601,6 +604,32 @@ bool multiswitch_menu_persistence() {
     if (!settle(store) || (store.data().model.multiswitch[3].address != 0) ||
         (diagnostics.dashboard_pages() != 3))
         return false;
+    for (unsigned i = 0; i < 9; ++i)
+        press(Key::down);
+    press(Key::ok);
+    press(Key::up);
+    press(Key::cancel);
+    if (store.data().model.multiswitch[3].layout != coretx::MultiSwitchLayout::rows2_columns4)
+        return false;
+    press(Key::ok);
+    press(Key::up);
+    press(Key::ok);
+    if (!settle(store) ||
+        (store.data().model.multiswitch[3].layout != coretx::MultiSwitchLayout::rows2_columns2))
+        return false;
+    press(Key::ok);
+    press(Key::up);
+    press(Key::ok);
+    if (!settle(store) ||
+        (store.data().model.multiswitch[3].layout != coretx::MultiSwitchLayout::rows1_columns2))
+        return false;
+    press(Key::ok);
+    press(Key::down);
+    press(Key::ok);
+    if (!settle(store))
+        return false;
+    for (unsigned i = 0; i < 9; ++i)
+        press(Key::up);
     press(Key::down);
     press(Key::ok); // Button 1.
     press(Key::ok); // Text.

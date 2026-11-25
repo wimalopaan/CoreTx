@@ -205,7 +205,8 @@ constexpr Status validate_logical(const Model &model) noexcept {
     }
     for (std::size_t i = 0; i < model.multiswitch.size(); ++i) {
         const auto &page = model.multiswitch[i];
-        if ((page.address < -1) || (page.address > 255))
+        if ((page.address < -1) || (page.address > 255) ||
+            (page.layout > MultiSwitchLayout::rows1_columns2))
             return {ErrorCode::multiswitch_settings, Stage::model, i};
         for (const auto &label : page.labels)
             for (const char character : label)
@@ -504,7 +505,7 @@ constexpr Status validate(const Model &model) noexcept {
                 (control.condition().index >= multiswitch_switch_base))
                 return {ErrorCode::multiswitch_settings, Stage::model,
                         page_index * multiswitch_function_count + i};
-            if (page.address < 0)
+            if ((page.address < 0) || (i >= multiswitch_buttons(page.layout)))
                 continue;
             const auto destination = static_cast<std::uint16_t>(
                 (static_cast<unsigned>(control.target_address(page.address))

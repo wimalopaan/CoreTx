@@ -16,8 +16,14 @@ class MultiSwitchTouch {
         *this = {};
         blocked_ = true;
     }
-    [[nodiscard]] constexpr Key service(const TimestampUs now, const i6s::TouchSample *sample,
-                                        const bool healthy, const std::uint8_t momentary) noexcept {
+    [[nodiscard]] constexpr Key
+    service(const TimestampUs now, const i6s::TouchSample *sample, const bool healthy,
+            const std::uint8_t momentary,
+            const MultiSwitchLayout layout = MultiSwitchLayout::rows2_columns4) noexcept {
+        if (layout_ != layout) {
+            reset();
+            layout_ = layout;
+        }
         tapped_ = none;
         const bool expired =
             active_ && ((now - last_packet_) >= i6s::TouchNavigation::release_timeout_us);
@@ -111,8 +117,8 @@ class MultiSwitchTouch {
 
   private:
     inline static constexpr std::uint8_t none = 0xFF;
-    [[nodiscard]] static constexpr std::uint8_t tile(const int x, const int y) noexcept {
-        const auto found = multiswitch_at(x, y);
+    [[nodiscard]] constexpr std::uint8_t tile(const int x, const int y) const noexcept {
+        const auto found = multiswitch_at(x, y, layout_);
         return found ? static_cast<std::uint8_t>(*found) : none;
     }
     [[nodiscard]] static constexpr std::optional<std::size_t>
@@ -123,6 +129,7 @@ class MultiSwitchTouch {
     i6s::TouchStroke stroke_{};
     std::uint8_t held_{none};
     std::uint8_t tapped_{none};
+    MultiSwitchLayout layout_{MultiSwitchLayout::rows2_columns4};
     bool active_{};
     bool blocked_{true};
     bool emitted_{};

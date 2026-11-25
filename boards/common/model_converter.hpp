@@ -8,7 +8,7 @@
 namespace coretx::firmware {
 
 // Updating the native format requires explicit converter/fixture review.
-inline constexpr std::uint8_t converter_target = 11;
+inline constexpr std::uint8_t converter_target = 12;
 static_assert(converter_target == storage::format_version,
               "Update the converter and its independent version fixtures");
 static_assert(storage::oldest_format_version == 6,

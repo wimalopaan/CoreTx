@@ -60,7 +60,10 @@ constexpr void reseal(store::Record &record) {
 }
 
 constexpr bool roundtrip() {
-    const auto original = fixture();
+    auto original = fixture();
+    for (std::size_t i = 0; i < original.model.multiswitch.size(); ++i)
+        original.model.multiswitch[i].layout = static_cast<coretx::MultiSwitchLayout>(i % 3);
+    original.model.multiswitch[2].address = -1;
     store::Record record{};
     if (!store::encode(original, 0x12345678, record) || (record[0] != 'R') || (record[1] != 'C') ||
         (record[2] != 'C') || (record[3] != 'S') || (record[4] != store::format_version) ||
@@ -110,7 +113,7 @@ constexpr bool malformed_fields(const std::size_t first = 0, const std::size_t l
         Mutation{16, 255, store::Error::field},   Mutation{20, 0, store::Error::setup},
         Mutation{66, 8, store::Error::setup},     Mutation{900, 0, store::Error::length},
         Mutation{418, 17, store::Error::model},   Mutation{426, 11, store::Error::field},
-        Mutation{428, 0xE0, store::Error::field}, Mutation{483, 1, store::Error::model},
+        Mutation{428, 0xE0, store::Error::field}, Mutation{483, 8, store::Error::field},
         Mutation{485, 1, store::Error::model}};
     for (auto i = first; i < last; ++i) {
         const auto &mutation = mutations[i];
@@ -359,7 +362,7 @@ constexpr bool sound_options() {
             state.model, state.setup};
         record.fill(0xFF);
         store::detail::Writer payload{std::span{record}.subspan(store::header_size)};
-        if (!store::detail::transfer(payload, old, true, false, false, false, false))
+        if (!store::detail::transfer(payload, old, true, false, false, false, false, false))
             return false;
         store::detail::Writer header{std::span{record}.first(store::header_size)};
         header.word(store::detail::magic);
@@ -417,7 +420,7 @@ constexpr bool curve_storage() {
         const store::detail::StateView<const coretx::Model, const coretx::ControlSetup> old{
             original.model, original.setup};
         if (!store::detail::transfer(payload, old, version >= 7, version >= 8, version >= 9,
-                                     version >= 10, false))
+                                     version >= 10, version >= 11, false))
             return false;
         store::detail::Writer header{std::span{record}.first(store::header_size)};
         header.word(store::detail::magic);
@@ -507,7 +510,8 @@ constexpr bool tank_storage() {
         const store::detail::StateView<const coretx::Model, const coretx::ControlSetup> old{
             original.model, original.setup};
         store::detail::Writer payload{std::span{old_record}.subspan(store::header_size)};
-        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, false, false, false))
+        if (!store::detail::transfer(payload, old, version >= 7, version >= 8, false, false, false,
+                                     false))
             return false;
         store::detail::Writer header{std::span{old_record}.first(store::header_size)};
         header.word(store::detail::magic);

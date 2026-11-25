@@ -287,10 +287,19 @@ struct MultiSwitchControl {
     }
 };
 
+enum class MultiSwitchLayout : std::uint8_t { rows2_columns4, rows2_columns2, rows1_columns2 };
+
+[[nodiscard]] constexpr std::size_t multiswitch_buttons(const MultiSwitchLayout layout) noexcept {
+    return layout == MultiSwitchLayout::rows2_columns4   ? 8
+           : layout == MultiSwitchLayout::rows2_columns2 ? 4
+                                                         : 2;
+}
+
 struct MultiSwitchPage {
     // -1 disables a page; 0..255 address the SET4 module.
     std::int16_t address{-1};
     std::uint8_t momentary{};
+    MultiSwitchLayout layout{MultiSwitchLayout::rows2_columns4};
     std::array<std::array<char, 6>, multiswitch_function_count> labels{};
     std::array<MultiSwitchControl, multiswitch_function_count> controls{};
     constexpr MultiSwitchPage() noexcept {

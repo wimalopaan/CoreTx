@@ -7,7 +7,7 @@ Back up the original firmware and external EEPROM separately.
 Neutral channel output is not a guaranteed motor-off failsafe.
 
 Experimental firmware for the *Flysky FS-i6X and FS-i6S*, based on the STM32F072
-with 128 KiB flash and 16 KiB RAM. Current source firmware version: *8*
+with 128 KiB flash and 16 KiB RAM. Current source firmware version: *9*
 (`coretx/version.hpp`).
 
 == Goals
@@ -76,10 +76,12 @@ Simulation runs locally in the browser; model data is not uploaded.
 * *External CRSF:* bidirectional UART for channel output, telemetry and module
   configuration. Only one RF path is active at a time.
 * *MultiSwitch:* CRSF dashboards and SET4 commands for compatible receivers/modules.
-  The 32 button states of enabled pages are also available as switches
+  Each page has a selectable 2x4 (default), 2x2 or 1x2 layout (rows x columns).
+  Hidden buttons are disabled but retain their settings for later use.
+  The button states of enabled pages are also available as switches
   M11..M48 (page, button) for conditions, logical switches and as input/mixer
   sources, even with the internal RF module. They start off after power-up or
-  model change and are not saved. Models saved in format 11 cannot be read by
+  model change and are not saved. Models saved in format 12 cannot be read by
   older firmware.
 * *Switch conditions:* switch, position and negation are one choice as in
   EdgeTX, e.g. `SA^`, `SB3`, `L1`, `M23`; negated choices such as `!SA^`,

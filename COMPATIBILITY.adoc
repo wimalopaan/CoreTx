@@ -98,7 +98,7 @@ input/mixer/output arithmetic rather than these board-specific decoders.
   the captured EdgeTX pipeline comparisons.
 * MultiSwitch button states form 32 additional two-position switches M11..M48
   (page, button) for conditions, logical switches and sources (on = +1024,
-  off = -1024). Only enabled pages are available; unavailable M switches never
+  off = -1024). Only visible buttons on enabled pages are available; unavailable M switches never
   match and evaluate to zero. States start off and are not persisted. Button
   conditions cannot use M switches, even indirectly through logical switches.
 * The tank mixer owns six normal mixer lines on two exclusively reserved

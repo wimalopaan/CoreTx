@@ -78,7 +78,8 @@ template <typename Touch, typename SetupControls = NoSetupControls> class TouchI
                 state_.navigation.reset();
             }
             if (context.active) {
-                const auto key = state_.multiswitch.service(now, sample, ready, context.momentary);
+                const auto key = state_.multiswitch.service(now, sample, ready, context.momentary,
+                                                            context.layout);
                 return physical_key != Key::none ? physical_key : key;
             }
         }

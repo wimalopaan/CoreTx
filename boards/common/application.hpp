@@ -391,6 +391,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             if (const auto slot = multiswitch_slot()) {
                 context.active = true;
                 context.momentary = diagnostics_.model().multiswitch[*slot].momentary;
+                context.layout = diagnostics_.model().multiswitch[*slot].layout;
             }
         }
         context.taps = !context.active && (crsf_dashboard_page() || menu_.visible());
@@ -550,9 +551,11 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
             }
         }
         if constexpr (has_multiswitch) {
-            if (multiswitch_slot() && !Input::touch &&
-                crsf_.multiswitch.handle(key, multiswitch_operable(), radio_message_))
-                return;
+            if (const auto slot = multiswitch_slot(); slot && !Input::touch)
+                if (crsf_.multiswitch.handle(
+                        key, multiswitch_operable(), radio_message_,
+                        multiswitch_buttons(diagnostics_.model().multiswitch[*slot].layout)))
+                    return;
         }
         if ((key == Key::ok_long) && !menu_.visible() &&
             (diagnostics_.phase() == CalibrationPhase::idle)) {
@@ -952,7 +955,7 @@ template <typename Board, typename Input = PhysicalInput<typename Board::Keys>> 
         render_multiswitch(page, slot, state.pages.switches(slot), state.selection(), framebuffer_,
                            Input::touch && operable);
         if (const auto pressed = input_.pressed_switch(); pressed && operable)
-            highlight_multiswitch(*pressed, framebuffer_);
+            highlight_multiswitch(page.layout, *pressed, framebuffer_);
         framebuffer_.small_text(0, 52, model.name);
         const auto input_error = input_notice();
         const auto message = radio_notice();

@@ -200,6 +200,72 @@ constexpr bool changes_precede_repeats() {
     return pages.due(TimestampUs{100'000}) == 0;
 }
 
+constexpr bool layout_behavior() {
+    using coretx::MultiSwitchLayout;
+    coretx::Model model{};
+    auto &page = model.multiswitch[0];
+    page.address = 42;
+    page.controls[7].set_address(99);
+    page.controls[7].set_condition({true, 0, coretx::SwitchPosition::down});
+    coretx::Controls controls{};
+    controls.active_switches = 1;
+    controls.switches[0] = coretx::SwitchPosition::down;
+    ms::Pages pages{};
+    pages.configure(model);
+    pages.update(0, std::nullopt, 3, &controls);
+    while (const auto due = pages.due(TimestampUs{1}))
+        pages.sent(*due, TimestampUs{1});
+    if (pages.switches(0) != 0x88)
+        return false;
+    page.layout = MultiSwitchLayout::rows1_columns2;
+    pages.configure(model);
+    pages.update(0, 7, 7, &controls);
+    if (pages.switches(0) != 0 || pages.available() != 3)
+        return false;
+    bool off42{}, off99{};
+    while (const auto due = pages.due(TimestampUs{2})) {
+        off42 = off42 || pages.frame(*due) == ms::encode(42, 0);
+        off99 = off99 || pages.frame(*due) == ms::encode(99, 0);
+        pages.sent(*due, TimestampUs{2});
+    }
+    if (!off42 || !off99)
+        return false;
+    page.layout = MultiSwitchLayout::rows2_columns4;
+    pages.configure(model);
+    pages.update(std::nullopt, std::nullopt, std::nullopt, &controls);
+    if (pages.switches(0) != 0x80)
+        return false;
+    for (const auto layout :
+         {MultiSwitchLayout::rows2_columns2, MultiSwitchLayout::rows1_columns2}) {
+        page.layout = layout;
+        coretx::ui::Framebuffer display{};
+        fw::render_multiswitch(page, 0, 0, std::nullopt, display);
+        fw::MultiSwitchTouch touch{};
+        fw::i6s::TouchSample sample{};
+        (void)touch.service(TimestampUs{0}, &sample, true, 0, layout);
+        for (std::size_t i = 0; i < coretx::multiswitch_buttons(layout); ++i) {
+            const auto rect = fw::multiswitch_rect(layout, i);
+            if (!display.pixel_at(rect.left, rect.top) ||
+                !display.pixel_at(rect.left + rect.width - 1, rect.top + rect.height - 1))
+                return false;
+            sample.x = static_cast<std::uint8_t>(rect.left + rect.width - 1);
+            sample.y = static_cast<std::uint8_t>(rect.top + rect.height - 1);
+            sample.contacts = 1;
+            (void)touch.service(TimestampUs{10}, &sample, true, 0, layout);
+            if (touch.pressed() != i)
+                return false;
+            sample.contacts = 0;
+            (void)touch.service(TimestampUs{20}, &sample, true, 0, layout);
+            if (touch.tapped() != i)
+                return false;
+        }
+        if (fw::multiswitch_at(63, 14, layout) || fw::multiswitch_at(2, 49, layout))
+            return false;
+    }
+    return true;
+}
+static_assert(layout_behavior());
+
 constexpr bool touch_buttons() {
     fw::MultiSwitchTouch navigation{};
     fw::i6s::TouchSample sample{};

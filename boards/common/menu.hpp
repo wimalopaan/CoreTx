@@ -332,7 +332,8 @@ class Menu {
                     move_selection(key, row_count());
                     return {};
                 }
-                if ((screen_ == MenuScreen::multiswitch_page) && (selected_ != 0)) {
+                if ((screen_ == MenuScreen::multiswitch_page) && (selected_ > 0) &&
+                    (selected_ <= multiswitch_function_count)) {
                     multiswitch_button_ = static_cast<std::uint8_t>(selected_ - 1);
                     screen_ = MenuScreen::multiswitch_button;
                     selected_ = 0;
@@ -341,7 +342,7 @@ class Menu {
                 editing_ = true;
                 multiswitch_control_ = page.controls[multiswitch_button_];
                 if (screen_ == MenuScreen::multiswitch_page)
-                    draft_value_ = page.address;
+                    draft_value_ = selected_ == 0 ? page.address : static_cast<int>(page.layout);
                 else if (selected_ == 0) {
                     multiswitch_label_ = page.labels[multiswitch_button_];
                     multiswitch_cursor_ = 0;
@@ -376,10 +377,14 @@ class Menu {
                     draft_value_ =
                         menu_detail::change_condition(draft_value_, direction, diagnostics);
                 } else {
+                    const bool layout =
+                        (screen_ == MenuScreen::multiswitch_page) && (selected_ != 0);
                     const bool address =
-                        (screen_ == MenuScreen::multiswitch_page) || (selected_ == 3);
+                        ((screen_ == MenuScreen::multiswitch_page) && !layout) ||
+                        ((screen_ == MenuScreen::multiswitch_button) && (selected_ == 3));
                     draft_value_ = std::clamp(draft_value_ + direction, address ? -1 : 0,
                                               address          ? 255
+                                              : layout         ? 2
                                               : selected_ == 2 ? 7
                                                                : 1);
                 }
@@ -389,9 +394,12 @@ class Menu {
                 const auto old = page;
                 if (text)
                     page.labels[multiswitch_button_] = multiswitch_label_;
-                else if (screen_ == MenuScreen::multiswitch_page)
-                    page.address = static_cast<std::int16_t>(draft_value_);
-                else if (selected_ == 1) {
+                else if (screen_ == MenuScreen::multiswitch_page) {
+                    if (selected_ == 0)
+                        page.address = static_cast<std::int16_t>(draft_value_);
+                    else
+                        page.layout = static_cast<MultiSwitchLayout>(draft_value_);
+                } else if (selected_ == 1) {
                     const auto bit = static_cast<std::uint8_t>(1U << multiswitch_button_);
                     page.momentary = static_cast<std::uint8_t>((page.momentary & ~bit) |
                                                                (draft_value_ != 0 ? bit : 0U));
@@ -1051,6 +1059,13 @@ class Menu {
                                  y, tr::radio_off, ink);
                 else
                     display.number(127, y, address, ink);
+            } else if ((screen_ == MenuScreen::multiswitch_page) &&
+                       (i == multiswitch_function_count + 1)) {
+                display.text(1, y, tr::multiswitch_layout, ink);
+                const auto layout =
+                    editing_ && selected_ == i ? draft_value_ : static_cast<int>(page.layout);
+                const std::string_view text = layout == 0 ? "2x4" : layout == 1 ? "2x2" : "1x2";
+                display.text(128 - static_cast<int>(text.size()) * 6, y, text, ink);
             } else if (screen_ == MenuScreen::multiswitch_page) {
                 const auto &control = page.controls[i - 1];
                 const int address = control.target_address(page.address);
@@ -1226,7 +1241,7 @@ class Menu {
                : screen_ == MenuScreen::curves ? curve_count
                : screen_ == MenuScreen::trims  ? board::trim_buttons ? (trim_count * 2) : trim_count
                : screen_ == MenuScreen::multiswitch        ? multiswitch_page_count + 1
-               : screen_ == MenuScreen::multiswitch_page   ? 9
+               : screen_ == MenuScreen::multiswitch_page   ? multiswitch_function_count + 2
                : screen_ == MenuScreen::multiswitch_button ? 5
                : (screen_ == MenuScreen::dashboard_channels) ||
                        (screen_ == MenuScreen::logical_switches)

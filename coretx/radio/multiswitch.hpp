@@ -57,7 +57,8 @@ using Frame = std::array<std::uint8_t, set4::frame_size>;
     std::uint32_t result{};
     for (std::size_t i = 0; i < model.multiswitch.size(); ++i)
         if (enabled(model.multiswitch[i]))
-            result |= std::uint32_t{0xFF} << (i * switch_count);
+            result |= ((std::uint32_t{1} << multiswitch_buttons(model.multiswitch[i].layout)) - 1U)
+                      << (i * switch_count);
     return result;
 }
 
@@ -121,6 +122,10 @@ class Pages {
             const auto changed = static_cast<std::uint8_t>(momentary_[i] ^ page.momentary);
             manual_[i] &= static_cast<std::uint8_t>(~changed);
             states_[i] &= static_cast<std::uint8_t>(~changed);
+            const auto mask =
+                static_cast<std::uint8_t>((1U << multiswitch_buttons(page.layout)) - 1U);
+            manual_[i] &= mask;
+            states_[i] &= mask;
             momentary_[i] = page.momentary;
         }
         refresh_groups();
@@ -136,15 +141,16 @@ class Pages {
         bool changed{};
         for (std::size_t i = 0; i < states_.size(); ++i) {
             const auto &page = model_->multiswitch[i];
+            const auto count = multiswitch_buttons(page.layout);
             auto value = static_cast<std::uint8_t>(manual_[i] & ~page.momentary);
             if ((active == i) && enabled(page)) {
-                if (held && (*held < switch_count))
+                if (held && (*held < count))
                     value |= static_cast<std::uint8_t>((1U << *held) & page.momentary);
-                if (tapped && (*tapped < switch_count) && ((page.momentary & (1U << *tapped)) == 0))
+                if (tapped && (*tapped < count) && ((page.momentary & (1U << *tapped)) == 0))
                     value ^= static_cast<std::uint8_t>(1U << *tapped);
             }
             manual_[i] = value;
-            for (std::size_t button = 0; button < page.controls.size(); ++button) {
+            for (std::size_t button = 0; button < count; ++button) {
                 const auto condition = page.controls[button].condition();
                 if (!condition.enabled)
                     continue;
@@ -229,7 +235,7 @@ class Pages {
             const auto &page = model_->multiswitch[page_index];
             if (!enabled(page))
                 continue;
-            for (std::size_t button = 0; button < page.controls.size(); ++button) {
+            for (std::size_t button = 0; button < multiswitch_buttons(page.layout); ++button) {
                 const auto &control = page.controls[button];
                 const auto address =
                     static_cast<std::uint8_t>(control.target_address(page.address));

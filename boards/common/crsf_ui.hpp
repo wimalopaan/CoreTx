@@ -19,14 +19,14 @@ struct MultiSwitchState {
     bool select{};
 
     // Key selection of a tile without touch: ok enters selection, up/down move, ok toggles.
-    constexpr bool handle(const Key key, const bool operable, const char *&message) noexcept {
+    constexpr bool handle(const Key key, const bool operable, const char *&message,
+                          const std::size_t count = coretx::multiswitch::switch_count) noexcept {
         if (select) {
             if ((key == Key::cancel) || (key == Key::cancel_long))
                 select = false;
             else if ((key == Key::up) || (key == Key::down))
                 selected = static_cast<std::uint8_t>(
-                    (selected + (key == Key::down ? 1U : coretx::multiswitch::switch_count - 1U)) %
-                    coretx::multiswitch::switch_count);
+                    (selected + (key == Key::down ? 1U : count - 1U)) % count);
             else if ((key == Key::ok) && operable)
                 tapped = selected;
             return true;

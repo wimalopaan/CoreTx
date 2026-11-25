@@ -8,7 +8,7 @@ namespace {
 namespace fw = coretx::firmware;
 namespace md = fw::models;
 constexpr coretx::afhds2a::TxId tx{0x12345678};
-constexpr auto fixture_versions = std::to_array<std::uint8_t>({6, 7, 8, 9, 10});
+constexpr auto fixture_versions = std::to_array<std::uint8_t>({6, 7, 8, 9, 10, 11});
 static_assert(fixture_versions.front() == coretx::storage::oldest_format_version);
 static_assert(fixture_versions.back() + 1 == fw::converter_target &&
                   fixture_versions.size() ==
@@ -60,9 +60,11 @@ md::Record fixture(std::uint8_t version, std::uint8_t slot = 0, std::uint32_t ge
     constexpr std::array<std::uint8_t, 7> old_input{0x40, 0x04, 0x42, 0xDC, 0x48, 0x3C, 0x02};
     constexpr std::array<std::uint8_t, 7> curve_input{0x40, 0x04, 0x42, 0xDC, 0x48, 0x3C, 0x1A};
     constexpr std::array<std::uint8_t, 6> mixer{0x13, 0x00, 0x04, 0xCF, 0xF2, 0x2A};
-    for (const auto byte : version >= 8 ? curve_input : old_input)
+    constexpr std::array<std::uint8_t, 7> v11_input{0x10, 0x14, 0x40, 0xDC, 0x48, 0x3C, 0x1A};
+    constexpr std::array<std::uint8_t, 6> v11_mixer{0x03, 0x21, 0x00, 0xCF, 0xF2, 0x2A};
+    for (const auto byte : version >= 11 ? v11_input : version >= 8 ? curve_input : old_input)
         r[p++] = byte;
-    for (const auto byte : mixer)
+    for (const auto byte : version >= 11 ? v11_mixer : mixer)
         r[p++] = byte;
     for (unsigned i = 0; i < 16; ++i)
         for (auto byte : {0xF4, 0x41, 0x9C, 0xE8, 0x03})
@@ -138,7 +140,8 @@ struct Memory {
                         marker.begin());
             fw::model_migration::Info info{};
             CHECK(fw::model_migration::decode(marker, info) == fw::model_migration::Status::valid);
-            CHECK(info.kind == fw::model_migration::Kind::conversion && info.target == 11);
+            CHECK(info.kind == fw::model_migration::Kind::conversion &&
+                  info.target == fw::converter_target);
         }
         ++writes;
         if (cut && writes == cut) {
@@ -207,7 +210,7 @@ void converted(const std::array<std::uint8_t, 16384> &original) {
         md::Data data{md::empty_model};
         md::Info info{};
         CHECK(md::decode(r, slot, tx, data, info) == 1);
-        CHECK(r[4] == 11 && info.present == (slot != 2));
+        CHECK(r[4] == fw::converter_target && info.present == (slot != 2));
         CHECK(info.generation == (slot == 0 ? 11U : slot == 1 ? 0U : 2U));
         CHECK(data.radio.receiver.value == 0x87654321 && data.radio.transmitter == tx);
         CHECK(data.radio.output == fw::RadioOutput::internal && data.baud_index == 1);
@@ -376,7 +379,7 @@ void newest_wrap() {
     md::Data data{md::empty_model};
     md::Info info{};
     CHECK(md::decode(actual, 0, tx, data, info) == 1);
-    CHECK(actual[4] == 11 && info.generation == 2 && data.name[0] == 'N');
+    CHECK(actual[4] == fw::converter_target && info.generation == 2 && data.name[0] == 'N');
     CHECK(!data.model.multiswitch_beep);
 }
 void marker_prefix_repairs() {
@@ -459,6 +462,8 @@ void fixture_contract() {
         CHECK(md::decode(record, 0, tx, data, info) == 1);
         CHECK(record[4] == version && info.generation == 10);
         fixture_lines(data, version);
+        for (const auto &page : data.model.multiswitch)
+            CHECK(page.layout == coretx::MultiSwitchLayout::rows2_columns4);
         CHECK(!data.model.tank.third_motor && data.model.tank.third_curve == 0);
         CHECK(data.model.tank.reverse_steering == (version < 9));
         Memory::reset();
@@ -471,9 +476,11 @@ void fixture_contract() {
         md::Record converted_record{};
         std::copy_n(Memory::bytes.begin() + md::base + md::record_size, converted_record.size(),
                     converted_record.begin());
-        CHECK(converted_record[4] == 11);
+        CHECK(converted_record[4] == fw::converter_target);
         CHECK(md::decode(converted_record, 0, tx, data, info) == 1 && info.generation == 11);
         fixture_lines(data, version);
+        for (const auto &page : data.model.multiswitch)
+            CHECK(page.layout == coretx::MultiSwitchLayout::rows2_columns4);
         CHECK(!data.model.tank.third_motor && data.model.tank.third_curve == 0);
         CHECK(data.model.tank.reverse_steering == (version < 9));
     }

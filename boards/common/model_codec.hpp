@@ -133,7 +133,7 @@ constexpr bool encode(const Data &data, const std::size_t index, const bool pres
     if (!coretx::storage::detail::transfer_model_counts(out, data.model) ||
         !coretx::storage::detail::transfer_model_lines(out, data.model, true) ||
         !coretx::storage::detail::transfer_model_extension(out, data.model) ||
-        !coretx::storage::detail::transfer_multiswitch(out, data.model, true) ||
+        !coretx::storage::detail::transfer_multiswitch(out, data.model, true, true) ||
         !coretx::storage::detail::transfer_dashboard_options(out, data.model) ||
         !coretx::storage::detail::transfer_multiswitch_controls(out, data.model) ||
         !models::transfer_curves(out, data.model, true) ||
@@ -184,7 +184,8 @@ constexpr int decode(const Record &record, const std::size_t index, const afhds2
         !coretx::storage::detail::transfer_model_lines(in, data.model, version >= 8,
                                                        version >= 11) ||
         !coretx::storage::detail::transfer_model_extension(in, data.model) ||
-        !coretx::storage::detail::transfer_multiswitch(in, data.model, version >= 8) ||
+        !coretx::storage::detail::transfer_multiswitch(in, data.model, version >= 8,
+                                                       version >= 12) ||
         !coretx::storage::detail::transfer_dashboard_options(in, data.model, version >= 7) ||
         !coretx::storage::detail::transfer_multiswitch_controls(in, data.model) ||
         !models::transfer_curves(in, data.model, version >= 8) ||
